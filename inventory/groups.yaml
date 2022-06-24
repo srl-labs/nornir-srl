@@ -1,0 +1,37 @@
+global:
+    data:
+        domain: clab
+
+srl:
+    connection_options:
+        gnmi:
+            port: 57400
+            username: admin
+            password: admin
+            extras:
+                path_cert: "clab-4l2s/ca/root/root-ca.pem"
+pod1:
+    data:
+        domain: pod1.clab
+
+spines:
+    groups: [ pod1, global ]
+    data:
+        role: spine
+        type: ixr-d3
+
+leafs:
+    groups: [pod1, global ]
+    data:
+        role: leaf
+        type: ixr-d2
+_types:
+    data:
+        ixr-d2:
+            ports:
+                sfp28: 48
+                qsfp28: 8
+        ixr_d3:
+            ports:
+                qsfp28: 32
+

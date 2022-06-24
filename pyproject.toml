@@ -1,0 +1,25 @@
+[tool.poetry]
+name = "nornir_srl"
+version = "0.1.0"
+description = ""
+authors = ["Your Name <you@example.com>"]
+
+[tool.poetry.dependencies]
+python = "^3.8"
+nornir = "^3.3.0"
+nornir-utils = "^0.2.0"
+pygnmi = "^0.6.9"
+nornir-jinja2 = "^0.2.0"
+nornir-scrapli = "^2022.1.30"
+
+[tool.poetry.plugins."nornir.plugins.connections"]
+"gnmi" = "nornir_srl.connections:gNMI"
+
+[tool.poetry.dev-dependencies]
+pytest = "^5.2"
+notebook = "^6.4.11"
+bpython = "^0.22.1"
+
+[build-system]
+requires = ["poetry-core>=1.0.0"]
+build-backend = "poetry.core.masonry.api"
