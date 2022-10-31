@@ -5,6 +5,8 @@ clab-4l2s-l1:
     password: admin
     port: 57400
     platform: ixr-d2
+    data:
+        side: A
 
 clab-4l2s-l2:
     hostname: clab-4l2s-l2
@@ -13,3 +15,45 @@ clab-4l2s-l2:
     password: admin
     port: 57400
     platform: ixr-d2
+    data:
+        side: B
+        
+clab-4l2s-l3:
+    hostname: clab-4l2s-l3
+    groups: [srl, leafs]
+    username: admin
+    password: admin
+    port: 57400
+    platform: ixr-d2
+    data:
+        side: A
+        
+clab-4l2s-l4:
+    hostname: clab-4l2s-l4
+    groups: [srl, leafs]
+    username: admin
+    password: admin
+    port: 57400
+    platform: ixr-d2
+    data:
+        side: B
+
+clab-4l2s-s1:
+    hostname: clab-4l2s-s1
+    groups: [srl, spines]
+    username: admin
+    password: admin
+    port: 57400
+    platform: ixr-d2
+    data:
+        side: A
+
+clab-4l2s-s2:
+    hostname: clab-4l2s-s2
+    groups: [srl, spines]
+    username: admin
+    password: admin
+    port: 57400
+    platform: ixr-d2
+    data:
+        side: B

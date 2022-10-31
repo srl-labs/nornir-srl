@@ -1,0 +1,26 @@
+metadata:
+  groups: ['srl']
+
+routing_policy:
+  prefix_set:
+    - name: super-spines-loopbacks
+      prefix: 30.0.0.0/8
+      mask_length_range: 8..32
+    - name: spines-loopbacks
+      prefix: 20.0.0.0/8
+      mask_length_range: 8..32
+    - name: leaves-loopbacks
+      prefix: 10.0.0.0/8
+      mask_length_range: 8..32
+  policy:
+    - name: "export-loopbacks"
+      statement:
+      - sequence_id: 1
+        match:
+          prefix_set: super-spines-loopbacks
+      - sequence_id: 2
+        match:
+          prefix_set: spines-loopbacks
+      - sequence_id: 3
+        match:
+          prefix_set: leaves-loopbacks

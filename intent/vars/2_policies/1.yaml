@@ -1,0 +1,9 @@
+metadata:
+  labels:
+    side: A
+
+routing_policy:
+  prefix_set:
+    - name: for-side-a
+      prefix: 30.0.0.0/8
+      mask_length_range: 8..32

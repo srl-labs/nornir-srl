@@ -1,0 +1,11 @@
+metadata:
+  groups:
+    - leafs
+
+network_instance:
+- name: default
+  admin_state: enable
+  interfaces:
+  - ethernet-1/48.0
+  - ethernet-1/49.0
+  - system0.0
