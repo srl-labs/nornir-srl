@@ -1,5 +1,6 @@
 from typing import Any, List, Dict, Optional
 from pathlib import Path
+import json
 import logging
 
 from natsort import natsorted
@@ -14,10 +15,13 @@ from nornir_srl.connections.srlinux import CONNECTION_NAME
 def configure_device(
     task: Task, 
     intent_path: str, 
+    state_path: str,
     dry_run: Optional[bool] = None,
-    **kwargs: Any) -> Result:
+    **kwargs: Any
+    ) -> Result:
+
     r = task.run(
-        name="load intent vars", 
+        name=f"Load vars from {intent_path}", 
         severity_level=logging.DEBUG,
         task=load_vars, 
         path=intent_path 
@@ -28,40 +32,95 @@ def configure_device(
         name="Render templates",
         severity_level=logging.DEBUG,
         task=render_template,
-        path = "intent/templates",
+        base_path = intent_path,
         **vars
     )
 
-    op = 'replace'
-    for i, data in enumerate(r.result):
+    r = task.run(
+        name="Load YAML from template",
+        severity_level=logging.DEBUG,
+        task=load_yaml,
+        doc=r.result
+    )
+    device_intent = r.result
+
+    set_mode = 'replace'
+    for data in device_intent:
         if isinstance(data, list):
             r = task.run(
-                name=f"DRY-RUN:{dry_run} {op}:{[list(rsc.keys())[0] for rsc in data]} to device",
+                name=f"DRY-RUN:{dry_run} {set_mode}:{[list(rsc.keys())[0] for rsc in data]} to device",
                 severity_level=logging.INFO,
                 task=set_config,
                 device_config=data,
-                op=op,
+                op=set_mode,
                 dry_run=dry_run or task.is_dry_run(override=False),
             )
+    
+    r = task.run(
+        name = "Check for purged resources",
+        severity_level = logging.WARN,
+        task=purge_resources,
+        device_intent = device_intent,
+        state_base_path = state_path,
+        dry_run = dry_run,
+    )
 
+def purge_resources(
+    task: Task, 
+    device_intent: List[Dict[str, Any]], 
+    state_base_path: str,
+    dry_run: Optional[bool] = None,
+    ) -> Result:
+    
+    new_rsc = dict()
+    for l1 in device_intent:
+        for l2 in l1:
+            new_rsc.update(l2)
+    
+    state_file = Path(state_base_path) / f"{task.host.hostname}.json"
+    if state_file.exists():
+        with state_file.open(mode='r') as f:
+            state = json.load(f)
+        purged = { k:v for k,v in state.items() if k not in new_rsc }
+    else:
+        purged = {}
+    if dry_run:
+        changed = False
+    else:
+        if len(purged) > 0:
+            device = task.host.get_connection(CONNECTION_NAME, task.nornir.config)
+            purge_config = [ {r: purged[r]} for r in purged.keys()]
+            r = device.set_config(input=purge_config, op='delete', dry_run=dry_run)
+            purged = r
+            changed = True
+        else:
+            changed = False
+        state_file.open('w').write(json.dumps(new_rsc))
 
-def render_template(task: Task, path: str, **kwargs: Any) -> Result:
-    env = Environment(loader=FileSystemLoader(path), 
+    return Result(host=task.host, result=purged, changed=changed)
+
+def render_template(task: Task, base_path: str, **kwargs: Any) -> Result:
+
+    p = Path(base_path) / "templates"
+    env = Environment(loader=FileSystemLoader(str(p)), 
             undefined=StrictUndefined, trim_blocks=True,
             lstrip_blocks=True,
     )
-    p = Path(path)
     txt = ""
-    for file in p.glob("**/*.j2"):
+    for file in p.glob("*.j2"):
         txt += "---\n"
         tpl = env.get_template(str(file.parts[-1]))
         txt += tpl.render(host=task.host, **kwargs)
 
+    return Result(host=task.host, result=txt)
+
+def load_yaml(task: Task, doc: str) -> Any:
+    
     yml = YAML(typ="safe")
-    r = yml.load_all(txt)
+    result = yml.load_all(doc)
 
-    return Result(host=task.host, result=list(r))
-
+    return Result(host=task.host, result=list(result))
+        
 def load_vars(task: Task, path: str, **kwargs: Any) -> Result:
 
     intent = dict()
@@ -120,4 +179,3 @@ def _merge(a, b):
                 pass  # a always wins
         else:
             a[key] = b[key]
-

@@ -97,10 +97,23 @@ def filter_fields(d: Dict, *fields: str) -> Dict:
             if k in [ f.replace('_', '-') for f in fields]
     }
 
+
 def strip_modules(d: Dict) -> Dict:
     stripped = { k.split(':')[-1]:v for k, v in d.items() }
     for k, v in stripped.items():
         if isinstance(v, dict):
-            v = strip_modules(v)
+            stripped[k] = strip_modules(v)
+        elif isinstance(v, list):
+            stripped[k] = [strip_modules(d) for d in v if isinstance(d, dict)]
+        else:
+            pass
+    return stripped
+
+
+def _strip_modules(d: Dict) -> Dict:
+    stripped = { k.split(':')[-1]:v for k, v in d.items() }
+    for k, v in stripped.items():
+        if isinstance(v, dict):
+            stripped[k] = strip_modules(v)
     return stripped
 

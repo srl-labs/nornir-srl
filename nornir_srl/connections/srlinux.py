@@ -135,6 +135,7 @@ class SrLinux:
             input: List[Dict[str, Any]], 
             op: Optional[str] = 'update',
             dry_run: Optional[bool] = False,
+            strip_mod: Optional[bool] = True,
             ) -> str:
 
         device_cfg_after = []
@@ -158,6 +159,9 @@ class SrLinux:
                 r = self._connection.set(update=paths, encoding='json_ietf')
             elif op == 'replace':
                 r = self._connection.set(replace=paths, encoding='json_ietf')
+            elif op == 'delete':
+                delete_paths = [ list(p.keys())[0] for p in input ]
+                r = self._connection.set(delete=delete_paths, encoding="json_ietf")
             else:
                 raise ValueError(f"invalid value for parameter 'op': {op}")
             device_cfg_after = self.get_config(paths=r_list)
@@ -167,19 +171,20 @@ class SrLinux:
         dd = DeepDiff(device_cfg_before, device_cfg_after)        
         diff = ""
         for i in range(len(r_list)):
-            before_json = json.dumps(device_cfg_before[i], indent=2)
-            after_json = json.dumps(device_cfg_after[i], indent=2)
+            before_json = json.dumps(device_cfg_before[i], indent=2, sort_keys=True)
+            after_json = json.dumps(device_cfg_after[i], indent=2, sort_keys=True)
             for line in difflib.unified_diff(
                         before_json.splitlines(keepends=True),
                         after_json.splitlines(keepends=True),
                         fromfile="before",
                         tofile="after", 
-                        n=5,
+                        n=3,
             ):
                 diff += line
+            if len(diff) > 0:
+                diff += "\n"
 
         return diff
-
 
                 
     
