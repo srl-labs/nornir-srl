@@ -1,5 +1,6 @@
 from typing import Any, Dict, List, Optional
 from collections import OrderedDict
+import logging
 
 from nornir import InitNornir
 from nornir.core.task import Result, Task, AggregatedResult
@@ -102,10 +103,16 @@ rich_table(r)
 from nornir_srl.tasks.srl_config import configure_device
 # nr1 = nr0.filter(hostname='clab-4l2s-l1')
 
-# nr0 = nr0.filter(hostname='clab-4l2s-l2')
-r = nr0.run(task=configure_device, intent_path="./intent/vars", dry_run=False)
+# nr0 = nr0.filter(hostname='clab-4l2s-l1')
+# d = nr0.inventory.hosts['clab-4l2s-l1'].get_connection(CONNECTION_NAME, nr0.config)
+# paths = ["/interface"]
+# i = d.get_config(paths=paths, strip_mod=False)
+# r = d.set_config(input=i, op='replace', dry_run=False)
 
-print_result(r)
+
+r = nr0.run(task=configure_device, intent_path="./intent/infra", backup_path="./.backup/infra/configs", state_path="./.backup/infra/state", dry_run=False)
+
+print_result(r, severity_level=logging.INFO)
 
 
 # if __name__ == "__main__":

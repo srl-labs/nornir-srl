@@ -25,6 +25,9 @@ leafs:
     data:
         role: leaf
         type: ixr-d2
+        isl:
+        - ethernet-1/48
+        - ethernet-1/49
 _types:
     data:
         ixr-d2:

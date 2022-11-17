@@ -1,7 +1,10 @@
 from typing import Any, List, Dict, Optional
 from pathlib import Path
+from datetime import datetime
 import json
 import logging
+import re
+
 
 from natsort import natsorted
 
@@ -16,9 +19,12 @@ def configure_device(
     task: Task, 
     intent_path: str, 
     state_path: str,
+    backup_path: str,
     dry_run: Optional[bool] = None,
     **kwargs: Any
     ) -> Result:
+    
+    config_changed = False
 
     r = task.run(
         name=f"Load vars from {intent_path}", 
@@ -55,6 +61,7 @@ def configure_device(
                 op=set_mode,
                 dry_run=dry_run or task.is_dry_run(override=False),
             )
+            config_changed |= r.changed
     
     r = task.run(
         name = "Check for purged resources",
@@ -64,6 +71,37 @@ def configure_device(
         state_base_path = state_path,
         dry_run = dry_run,
     )
+    config_changed |= r.changed
+
+    if config_changed:
+        r = task.run(
+            name=f"Backup configs to {backup_path}",
+            severity_level=logging.INFO,
+            task = backup_config,
+            backup_base_path = backup_path,
+        )
+
+
+def backup_config(
+    task: Task,
+    backup_base_path: str,
+    history_len: Optional[int] = 10,
+) -> None:
+
+    p = Path(backup_base_path) 
+    suffix = datetime.now().strftime("%Y%m%d%H%M%S")
+    p = p / task.host.hostname / f"{task.host.hostname}.{suffix}.json"
+    p.parent.mkdir(parents=True, exist_ok=True)
+    
+    device = task.host.get_connection(CONNECTION_NAME, task.nornir.config)
+    cfg = device.get_config(paths=['/'], strip_mod=True)
+    p.write_text(json.dumps(cfg))
+
+    backup_files = sorted(p.parent.glob("*.json"))
+    if len(backup_files) > history_len:
+        for f in backup_files[history_len:]:
+            f.unlink()
+
 
 def purge_resources(
     task: Task, 
@@ -107,7 +145,7 @@ def render_template(task: Task, base_path: str, **kwargs: Any) -> Result:
             lstrip_blocks=True,
     )
     txt = ""
-    for file in p.glob("*.j2"):
+    for file in natsorted( t for t in p.glob("*.j2")):
         txt += "---\n"
         tpl = env.get_template(str(file.parts[-1]))
         txt += tpl.render(host=task.host, **kwargs)
@@ -126,10 +164,18 @@ def load_vars(task: Task, path: str, **kwargs: Any) -> Result:
     intent = dict()
     intent.update(kwargs)
 
+    def _render(matchobj):
+        var = matchobj.group(2)
+
+        return str(task.host.get(matchobj.group(2)))
+
     p = Path(path)
     for file in natsorted( [ f for f in p.glob("**/*.y?ml") ] ):
         yml = YAML(typ="safe")
-        for data in yml.load_all(file):
+        with open(file, 'r') as f:
+            y_str = f.read()
+        y_str = re.sub(r'(__(\S+))', _render, y_str)
+        for data in yml.load_all(y_str):
             if not 'metadata' in data:
                 continue
             metadata = data.pop('metadata', {})

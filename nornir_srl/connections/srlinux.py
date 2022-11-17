@@ -139,7 +139,10 @@ class SrLinux:
             ) -> str:
 
         device_cfg_after = []
-        r_list = [ list(r.keys())[0] for r in input ]
+        r_list = []
+        for r in input:
+            r_list += r.keys()
+#        r_list = [ list(r.keys())[0] for r in input ]
         device_cfg_before = self.get_config(paths=r_list)
 
         if not dry_run:
@@ -148,11 +151,11 @@ class SrLinux:
                 for p, v in d.items():
                     ### to check - hack
                     ### to address intents that are lists, e.g. /interface
-                    if isinstance(v, list): 
-                        v = { p: v }
-                        p = '/'.join(p.split('/')[:-1])
-                        if len(p) == 0:
-                            p = "/"
+#                    if isinstance(v, list): 
+#                        v = { p: v }
+#                        p = '/'.join(p.split('/')[:-1])
+#                        if len(p) == 0:
+#                            p = "/"
                     ###
                     paths.append((p, v))
             if op == 'update':
@@ -178,7 +181,7 @@ class SrLinux:
                         after_json.splitlines(keepends=True),
                         fromfile="before",
                         tofile="after", 
-                        n=3,
+                        n=5,
             ):
                 diff += line
             if len(diff) > 0:

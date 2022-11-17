@@ -1,0 +1,28 @@
+{% if interfaces is defined %}
+{% for itf, itf_prop in interfaces.items() %}
+- interface[name={{ itf }}]:
+    admin-state: {{ itf_prop.admin_state|default("enable") }}
+    description: {{ itf_prop.description|default("no description") }}
+    {% if itf_prop.vlan_tagging is defined %}
+    vlan-tagging: true
+    {% endif %}
+    {% if itf_prop.subinterface is defined %}
+    subinterface:
+      {% for idx, subif_spec in itf_prop.subinterface.items() %}
+      - index: {{ idx }}
+        admin-state: {{subif_spec.admin_state|default("enable")}}
+        {% if subif_spec.vlan is defined %}
+        vlan:
+          encap:
+            single-tagged:
+              vlan-id: {{ subif_spec.vlan }}
+        {% endif %}
+        {% if subif_spec.ipv4_address is defined %}
+        ipv4:
+          address:
+          - ip-prefix: {{subif_spec.ipv4_address}}
+        {% endif %}
+      {% endfor %}
+    {% endif %}
+{% endfor %}
+{% endif %}

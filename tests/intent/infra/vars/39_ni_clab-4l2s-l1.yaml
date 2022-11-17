@@ -1,0 +1,14 @@
+metadata:
+  hostname: clab-4l2s-l1
+
+network_instance:
+  default:
+    protocols:
+      bgp:
+        as: 65001
+        neighbor: 
+          192.168.0.0:
+            peer_group: spines
+          192.168.1.0:
+            peer_group: spines
+  

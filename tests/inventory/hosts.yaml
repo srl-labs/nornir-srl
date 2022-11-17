@@ -6,7 +6,14 @@ clab-4l2s-l1:
     port: 57400
     platform: ixr-d2
     data:
+        router_id: 192.168.255.1
         side: A
+        leafpair: P1
+        isl:
+            ethernet-1/48:
+                ipv4_address: 192.168.0.1/31
+            ethernet-1/49:
+                ipv4_address: 192.168.0.3/31
 
 clab-4l2s-l2:
     hostname: clab-4l2s-l2
@@ -16,7 +23,9 @@ clab-4l2s-l2:
     port: 57400
     platform: ixr-d2
     data:
+        router_id: 192.168.255.2
         side: B
+        leafpair: P1
         
 clab-4l2s-l3:
     hostname: clab-4l2s-l3
@@ -26,7 +35,9 @@ clab-4l2s-l3:
     port: 57400
     platform: ixr-d2
     data:
+        router_id: 192.168.255.3
         side: A
+        leafpair: P2
         
 clab-4l2s-l4:
     hostname: clab-4l2s-l4
@@ -36,7 +47,9 @@ clab-4l2s-l4:
     port: 57400
     platform: ixr-d2
     data:
+        router_id: 192.168.255.4
         side: B
+        leafpair: P2
 
 clab-4l2s-s1:
     hostname: clab-4l2s-s1
@@ -46,6 +59,7 @@ clab-4l2s-s1:
     port: 57400
     platform: ixr-d2
     data:
+        router_id: 192.168.255.101
         side: A
 
 clab-4l2s-s2:
@@ -56,4 +70,5 @@ clab-4l2s-s2:
     port: 57400
     platform: ixr-d2
     data:
+        router_id: 192.168.255.102
         side: B

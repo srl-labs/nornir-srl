@@ -41,7 +41,10 @@ def normalize_gnmi_resp(resp: Dict) -> List[Dict[str, Any]]:
                 if u.get("path"):
                     r.append( { u.get("path") : u.get("val") } )
                 else:
-                    r.append( u.get("val"))
+                    if isinstance(u.get("val"), dict) and len(u["val"])>1: # no path with multiple dicts in val: path='/', as per gnmi-spec
+                        r.append( { "/": u["val"] })
+                    else:
+                        r.append(u["val"]) # a yang-list that gets a None path in SRL, e.g. /interface
         else:
             r.append({})
     return r

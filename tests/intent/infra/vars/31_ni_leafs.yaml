@@ -1,0 +1,22 @@
+metadata:
+  groups:
+    - leafs
+
+network_instance:
+  default:
+    admin_state: enable
+    interfaces:
+    - ethernet-1/48.0
+    - ethernet-1/49.0
+    - system0.0
+    protocols:
+      bgp:
+        router_id: __router_id
+        group:
+          spines: 
+            admin_state: enable
+            description: 'Peer-group to spine switches'
+            export_policy: "export-loopbacks"
+            import_policy: pass-all
+            peer_as: 65100
+            ipv4-unicast: 

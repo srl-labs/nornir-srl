@@ -1,0 +1,22 @@
+metadata:
+  hostname: clab-4l2s-s1
+
+network_instance:
+  default:
+    protocols:
+      bgp:
+        neighbor: 
+          192.168.0.1:
+            peer_group: leafs
+            peer_as: 65001
+          192.168.0.3:
+            peer_group: leafs
+            peer_as: 65001
+          192.168.0.5:
+            peer_group: leafs
+            peer_as: 65002
+          192.168.0.7:
+            peer_group: leafs
+            peer_as: 65002
+
+  

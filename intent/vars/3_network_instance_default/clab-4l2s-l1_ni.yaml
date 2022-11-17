@@ -1,6 +1,0 @@
-metadata:
-  hostname: clab-4l2s-l1
-
-network_instance:
-- name: default
-  router_id: 192.168.255.1

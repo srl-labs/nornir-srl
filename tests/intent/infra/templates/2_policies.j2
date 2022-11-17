@@ -1,0 +1,38 @@
+{% if routing_policy is defined %}
+{% for pfx_set, pfx_set_spec in routing_policy.prefix_set.items() %}
+- routing-policy/prefix-set[name={{ pfx_set }}]:
+    prefix:
+    {% for pfx in pfx_set_spec.prefix %}
+    - ip-prefix: {{ pfx.ip_prefix }}
+      mask-length-range: {{ pfx.mask_length_range }}
+    {% endfor %}
+{% endfor %}
+{% if routing_policy.policy is defined %}
+{% for pol, pol_spec in routing_policy.policy.items() %}
+- routing-policy/policy[name={{ pol }}]:
+    default-action: 
+      {{ pol_spec.default_action|default("reject: {}") }}
+    statement:
+    {% for s in pol_spec.statement %}
+    - sequence-id: {{ loop.index }}
+      match:
+      {% for k,v in s.match.items() %}
+        {{ k }}: {{ v }}
+      {% endfor %}
+      action:
+      {% if s.accept is defined %}
+        accept:
+          {% if s.accept|length == 0 %}
+          {}
+          {% else %}
+          {% for k, v in s.accept.items() %}
+            {{ k }}: {{ v }}
+          {% endfor  %}
+          {% endif %}
+      {% else %}
+        reject:
+      {% endif %}
+    {% endfor %}
+{% endfor %}
+{% endif %}
+{% endif %}

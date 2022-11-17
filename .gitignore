@@ -106,3 +106,5 @@ output/
 .idea
 
 pip-wheel-metadata/
+
+tests/.backup
