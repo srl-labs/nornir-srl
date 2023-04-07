@@ -85,7 +85,7 @@ The root certificate is specified once for all devices in group `srl` via the `c
 
 Currently, only the network-wide cli functionality is supported via the `fcli` command
 ```
-fcli --help
+$ fcli --help
 Usage: fcli [OPTIONS] REPORT
 
 Options:
@@ -97,7 +97,7 @@ Options:
   ```
   `REPORT` is a mandatory argument and specifies the report to run. To know which reports are supported, specify a dummy report name:
 ```
-  fcli test
+$ fcli test
 Report test not found. Available reports: ['bgp-peers', 'subinterface', 'ipv4-rib', 'mac-table', 'sys-info', 'nwi-itfs', 'lldp-nbrs']
 ```
 
