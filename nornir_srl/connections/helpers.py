@@ -1,26 +1,7 @@
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Tuple, Optional
 import json
 import difflib
 import fnmatch
-
-def strip_paths(d: Dict[str,Any]) -> Dict:
-    """
-    strips module name from path names
-
-    Args:
-        d: dictionary as returned by gnmi client
-    
-    Returns:
-        dict: with module names stripped
-    """
-    stripped_d = dict()
-    for path, val in d.items():
-        el_list = path.split("/")
-        stripped_p = "/".join([ el.split(":")[-1] for el in el_list])
-        stripped_d[stripped_p] = val
-        if isinstance(val, dict):
-            stripped_d[stripped_p] = strip_paths(val)
-    return stripped_d
 
 def normalize_gnmi_resp(resp: Dict) -> List[Dict[str, Any]]:
     """
@@ -85,38 +66,41 @@ def diff_obj(
     else:
         return (False, "")
 
-def filter_dict(d: Dict, **kwargs: Any) -> Dict:
-    f = dict()
-    for k, v in kwargs.items():
-        k = k.replace('_', '-')
-        if k in d:
-            if fnmatch.fnmatch(d[k], v):
-                f[k] = d[k]
-    return f
-
 def filter_fields(d: Dict, *fields: str) -> Dict:
-    return {
-        k: v for k,v in d.items() 
-            if k in [ f.replace('_', '-') for f in fields]
-    }
-
+    return  { 
+            k:v for k,v in d.items()
+                if k in [ f.replace('_', '-') for f in fields ]
+        }
+    
 
 def strip_modules(d: Dict) -> Dict:
-    stripped = { k.split(':')[-1]:v for k, v in d.items() }
+    stripped = {}
+    for k,v in d.items():
+        k = '/'.join([e.split(':')[-1] for e in k.split('/')])
+        stripped[k] = v
     for k, v in stripped.items():
         if isinstance(v, dict):
             stripped[k] = strip_modules(v)
         elif isinstance(v, list):
             stripped[k] = [strip_modules(d) for d in v if isinstance(d, dict)]
-        else:
-            pass
+        elif isinstance(v, str):
+            stripped[k] = v.split(':')[-1] if v.startswith('srl_nokia') else v
     return stripped
 
+def get_fields_at_depth(d:Dict, depth:int) -> Dict:
+    if depth == 1:
+        return {k: v for k,v in d.items() if isinstance(v, (str, int, float, list))}
+    return {k: get_fields_at_depth(v, depth-1) for k,v in d.items() if isinstance(v, dict)}
 
-def _strip_modules(d: Dict) -> Dict:
-    stripped = { k.split(':')[-1]:v for k, v in d.items() }
-    for k, v in stripped.items():
+def flatten_dict(d: Dict, depth:Optional[int]) -> Dict:
+    r = {}
+    for k,v in d.items():
         if isinstance(v, dict):
-            stripped[k] = strip_modules(v)
-    return stripped
-
+            v = [v]
+        if isinstance(v, list):
+            for e in v:
+                tmp = flatten_dict(e)
+                r.update({ k + '_' + k2:v2 for k2,v2 in tmp.items() } )
+        else:
+            r[k] = v
+    return r

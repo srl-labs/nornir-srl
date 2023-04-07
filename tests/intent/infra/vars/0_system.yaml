@@ -1,8 +1,0 @@
-metadata:
-  groups: ['srl']
-
-system:
-  hostname: __hostname
-
-_links:
-  isl: __isl

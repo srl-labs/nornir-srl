@@ -1,19 +1,19 @@
-from typing import Any, List, Dict, Optional
-from pathlib import Path
-from datetime import datetime
 import json
 import logging
 import re
-
-
-from natsort import natsorted
+import difflib
+from datetime import datetime
+from pathlib import Path
+from typing import Any, Dict, List, Optional
 
 from jinja2 import Environment, FileSystemLoader, StrictUndefined
+from natsort import natsorted
+from nornir.core.task import Result, Task
 from ruamel.yaml import YAML
 
-from nornir.core.task import Task, Result
 from nornir_srl.connections.srlinux import CONNECTION_NAME
 
+from .helpers import _merge
 
 def configure_device(
     task: Task, 
@@ -23,7 +23,21 @@ def configure_device(
     dry_run: Optional[bool] = None,
     **kwargs: Any
     ) -> Result:
-    
+    '''
+    A Nornir task that configures a device from an intent. It is meant to be called via the Nornir.run() method.
+    It runs various sub-tasks to load vars from files, render templates, apply configuration and potentially delete 
+    configuration in case of purged resources from a previous version of intent.
+
+    Args:
+    task: A Nornir Task object that holds device details (e.g. connection)
+    intent_path: path to the directory that holds the variables (intent)
+    state_path: path to the directory to store state (i.e. to prune resourcesvthat are no longer part of the intent)
+    backup_path: path to directory to hold config backups
+    dry_run: boolean to indicate if this is a dry-run (dry-run == True) (no config changes applied to device)
+    kwargs: optional key, value pairs to pass intent vars directly to the task
+
+    Returns a Nornir Result object that holds the result of the outcome)
+    '''
     config_changed = False
 
     r = task.run(
@@ -50,18 +64,20 @@ def configure_device(
     )
     device_intent = r.result
 
-    set_mode = 'replace'
     for data in device_intent:
-        if isinstance(data, list):
-            r = task.run(
-                name=f"DRY-RUN:{dry_run} {set_mode}:{[list(rsc.keys())[0] for rsc in data]} to device",
-                severity_level=logging.INFO,
-                task=set_config,
-                device_config=data,
-                op=set_mode,
-                dry_run=dry_run or task.is_dry_run(override=False),
-            )
-            config_changed |= r.changed
+        for set_mode, resources in data.items():
+            if set_mode not in ('update', 'replace'):
+                raise ValueError(f"Unexpected set_mode: {set_mode}")
+            if isinstance(resources, list):
+                r = task.run(
+                    name=f"DRY-RUN:{dry_run} {set_mode}:{[list(rsc.keys())[0] for rsc in resources]} to device",
+                    severity_level=logging.INFO,
+                    task=set_config,
+                    device_config=resources,
+                    op=set_mode,
+                    dry_run=dry_run or task.is_dry_run(override=False),
+                )
+                config_changed |= r.changed
     
     r = task.run(
         name = "Check for purged resources",
@@ -94,13 +110,44 @@ def backup_config(
     p.parent.mkdir(parents=True, exist_ok=True)
     
     device = task.host.get_connection(CONNECTION_NAME, task.nornir.config)
-    cfg = device.get_config(paths=['/'], strip_mod=True)
-    p.write_text(json.dumps(cfg))
+    cfg = device.get(paths=['/'], datatype="config", strip_mod=True)
+    p.write_text(json.dumps(cfg, indent=4))
 
     backup_files = sorted(p.parent.glob("*.json"))
     if len(backup_files) > history_len:
         for f in backup_files[history_len:]:
             f.unlink()
+
+def restore_config(
+    task: Task,
+    backup_base_path: str, 
+    version: int,
+    dry_run: Optional[bool] = True,
+) -> Result:
+
+    p = Path(backup_base_path)
+    p = p / task.host.hostname
+    backup_files = sorted(p.glob("*.json"), reverse = True)
+    if len(backup_files) < version:
+        raise ValueError(f"Version {version} asked but only {len(backup_files)} versions available")
+    p = backup_files[version-1]
+
+    device = task.host.get_connection(CONNECTION_NAME, task.nornir.config)
+    if dry_run:
+        diff = ""
+        before_json = json.dumps(device.get(paths=['/'], datatype="config", strip_mod=True), indent=4)
+        after_json = p.read_text()
+        for line in difflib.unified_diff(
+            before_json.splitlines(keepends=True),
+            after_json.splitlines(keepends=True),
+            fromfile="before",
+            tofile="after"
+        ):
+            diff += line
+        return Result(host=task.host, result=diff, changed=False)
+    else:
+        r = device.set_config(input=json.loads(p.read_text()), op='replace', dry_run=False)
+        return Result(host=task.host, result=r, changed=len(r)>0)
 
 
 def purge_resources(
@@ -112,8 +159,14 @@ def purge_resources(
     
     new_rsc = dict()
     for l1 in device_intent:
-        for l2 in l1:
-            new_rsc.update(l2)
+        if l1.get('update', []):
+            l2 = l1['update']
+        else:
+            l2 = []
+        if l1.get('replace', []):  # might be a dict entry with value None
+            l2 += l1['replace']
+        for d in l2:
+                new_rsc.update(d)
     
     state_file = Path(state_base_path) / f"{task.host.hostname}.json"
     if state_file.exists():
@@ -133,7 +186,7 @@ def purge_resources(
             changed = True
         else:
             changed = False
-        state_file.open('w').write(json.dumps(new_rsc))
+        state_file.write_text(json.dumps(new_rsc, indent=4))
 
     return Result(host=task.host, result=purged, changed=changed)
 
@@ -144,13 +197,14 @@ def render_template(task: Task, base_path: str, **kwargs: Any) -> Result:
             undefined=StrictUndefined, trim_blocks=True,
             lstrip_blocks=True,
     )
-    txt = ""
+    rendered = ""
     for file in natsorted( t for t in p.glob("*.j2")):
-        txt += "---\n"
         tpl = env.get_template(str(file.parts[-1]))
-        txt += tpl.render(host=task.host, **kwargs)
+        txt = tpl.render(host=task.host, **kwargs)
+        if len(txt) > 0:
+            rendered += f"---\n{txt}"
 
-    return Result(host=task.host, result=txt)
+    return Result(host=task.host, result=rendered)
 
 def load_yaml(task: Task, doc: str) -> Any:
     
@@ -212,16 +266,3 @@ def set_config(
         else:
             changed=False
     return Result(host=task.host, result=r, changed=changed)
-
-
-def _merge(a, b):
-    for key in b:
-        if key in a:
-            if isinstance(a[key], dict) and isinstance(b[key], dict):
-                _merge(a[key], b[key])
-            elif isinstance(a[key], list) and isinstance(b[key], list):
-                a[key].extend(b[key])
-            else:
-                pass  # a always wins
-        else:
-            a[key] = b[key]

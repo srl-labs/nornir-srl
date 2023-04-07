@@ -1,7 +1,0 @@
-metadata:
-  groups: ['srl']
-
-network_instance:
-  default:
-    admin_state: enable
-    router-id: __router_id

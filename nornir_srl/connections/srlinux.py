@@ -1,19 +1,59 @@
 from typing import TYPE_CHECKING, Any, List, Dict, Optional, Tuple
 import difflib
 import json
+import re
+
 from deepdiff import DeepDiff
 from natsort import natsorted
+import jmespath
 
 from pygnmi.client import gNMIclient
 
 from nornir.core.plugins.connections import ConnectionPlugin
 from nornir.core.configuration import Config
 
-from nornir_srl.exceptions import *
-from .helpers import strip_modules, normalize_gnmi_resp, filter_dict, filter_fields
-
+from .helpers import strip_modules, normalize_gnmi_resp, filter_fields, flatten_dict
 
 CONNECTION_NAME = "srlinux"
+
+class GnmiPath:
+    RE_PATH_COMPONENT = re.compile(r'''
+    (?P<pname>[^/[]+)  # gNMI path name
+    (\[(?P<key>\w\D+)   # gNMI path key
+    =
+    (?P<value>[^\]]+)    # gNMI path value
+    \])?
+    ''', re.VERBOSE)
+
+    def __init__(self, path:str):
+        self.path = path.strip('/')
+        self.comp = GnmiPath.RE_PATH_COMPONENT.findall(self.path) # list (1 item per path-el) of tuples (pname, [k=v], k, v)
+        self.elems = [''.join(e[:2]) for e in self.comp]
+
+    def __str__(self):
+        return self.path
+    
+    def __repr__(self):
+        return f"{self.__class__.__name__}('{self.path}')"
+    
+    @property
+    def resource(self) -> Dict[str,str]:
+        return {
+            "resource": self.comp[-1][0], 
+            "key": self.comp[-1][2], 
+            "val": self.comp[-1][3],
+        }
+
+    @property
+    def with_no_prefix(self):
+        return GnmiPath('/'.join([e.split(':')[-1] for e in self.elems ]))
+
+    @property
+    def parent(self):
+        if len(self.elems) > 0:
+            return GnmiPath('/'.join(self.elems[:-1]))
+        return None
+    
 
 class SrLinux:
     def open(
@@ -39,6 +79,7 @@ class SrLinux:
         _connection.connect()
         self._connection = _connection
         self.connection = self
+        self.hostname = hostname
         self.capabilities = self._connection.capabilities()
 
     def gnmi_get(self, **kw):
@@ -50,78 +91,159 @@ class SrLinux:
     def close(self) -> None:
         self._connection.close()
 
-    def _get_resource(self, path_specs: List[Dict[str, Any]]) -> Dict[str, Any]:
-        result = dict()
-        if self._connection:
-            for spec in path_specs:
-                resp = normalize_gnmi_resp(self._connection.get(path=[spec["path"]], datatype=spec["datatype"], encoding="json_ietf"))
-                for d in resp:
-                    val = list(d.values())[0]
-                    if isinstance(val, dict):
-                        f = filter_fields(val, *spec["fields"])
-                        result.update(f)
-                    elif isinstance(val, list):
-                        for v in val:
-                            f = filter_fields(v, *spec["fields"])
-                            key = f.pop(spec["key"])
-                            if key in result:
-                                result[key].update(f)
-                            else:
-                                result[key] = f
-                    else:
-                        raise ValueError(f"Unexpected type {type(val)}: {val}")
-        else:
-            raise Exception("no active connection")
-        return result               
-
+    def __repr__(self) -> str:
+        return f"{self.__class__.__name__} on {self.hostname}"
 
     def get_info(self) -> Dict[str, Any]:
         path_specs = [
                 { 
                     "path": "/platform/chassis",
                     "datatype": "state",
-                    "fields": ['type', 'serial_number', 'part_number', 'hw_mac_address'],
+                    "fields": ['type', 'serial-number', 'part-number', 'hw-mac-address', 'last-booted'],
                 },
                 {
                     "path": "/platform/control[slot=A]",
                     "datatype": "state",
-                    "fields": ['software_version', ],
+                    "fields": ['software-version', ],
                 }
         ]                
-
-        result = self._get_resource(path_specs = path_specs)
+        result = {}
+        for spec in path_specs:
+            resp = self.get(paths = [spec.get("path") ], datatype=spec["datatype"])
+            for path in resp[0]:
+                result.update({k:v for k,v in resp[0][path].items() if k in spec["fields"] } )
         if result.get('software-version'):
-            result['software-version'] = result['software-version'].split('-')[0]
+                result['software-version'] = result['software-version'].split('-')[0]
 
-        return result
+        return {'sys_info': [result] }
 
-    def get_itfs(self) -> Dict[str, Any]:
-        path_specs = [
-            {
-                "path": "/interface",
-                "datatype": "config",
-                "fields": ['name', 'admin_state', 'subinterface'],
-                "key": "name",
-            },
-            {
-                "path": "/interface",
+    def get_sum_subitf(self, interface:Optional[str] = '*' ) -> Dict[str, Any]:
+        path_spec = {
+                "path": f"/interface[name={interface}]/subinterface",
+                "jmespath": 'interface[].{Itf:name, subitfs: subinterface[].{Subitf:name,\
+                      type:type, admin:"admin-state",oper:"oper-state", \
+                        ipv4: ipv4.address[]."ip-prefix", vlan: vlan.encap."single-tagged"."vlan-id"}}',
                 "datatype": "state",
-                "fields": ['name', 'mtu', 'oper_state'],
-                "key": "name",
-            }   
-        ]
-
-        return self._get_resource(path_specs = path_specs)
-
-    def show_methods(self) -> List[str]:
-        return [ method for method in dir(self) if callable(getattr(self, method)) 
-                    and not method.startswith('__')]
+                "key": "index",
+            }
+        resp = self.get(paths = [ path_spec.get("path")], datatype=path_spec["datatype"])
+        res = jmespath.search(path_spec["jmespath"], resp[0])
+        return {'subinterface': res }
     
+    def get_sum_bgp(self, network_instance:Optional[str] = '*' ) -> Dict[str, Any]:
+        path_spec = {
+                "path": f"/network-instance[name={network_instance}]/protocols/bgp/neighbor",
+                "jmespath": '"network-instance"[].{NetwInst:name, Neighbors: protocols.bgp.neighbor[].{"1_Peer":"peer-address",\
+                    peer_as:"peer-as", state:"session-state",local_as:"local-as"[]."as-number",\
+                    "2_Group":"peer-group"}}',
+                "datatype": "state",
+                "key": "index",
+            }
+        resp = self.get(paths = [ path_spec.get("path")], datatype=path_spec["datatype"])
+        res = jmespath.search(path_spec["jmespath"], resp[0])
+        return {'bgp_peers': res }
 
-    def get_config(self, paths:List[str], strip_mod:Optional[bool] = True) -> List[Dict[str, Any]]:
+    def get_lldp_sum(self, interface:Optional[str] = '*' ) -> Dict[str, Any]:
+        path_spec = {
+                "path": f"/system/lldp/interface[name={interface}]/neighbor",
+                "jmespath": '"system/lldp".interface[].{interface:name, Neighbors:neighbor[].{"Nbr-port":"port-id",\
+                    "Nbr-System":"system-name", "Nbr-port-desc":"port-description"}}',
+                "datatype": "state",
+            }
+        resp = self.get(paths = [ path_spec.get("path")], datatype=path_spec["datatype"])
+        res = jmespath.search(path_spec["jmespath"], resp[0])
+        return {'lldp_nbrs': res }    
+
+    def get_mac_table(self, network_instance:Optional[str] = '*') -> Dict[str, Any]:
+        path_spec = {
+            "path": f"/network-instance[name={network_instance}]/bridge-table/mac-table/mac",
+            "jmespath": '"network-instance"[].{"Netw-Inst":name, Fib:"bridge-table"."mac-table".mac[].{Address:address,\
+                        Dest:destination, Type:type}}',
+            "datatype": "state",
+        }
+        resp = self.get(paths = [ path_spec.get("path")], datatype=path_spec["datatype"])
+        res = jmespath.search(path_spec["jmespath"], resp[0])
+        return {'mac_table': res}
+    
+    def get_rib_ipv4(self, network_instance:Optional[str] = '*' ) -> Dict[str, Any]:   
+
+        path_spec = {
+                "path": f"/network-instance[name={network_instance}]/route-table/ipv4-unicast",
+                "jmespath": '"network-instance"[].{"Netw-Inst":name, Rib:"route-table"."ipv4-unicast".route[].{"Prefix":"ipv4-prefix",\
+                    "next-hop":"_next-hop",type:"route-type", metric:metric, pref:preference, itf:"_nh_itf"}}',
+                "datatype": "state",
+                "key": "index",
+            }
+
+        nhgroups = self.get(paths = [ f"/network-instance[name={network_instance}]/route-table/next-hop-group[index=*]" ],
+                        datatype="state")
+        nhs = self.get(paths = [ f"/network-instance[name={network_instance}]/route-table/next-hop[index=*]" ],
+                        datatype="state")
+
+        nh_mapping = {}
+        for ni in nhs[0].get("network-instance"):
+            tmp_map = {}
+            for nh in ni["route-table"]["next-hop"]:
+                tmp_map[nh["index"]] = { "ip-address":      nh.get("ip-address"),
+                                        "type":             nh.get("type"),
+                                        "subinterface":    nh.get("subinterface"),
+                }
+                if "resolving-tunnel" in nh:
+                    tmp_map[nh["index"]].update( 
+                        { 
+                            "tunnel": (nh.get("resolving-tunnel")).get("tunnel-type") + ":" +  (nh.get("resolving-tunnel")).get("ip-prefix")        
+                        })
+                if "resolving-route" in nh:
+                    tmp_map[nh["index"]].update( 
+                        { 
+                            "resolving-route": (nh.get("resolving-route")).get("ip-prefix")        
+                        })
+                    
+            nh_mapping.update( { ni["name"]: tmp_map})
+        nhgroup_mapping = {}
+        for ni in nhgroups[0].get("network-instance"):
+            network_instance = ni["name"]
+            tmp_map = {}
+            for nhgroup in ni["route-table"]["next-hop-group"]:
+#                    tmp_map[nhgroup["index"]] = [ nh["next-hop"] for nh in nhgroup["next-hop"] ]
+                tmp_map[nhgroup["index"]] = [ 
+                        nh_mapping[network_instance][nh.get("next-hop")] 
+                                for nh in nhgroup["next-hop"] 
+                        ]
+            nhgroup_mapping.update( { ni["name"]: tmp_map})
+        
+        resp = self.get(paths = [ path_spec.get("path")], datatype=path_spec["datatype"])
+        for ni in resp[0].get("network-instance"):
+            if len(ni["route-table"]["ipv4-unicast"])>0:
+                for route in ni["route-table"]["ipv4-unicast"]["route"]:
+                    if "next-hop-group" in route:
+                        route["_next-hop"] = [ nh.get("ip-address") for nh in nhgroup_mapping[ni["name"]][route["next-hop-group"]] ]
+                        route["_nh_itf"] = [ nh.get("subinterface") for nh in nhgroup_mapping[ni["name"]][route["next-hop-group"]] ]
+                        
+        res = jmespath.search(path_spec["jmespath"], resp[0])
+        return {'ipv4_rib': res }    
+    
+    def get_nwi_itf(self, nw_instance:Optional[str] = '*') -> Dict[str, Any]:
+        path_spec = {
+                "path": f"/network-instance[name={nw_instance}]",
+                "jmespath": '"network-instance"[].{name:name,oper:"oper-state",type:type,itfs: interface[].{Subitf:name,\
+                      "if-oper":"oper-state", "if-dwn-reason":"oper-down-reason","mac-learning":"oper-mac-learning"}}',
+                "datatype": "state",
+            }
+        resp = self.get(paths = [ path_spec.get("path")], datatype=path_spec["datatype"])
+        res = jmespath.search(path_spec["jmespath"], resp[0])
+        return {'nwi_itfs': res }
+
+    def get(
+            self, 
+            paths:List[str], 
+            datatype: Optional[str] = "config", 
+            strip_mod:Optional[bool] = True
+        ) -> List[Dict[str, Any]]:
+
         if self._connection:
             resp = normalize_gnmi_resp(
-                    self._connection.get(path=paths, datatype="config", encoding="json_ietf")
+                    self._connection.get(path=paths, datatype=datatype, encoding="json_ietf")
                     )
         else:
             raise Exception("no active connection")
@@ -143,7 +265,7 @@ class SrLinux:
         for r in input:
             r_list += r.keys()
 #        r_list = [ list(r.keys())[0] for r in input ]
-        device_cfg_before = self.get_config(paths=r_list)
+        device_cfg_before = self.get(paths=r_list, datatype="config")
 
         if not dry_run:
             paths = []
@@ -167,7 +289,7 @@ class SrLinux:
                 r = self._connection.set(delete=delete_paths, encoding="json_ietf")
             else:
                 raise ValueError(f"invalid value for parameter 'op': {op}")
-            device_cfg_after = self.get_config(paths=r_list)
+            device_cfg_after = self.get(paths=r_list, datatype="config")
         else:
             device_cfg_after = input
 
