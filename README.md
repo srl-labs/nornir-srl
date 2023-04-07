@@ -79,4 +79,63 @@ leafs:
 ```
 The root certificate is specified once for all devices in group `srl` via the `connection_options.srlinux.extras.path_cert` parameter.
 
+# Use
 
+Currently, only the network-wide cli functionality is supported via the `fcli` command
+```
+fcli --help
+Usage: fcli [OPTIONS] REPORT
+
+Options:
+  -c, --cfg TEXT           Nornir config file  [default: nornir_config.yaml]
+  -i, --inv-filter TEXT    filter inventory, e.g. -i site=lab -i role=leaf
+  -f, --field-filter TEXT  filter fields, e.g. -f state=up -f
+                           admin_state=enable
+  --help                   Show this message and exit.
+  ```
+  `REPORT` is a mandatory argument and specifies the report to run. To know which reports are supported, specify a dummy report name:
+```
+  fcli test
+Report test not found. Available reports: ['bgp-peers', 'subinterface', 'ipv4-rib', 'mac-table', 'sys-info', 'nwi-itfs', 'lldp-nbrs']
+```
+The nornir configuration file (`-c` option) is mandatory for nornir to find the inventory files.
+Optionally, you can specify filters to control the output. There are 2 types of filters:
+
+    - inventory filters, specified with the `-i` option, filter on the inventory, e.g. `-i hostname=clab-4l2s-l1`  or `-i role=leaf` based on inventory data
+    - field filters, specified with the `-f` option. This filters based on the fields shown in the report and a value substring, e.g. `-f state=esta`. Multiple field filters can be specified by repeated `-f` options
+
+An example:
+```
+$ fcli bgp-peers -i role=spine
+                                        BGP Peers                                         
+                               Inventory:{'role': 'spine'}                                
+               ╷          ╷                 ╷         ╷          ╷         ╷              
+  Node         │ NetwInst │ 1_Peer          │ 2_Group │ local_as │ peer_as │ state        
+ ══════════════╪══════════╪═════════════════╪═════════╪══════════╪═════════╪═════════════ 
+  clab-4l2s-s1 │ default  │ 192.168.0.1     │ leafs   │ [65100]  │ 65001   │ established  
+               │          │ 192.168.0.3     │ leafs   │ [65100]  │ 65002   │ established  
+               │          │ 192.168.0.5     │ leafs   │ [65100]  │ 65003   │ established  
+               │          │ 192.168.0.7     │ leafs   │ [65100]  │ 65004   │ established  
+               │          │ 192.168.0.225   │ dcgw    │ [65100]  │ 65200   │ active       
+               │          │ 192.168.0.227   │ dcgw    │ [65100]  │ 65201   │ active       
+               │          │ 192.168.255.1   │ overlay │ [100]    │ 100     │ established  
+               │          │ 192.168.255.2   │ overlay │ [100]    │ 100     │ established  
+               │          │ 192.168.255.3   │ overlay │ [100]    │ 100     │ established  
+               │          │ 192.168.255.4   │ overlay │ [100]    │ 100     │ established  
+               │          │ 192.168.255.200 │ overlay │ [100]    │ 100     │ connect      
+               │          │ 192.168.255.201 │ overlay │ [100]    │ 100     │ connect      
+ ──────────────┼──────────┼─────────────────┼─────────┼──────────┼─────────┼───────────── 
+  clab-4l2s-s2 │ default  │ 192.168.0.229   │ dcgw    │ [65100]  │ 65200   │ active       
+               │          │ 192.168.0.231   │ dcgw    │ [65100]  │ 65201   │ active       
+               │          │ 192.168.1.1     │ leafs   │ [65100]  │ 65001   │ established  
+               │          │ 192.168.1.3     │ leafs   │ [65100]  │ 65002   │ established  
+               │          │ 192.168.1.5     │ leafs   │ [65100]  │ 65003   │ established  
+               │          │ 192.168.1.7     │ leafs   │ [65100]  │ 65004   │ established  
+               │          │ 192.168.255.1   │ overlay │ [100]    │ 100     │ established  
+               │          │ 192.168.255.2   │ overlay │ [100]    │ 100     │ established  
+               │          │ 192.168.255.3   │ overlay │ [100]    │ 100     │ established  
+               │          │ 192.168.255.4   │ overlay │ [100]    │ 100     │ established  
+               │          │ 192.168.255.200 │ overlay │ [100]    │ 100     │ connect     
+```
+
+  
