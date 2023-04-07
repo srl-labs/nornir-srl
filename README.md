@@ -21,6 +21,7 @@ source .venv/bin/activate
 Following command will install the the `nornir_srl` module and all its dependencies, including Nornir core.
 
 ```
+pip install wheel
 pip install nornir_srl
 ```
 Create the Nornir confguration file, for example:
