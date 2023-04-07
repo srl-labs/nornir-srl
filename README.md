@@ -15,6 +15,7 @@ Since this module is using gNMI as the management inteface, at a minimum, a CA c
 
 Create a Python virtual-env using your favorite workflow, For example:
 ```
+mkdir nornir-srl && cd nornir-srl
 python3 -m venv .venv
 source .venv/bin/activate
 ```
@@ -99,11 +100,12 @@ Options:
   fcli test
 Report test not found. Available reports: ['bgp-peers', 'subinterface', 'ipv4-rib', 'mac-table', 'sys-info', 'nwi-itfs', 'lldp-nbrs']
 ```
+
 The nornir configuration file (`-c` option) is mandatory for nornir to find the inventory files.
 Optionally, you can specify filters to control the output. There are 2 types of filters:
 
-    - inventory filters, specified with the `-i` option, filter on the inventory, e.g. `-i hostname=clab-4l2s-l1`  or `-i role=leaf` based on inventory data
-    - field filters, specified with the `-f` option. This filters based on the fields shown in the report and a value substring, e.g. `-f state=esta`. Multiple field filters can be specified by repeated `-f` options
+- inventory filters, specified with the `-i` option, filter on the inventory, e.g. `-i hostname=clab-4l2s-l1`  or `-i role=leaf` based on inventory data
+- field filters, specified with the `-f` option. This filters based on the fields shown in the report and a value substring, e.g. `-f state=esta`. Multiple field filters can be specified by repeated `-f` options
 
 An example:
 ```
