@@ -131,15 +131,34 @@ class SrLinux:
         return {'subinterface': res }
     
     def get_sum_bgp(self, network_instance:Optional[str] = '*' ) -> Dict[str, Any]:
+        def augment_resp(resp):
+            for ni in resp[0]["network-instance"]:
+                if ni.get('protocols') and ni['protocols'].get('bgp'):
+                    for peer in ni['protocols']['bgp']['neighbor']:
+                        if peer.get('evpn'):
+                            peer["_evpn"] = str(peer["evpn"]["received-routes"]) + "/" + \
+                            str(peer["evpn"]["active-routes"]) + "/" + \
+                            str(peer["evpn"]["sent-routes"]) if peer["evpn"]["admin-state"] == "enable" else "disabled"
+                        else:
+                            peer["_evpn"] = "disabled"
+                        if peer.get('ipv4-unicast'):
+                            peer["_ipv4"] = str(peer["ipv4-unicast"]["received-routes"]) + "/" + \
+                            str(peer["ipv4-unicast"]["active-routes"]) + "/" + \
+                            str(peer["ipv4-unicast"]["sent-routes"]) if peer["ipv4-unicast"]["admin-state"] == "enable" else "disabled"
+                        else:
+                            peer["_ipv4"] = "disabled"
+
         path_spec = {
                 "path": f"/network-instance[name={network_instance}]/protocols/bgp/neighbor",
-                "jmespath": '"network-instance"[].{NetwInst:name, Neighbors: protocols.bgp.neighbor[].{"1_Peer":"peer-address",\
+                "jmespath": '"network-instance"[].{NetwInst:name, Neighbors: protocols.bgp.neighbor[].{"1_peer":"peer-address",\
                     peer_as:"peer-as", state:"session-state",local_as:"local-as"[]."as-number",\
-                    "2_Group":"peer-group"}}',
+                    "group":"peer-group", "export_policy":"export-policy", "import_policy":"import-policy",\
+                    "AFI/SAFI\\nIPv4-UC\\nRx/Act/Tx":"_ipv4", "AFI/SAFI\\nEVPN\\nRx/Act/Tx":"_evpn"}}',
                 "datatype": "state",
                 "key": "index",
             }
         resp = self.get(paths = [ path_spec.get("path")], datatype=path_spec["datatype"])
+        augment_resp(resp)
         res = jmespath.search(path_spec["jmespath"], resp[0])
         return {'bgp_peers': res }
 
