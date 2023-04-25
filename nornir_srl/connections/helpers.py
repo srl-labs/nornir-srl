@@ -72,20 +72,32 @@ def filter_fields(d: Dict, *fields: str) -> Dict:
                 if k in [ f.replace('_', '-') for f in fields ]
         }
     
-
 def strip_modules(d: Dict) -> Dict:
-    stripped = {}
-    for k,v in d.items():
-        k = '/'.join([e.split(':')[-1] for e in k.split('/')])
-        stripped[k] = v
-    for k, v in stripped.items():
-        if isinstance(v, dict):
-            stripped[k] = strip_modules(v)
-        elif isinstance(v, list):
-            stripped[k] = [strip_modules(d) for d in v if isinstance(d, dict)]
-        elif isinstance(v, str):
-            stripped[k] = v.split(':')[-1] if v.startswith('srl_nokia') else v
-    return stripped
+    if isinstance(d, list):
+        return [strip_modules(x) for x in d]
+    elif isinstance(d, dict):
+        return {strip_modules(k): strip_modules(v) for k, v in d.items()}
+    elif isinstance(d, str):
+        if d.startswith("srl_nokia-") and ":" in d:
+            return d[(d.index(":") + 1):]
+        return d
+    else:
+        return d
+
+
+#def strip_modules(d: Dict) -> Dict:
+#    stripped = {}
+#    for k,v in d.items():
+#        k = '/'.join([e.split(':')[-1] for e in k.split('/')])
+#        stripped[k] = copy.deepcopy(v)
+#    for k, v in stripped.items():
+#        if isinstance(v, dict):
+#            stripped[k] = strip_modules(v)
+#        elif isinstance(v, list):
+#            stripped[k] = [strip_modules(d) for d in v if isinstance(d, dict)]
+#        elif isinstance(v, str):
+#            stripped[k] = v.split(':')[-1] if v.startswith('srl_nokia') else v
+#    return stripped
 
 def get_fields_at_depth(d:Dict, depth:int) -> Dict:
     if depth == 1:

@@ -2,6 +2,7 @@ from typing import TYPE_CHECKING, Any, List, Dict, Optional, Tuple
 import difflib
 import json
 import re
+import copy
 
 from deepdiff import DeepDiff
 from natsort import natsorted
@@ -130,6 +131,91 @@ class SrLinux:
         res = jmespath.search(path_spec["jmespath"], resp[0])
         return {'subinterface': res }
     
+    def get_bgp_rib(self, route_fam:str, route_type:Optional[str] = '2', network_instance:Optional[str] = '*') -> Dict[str, Any]:
+        ROUTE_FAMILY = {
+            "evpn": "evpn",
+            "ipv4": "ipv4-unicast",
+            "ipv6": "ipv6-unicast",
+        }
+        ROUTE_TYPE = {
+            "1": "ethernet-ad-routes",
+            "2": "mac-ip-routes",
+            "3": "imet-routes",
+            "4": "ethernet-segment-routes",
+            "5": "ip-prefix-routes",
+        }
+        if route_fam not in ROUTE_FAMILY:
+            raise ValueError(f"Invalid route family {route_fam}")
+        if route_type and route_type not in ROUTE_TYPE:
+            raise ValueError(f"Invalid route type {route_type}")
+        
+        PATH_BGP_PATH_ATTRIBS = f"/network-instance[name={network_instance}]/bgp-rib/attr-sets/attr-set"
+        RIB_EVPN_PATH = (
+                        f"/network-instance[name={network_instance}]/bgp-rib/"
+                        f"{ROUTE_FAMILY[route_fam]}/rib-in-out/rib-in-post/"
+                        f"{ROUTE_TYPE[route_type]}"
+                )
+        RIB_EVPN_JMESPATH_COMMON = '"network-instance"[].{ni:name, Rib:"bgp-rib"."' + ROUTE_FAMILY[route_fam] + \
+                            '"."rib-in-out"."rib-in-post"."' + ROUTE_TYPE[route_type] + '"[]'
+        RIB_EVPN_JMESPATH_ATTRS = {
+            "1": '.{RD:"route-distinguisher", peer:neighbor, ESI:esi, Tag:"ethernet-tag-id",vni:vni, "next-hop":"next-hop", origin:origin, "0_st":"_r_state"}}',
+            "2": '.{RD:"route-distinguisher", peer:neighbor, ESI:esi, "MAC":"mac-address", "IP":"ip-address",vni:vni,"next-hop":"next-hop", origin:origin, "0_st":"_r_state"}}',
+            "3": '.{RD:"route-distinguisher", peer:neighbor, Tag:"ethernet-tag-id", "next-hop":"next-hop", origin:origin, "0_st":"_r_state"}}',
+            "4": '.{RD:"route-distinguisher", peer:neighbor, ESI:esi, "next-hop":"next-hop", origin:origin, "0_st":"_r_state"}}',
+            "5": '.{RD:"route-distinguisher", peer:neighbor, lpref:"local-pref", "IP-Pfx":"ip-prefix",vni:vni, med:med, "next-hop":"next-hop", GW:"gateway-ip",origin:origin, "0_st":"_r_state"}}',
+        }         
+        PATH_SPECS = {
+            "evpn": {
+                "path": RIB_EVPN_PATH,
+                "jmespath": RIB_EVPN_JMESPATH_COMMON + RIB_EVPN_JMESPATH_ATTRS[route_type],
+                "datatype": "state",
+            },
+            "ipv4": {
+                "path": (
+                        f"/network-instance[name={network_instance}]/bgp-rib/"
+                        f"{ROUTE_FAMILY[route_fam]}/local-rib/routes"
+                ),
+                "jmespath": '"network-instance"[].{ni:name, Rib:"bgp-rib"."' + ROUTE_FAMILY[route_fam] +
+                        '"."local-rib"."routes"[]' +
+                        '.{neighbor:neighbor, "0_st":"_r_state", "Pfx":prefix, "lpref":"local-pref", med:med, "next-hop":"next-hop","as-path":"as-path".segment[0].member}}',
+                "datatype": "state",
+            },
+            
+        }
+        attribs = dict()
+        resp = self.get(paths = [ PATH_BGP_PATH_ATTRIBS ], datatype="state")
+        for ni in resp[0].get("network-instance", []):
+            if ni["name"] not in attribs:
+                attribs[ni["name"]] = dict()
+            for path in ni.get("bgp-rib", {}).get("attr-sets", {}).get("attr-set", []):
+                path_copy = copy.deepcopy(path)
+                attribs[ni["name"]].update( { path_copy.pop("index"): path_copy } )
+
+        path_spec = PATH_SPECS[route_fam]
+        resp = self.get(paths = [ path_spec.get("path")], datatype=path_spec["datatype"])
+        for ni in resp[0].get("network-instance", []):
+            if route_fam == "evpn":
+                for route in ni.get("bgp-rib",{}).get("evpn", {}).get('rib-in-out', {}).get('rib-in-post', {}).get(ROUTE_TYPE[route_type], []):
+                    route.update(attribs[ni["name"]][route["attr-id"]])
+                    route['_r_state'] = ('u' if route['used-route'] else '') + ('*' if route['valid-route'] else '') + ('>' if route['best-route'] else '')
+                    if route.get('vni', 0) == 0:
+                        route['vni'] = '-'
+            elif route_fam == "ipv4":
+                for route in ni['bgp-rib'][ROUTE_FAMILY[route_fam]]['local-rib']['routes']:
+                    route.update(attribs[ni["name"]][route["attr-id"]])
+                    route['_r_state'] = ('u' if route['used-route'] else '') + ('*' if route['valid-route'] else '') + ('>' if route['best-route'] else '')
+            elif route_fam == "ipv6":
+                pass
+
+        res = jmespath.search(path_spec["jmespath"], resp[0])
+        if res:
+            for ni in res:
+                for route in ni.get('Rib', []):
+                    route['as-path'] = str(route['as-path']) + ' i' if route.get('as-path') else 'i'
+        else:
+            res = []
+        return {'bgp_rib': res }
+
     def get_sum_bgp(self, network_instance:Optional[str] = '*' ) -> Dict[str, Any]:
         def augment_resp(resp):
             for ni in resp[0]["network-instance"]:
@@ -142,9 +228,14 @@ class SrLinux:
                         else:
                             peer["_evpn"] = "disabled"
                         if peer.get('ipv4-unicast'):
-                            peer["_ipv4"] = str(peer["ipv4-unicast"]["received-routes"]) + "/" + \
-                            str(peer["ipv4-unicast"]["active-routes"]) + "/" + \
-                            str(peer["ipv4-unicast"]["sent-routes"]) if peer["ipv4-unicast"]["admin-state"] == "enable" else "disabled"
+                            if peer["ipv4-unicast"]["admin-state"] == "enable":
+                                peer["_ipv4"] = str(peer["ipv4-unicast"]["received-routes"]) + "/" + \
+                                    str(peer["ipv4-unicast"]["active-routes"]) + "/" + \
+                                    str(peer["ipv4-unicast"]["sent-routes"])
+                                if peer["ipv4-unicast"].get("oper-state")== "down":
+                                    peer["_ipv4"] = "down"
+                            else:
+                                peer["_ipv4"] = "disabled"
                         else:
                             peer["_ipv4"] = "disabled"
 
@@ -191,7 +282,6 @@ class SrLinux:
                 "jmespath": '"network-instance"[].{"Netw-Inst":name, Rib:"route-table"."ipv4-unicast".route[].{"Prefix":"ipv4-prefix",\
                     "next-hop":"_next-hop",type:"route-type", metric:metric, pref:preference, itf:"_nh_itf"}}',
                 "datatype": "state",
-                "key": "index",
             }
 
         nhgroups = self.get(paths = [ f"/network-instance[name={network_instance}]/route-table/next-hop-group[index=*]" ],

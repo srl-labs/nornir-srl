@@ -1,4 +1,5 @@
 from typing import Any, Dict, List, Optional, Callable
+import importlib
 
 from nornir import InitNornir
 
@@ -38,6 +39,14 @@ def ipv4_rib(task: Task) -> Result:
     device = task.host.get_connection(CONNECTION_NAME, task.nornir.config)
     return Result(host=task.host, result = device.get_rib_ipv4())
 
+def bgp_rib(task: Task, **kwargs) -> Result:
+    device = task.host.get_connection(CONNECTION_NAME, task.nornir.config)
+    route_fam = kwargs.get("route_fam")
+    route_type = kwargs.get("route_type", "2")
+    if not route_fam:
+        raise Exception("bgp_rib task requires route_fam report option")
+    return Result(host=task.host, result = device.get_bgp_rib(route_fam=route_fam, route_type=route_type))
+
 def mac_table(task: Task) -> Result:
     device = task.host.get_connection(CONNECTION_NAME, task.nornir.config)
     return Result(host=task.host, result = device.get_mac_table())
@@ -50,7 +59,7 @@ def lldp_nbrs(task: Task) -> Result:
     device = task.host.get_connection(CONNECTION_NAME, task.nornir.config)
     return Result(host=task.host, result = device.get_lldp_sum())
 
-def print_table ( title: str, resource: str, results: AggregatedResult, **filter) -> None:
+def print_table ( title: str, resource: str, results: AggregatedResult, filter: Optional[Dict], **kwargs) -> None:
 
     table_theme = Theme({
         "ok": "green",
@@ -70,9 +79,19 @@ def print_table ( title: str, resource: str, results: AggregatedResult, **filter
     }
 
     
-    console = Console(theme=table_theme)
 
-    table = Table(title=title, highlight=True, box=MINIMAL_DOUBLE_HEAD)
+    console = Console(theme=table_theme)
+    if kwargs.get("box_type") and kwargs["box_type"] != None:
+        box_type = str(kwargs["box_type"]).upper()
+        try:
+            box_type = getattr(importlib.import_module("rich.box"), box_type)
+        except AttributeError:
+            print(f"Unknown box type {box_type}. Check 'python -m rich.box' for valid box types.")
+            box_type = MINIMAL_DOUBLE_HEAD
+    else:
+        box_type = MINIMAL_DOUBLE_HEAD
+#    table = Table(title=title, highlight=True, box=MINIMAL_DOUBLE_HEAD)
+    table = Table(title=title, highlight=True, box=box_type)
     table.add_column('Node', no_wrap=True)
 
     # get fields across a nested dict with dicts and lists of dicts
@@ -110,7 +129,7 @@ def print_table ( title: str, resource: str, results: AggregatedResult, **filter
         rows = []
         r = host_result[0]  # only look at result of first task, 1 task per table
         if r.failed:
-            print(f"Failed to get {resource} for {host}")
+            print(f"Failed to get {resource} for {host}. Exception: {r.exception}")
             continue
         if r.result.get(resource) == None:
             continue
@@ -161,15 +180,23 @@ def print_table ( title: str, resource: str, results: AggregatedResult, **filter
 @click.option('--cfg', '-c', default='nornir_config.yaml', show_default=True, help='Nornir config file')
 @click.option('--inv-filter', '-i', multiple=True, help='filter inventory, e.g. -i site=lab -i role=leaf')
 @click.option('--field-filter', '-f', multiple=True, help='filter fields, e.g. -f state=up -f admin_state=enable')
+@click.option('--box-type', '-b', multiple=False, help="box type of printed table, e.g. -b minimal_double_head. 'python -m rich.box' for options")
+@click.option('--report-options', '-r', multiple=True, help="report-specific options, e.g. -o route_fam=evpn -o route_type=2 for 'bgp-rib report")
 def cli(
     report: str, 
     cfg: str = 'config.yaml',
     inv_filter:Optional[List] = None,
-    field_filter:Optional[List] = None
+    field_filter:Optional[List] = None,
+    report_options:Optional[List] = None,
+    box_type:Optional[str] = None,
     ) -> None: 
 
     i_filter = {k:v for k,v in [ f.split('=') for f in inv_filter]} if inv_filter else {}
     f_filter = {k:v for k,v in [ f.split('=') for f in field_filter]} if field_filter else {}
+    report_options = {k:v for k,v in [ f.split('=') for f in report_options]} if report_options else {}
+
+    if box_type:
+        box_type = box_type.upper()
 
     reports = {
         'bgp-peers': (bgp_peers, "BGP Peers"),
@@ -179,6 +206,7 @@ def cli(
         'sys-info': (sys_info, "System Info"),
         'nwi-itfs': (nwi_itfs, "Network-Instance Interfaces"),
         'lldp-nbrs': (lldp_nbrs, "LLDP Neighbors"),
+        'bgp-rib': (bgp_rib, "BGP RIB"),
     }
 
     if report not in reports:
@@ -191,19 +219,22 @@ def cli(
         target = fabric.filter(**i_filter)
     else:
         target = fabric
-    result = target.run(task=reports[report][0])
+    result = target.run(task=reports[report][0], raise_on_error=False, **report_options)
     title = "[bold]" + reports[report][1] + "[/bold]"
     if f_filter:
         title += "\nFields:" + str(f_filter)
     if i_filter:
         title += "\nInventory:" + str(i_filter)
+    if report_options:
+        title += "\nReport options:" + str(report_options)
     if len(target.data.failed_hosts)>0:
         title += "\n[red]Failed hosts:" + str(target.data.failed_hosts)
     print_table(
             title=title, 
             resource=result.name, 
             results=result, 
-            **f_filter
+            filter=f_filter,
+            box_type=box_type,
             )
 
 
