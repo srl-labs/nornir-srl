@@ -23,7 +23,7 @@ Following command will install the the `nornir_srl` module and all its dependenc
 
 ```
 pip install wheel
-pip install nornir_srl
+pip install -U nornir_srl
 ```
 Create the Nornir confguration file, for example:
 
