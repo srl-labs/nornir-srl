@@ -7,4 +7,7 @@
 - added `--box-type` option to control table printing
 - added 'bgp-rib' report. Needs report-specific option via `-r` option to specify `route_fam` (mandatory) and `route_type` for EVPN routes
 
+## 0.0.4
 
+- major rework of bgp-rib to support yang changes across releases
+- bug fixes
