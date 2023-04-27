@@ -1,7 +1,7 @@
 from typing import Any, Dict, List, Tuple, Optional
 import json
 import difflib
-import fnmatch
+import re
 
 def normalize_gnmi_resp(resp: Dict) -> List[Dict[str, Any]]:
     """
@@ -73,13 +73,16 @@ def filter_fields(d: Dict, *fields: str) -> Dict:
         }
     
 def strip_modules(d: Dict) -> Dict:
+    p = re.compile(r"srl_nokia-[^:]+:")
+
     if isinstance(d, list):
         return [strip_modules(x) for x in d]
     elif isinstance(d, dict):
         return {strip_modules(k): strip_modules(v) for k, v in d.items()}
     elif isinstance(d, str):
         if d.startswith("srl_nokia-") and ":" in d:
-            return d[(d.index(":") + 1):]
+#            return d[(d.index(":") + 1):]
+            return re.sub(p, '', d)
         return d
     else:
         return d

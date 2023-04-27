@@ -114,7 +114,7 @@ class SrLinux:
             for path in resp[0]:
                 result.update({k:v for k,v in resp[0][path].items() if k in spec["fields"] } )
         if result.get('software-version'):
-                result['software-version'] = result['software-version'].split('-')[0]
+                result['software-version'] = result['software-version'].split('-')[0].lstrip('v')
 
         return {'sys_info': [result] }
 
@@ -132,6 +132,15 @@ class SrLinux:
         return {'subinterface': res }
     
     def get_bgp_rib(self, route_fam:str, route_type:Optional[str] = '2', network_instance:Optional[str] = '*') -> Dict[str, Any]:
+        BGP_RIB_MOD = 'bgp-rib'
+        mod_version = [ m for m in self.capabilities.get("supported_models", []) if BGP_RIB_MOD in m.get("name")][0].get("version") 
+        BGP_EVPN_VERSION_MAP = {
+            1: ("20"),
+        }
+        BGP_IP_VERSION_MAP = {
+            1: ("2021-", "2022-"),
+            2: ("2023-", "20"),
+        }
         ROUTE_FAMILY = {
             "evpn": "evpn",
             "ipv4": "ipv4-unicast",
@@ -144,40 +153,82 @@ class SrLinux:
             "4": "ethernet-segment-routes",
             "5": "ip-prefix-routes",
         }
+        def augment_routes(d, attribs): # augment routes with attributes
+            if isinstance(d, list):
+                return [augment_routes(x, attribs) for x in d]
+            elif isinstance(d, dict):
+                if "attr-id" in d:
+                    d.update(attribs.get(d["attr-id"], {}))
+                    d['_r_state'] = ('u' if d['used-route'] else '') + ('*' if d['valid-route'] else '') + ('>' if d['best-route'] else '')
+                    if d.get('vni', 0) == 0:
+                        d['vni'] = '-'
+                    return d
+                else:
+                    return {k: augment_routes(v,attribs) for k, v in d.items()}
+            else:
+                return d
+
+        evpn_path_version = [ k for k,v  in sorted(BGP_EVPN_VERSION_MAP.items(), key=lambda item: item[0]) if len ( [ ver for ver in v if mod_version.startswith(ver)]) > 0 ] [0]
+        ip_path_version = [ k for k,v  in sorted(BGP_IP_VERSION_MAP.items(), key=lambda item: item[0]) if len ( [ ver for ver in v if mod_version.startswith(ver)]) > 0 ] [0]
+
         if route_fam not in ROUTE_FAMILY:
             raise ValueError(f"Invalid route family {route_fam}")
         if route_type and route_type not in ROUTE_TYPE:
             raise ValueError(f"Invalid route type {route_type}")
         
         PATH_BGP_PATH_ATTRIBS = f"/network-instance[name={network_instance}]/bgp-rib/attr-sets/attr-set"
-        RIB_EVPN_PATH = (
+        RIB_EVPN_PATH_VERSIONS = {
+            1: { 
+                'RIB_EVPN_PATH':
+                    (
                         f"/network-instance[name={network_instance}]/bgp-rib/"
                         f"{ROUTE_FAMILY[route_fam]}/rib-in-out/rib-in-post/"
                         f"{ROUTE_TYPE[route_type]}"
-                )
-        RIB_EVPN_JMESPATH_COMMON = '"network-instance"[].{ni:name, Rib:"bgp-rib"."' + ROUTE_FAMILY[route_fam] + \
-                            '"."rib-in-out"."rib-in-post"."' + ROUTE_TYPE[route_type] + '"[]'
-        RIB_EVPN_JMESPATH_ATTRS = {
-            "1": '.{RD:"route-distinguisher", peer:neighbor, ESI:esi, Tag:"ethernet-tag-id",vni:vni, "next-hop":"next-hop", origin:origin, "0_st":"_r_state"}}',
-            "2": '.{RD:"route-distinguisher", peer:neighbor, ESI:esi, "MAC":"mac-address", "IP":"ip-address",vni:vni,"next-hop":"next-hop", origin:origin, "0_st":"_r_state"}}',
-            "3": '.{RD:"route-distinguisher", peer:neighbor, Tag:"ethernet-tag-id", "next-hop":"next-hop", origin:origin, "0_st":"_r_state"}}',
-            "4": '.{RD:"route-distinguisher", peer:neighbor, ESI:esi, "next-hop":"next-hop", origin:origin, "0_st":"_r_state"}}',
-            "5": '.{RD:"route-distinguisher", peer:neighbor, lpref:"local-pref", "IP-Pfx":"ip-prefix",vni:vni, med:med, "next-hop":"next-hop", GW:"gateway-ip",origin:origin, "0_st":"_r_state"}}',
-        }         
+                    ),
+                'RIB_EVPN_JMESPATH_COMMON': '"network-instance"[].{ni:name, Rib:"bgp-rib"."' + ROUTE_FAMILY[route_fam] + \
+                            '"."rib-in-out"."rib-in-post"."' + ROUTE_TYPE[route_type] + '"[]',
+                'RIB_EVPN_JMESPATH_ATTRS': {
+                    "1": '.{RD:"route-distinguisher", peer:neighbor, ESI:esi, Tag:"ethernet-tag-id",vni:vni, "next-hop":"next-hop", origin:origin, "0_st":"_r_state"}}',
+                    "2": '.{RD:"route-distinguisher", peer:neighbor, ESI:esi, "MAC":"mac-address", "IP":"ip-address",vni:vni,"next-hop":"next-hop", origin:origin, "0_st":"_r_state"}}',
+                    "3": '.{RD:"route-distinguisher", peer:neighbor, Tag:"ethernet-tag-id", "next-hop":"next-hop", origin:origin, "0_st":"_r_state"}}',
+                    "4": '.{RD:"route-distinguisher", peer:neighbor, ESI:esi, "next-hop":"next-hop", origin:origin, "0_st":"_r_state"}}',
+                    "5": '.{RD:"route-distinguisher", peer:neighbor, lpref:"local-pref", "IP-Pfx":"ip-prefix",vni:vni, med:med, "next-hop":"next-hop", GW:"gateway-ip",origin:origin, "0_st":"_r_state"}}',
+                },       
+            },
+        }
+        RIB_IP_PATH_VERSIONS = {
+            1: {
+                'RIB_IP_PATH': 
+                    (
+                        f"/network-instance[name={network_instance}]/bgp-rib/"
+                        f"{ROUTE_FAMILY[route_fam]}/local-rib/routes"
+                    ),
+                'RIB_IP_JMESPATH': '"network-instance"[].{ni:name, Rib:"bgp-rib"."' + ROUTE_FAMILY[route_fam] +
+                        '"."local-rib"."routes"[]' +
+                        '.{neighbor:neighbor, "0_st":"_r_state", "Pfx":prefix, "lpref":"local-pref", med:med, "next-hop":"next-hop","as-path":"as-path".segment[0].member}}',
+
+            },
+            2: {
+                'RIB_IP_PATH':    
+                    (
+                        f"/network-instance[name={network_instance}]/bgp-rib/afi-safi[afi-safi-name={ROUTE_FAMILY[route_fam]}]/"
+                        f"{ROUTE_FAMILY[route_fam]}/local-rib/routes"
+                    ),  
+                'RIB_IP_JMESPATH': '"network-instance"[].{ni:name, Rib:"bgp-rib"."afi-safi"[]."' + ROUTE_FAMILY[route_fam] +
+                        '"."local-rib"."routes"[]' +
+                        '.{neighbor:neighbor, "0_st":"_r_state", "Pfx":prefix, "lpref":"local-pref", med:med, "next-hop":"next-hop","as-path":"as-path".segment[0].member}}',
+            },
+        }
+
         PATH_SPECS = {
             "evpn": {
-                "path": RIB_EVPN_PATH,
-                "jmespath": RIB_EVPN_JMESPATH_COMMON + RIB_EVPN_JMESPATH_ATTRS[route_type],
+                "path": RIB_EVPN_PATH_VERSIONS[evpn_path_version]["RIB_EVPN_PATH"],
+                "jmespath": RIB_EVPN_PATH_VERSIONS[evpn_path_version]["RIB_EVPN_JMESPATH_COMMON"] + RIB_EVPN_PATH_VERSIONS[evpn_path_version]['RIB_EVPN_JMESPATH_ATTRS'][route_type],
                 "datatype": "state",
             },
             "ipv4": {
-                "path": (
-                        f"/network-instance[name={network_instance}]/bgp-rib/"
-                        f"{ROUTE_FAMILY[route_fam]}/local-rib/routes"
-                ),
-                "jmespath": '"network-instance"[].{ni:name, Rib:"bgp-rib"."' + ROUTE_FAMILY[route_fam] +
-                        '"."local-rib"."routes"[]' +
-                        '.{neighbor:neighbor, "0_st":"_r_state", "Pfx":prefix, "lpref":"local-pref", med:med, "next-hop":"next-hop","as-path":"as-path".segment[0].member}}',
+                "path": RIB_IP_PATH_VERSIONS[ip_path_version]['RIB_IP_PATH'],
+                "jmespath": RIB_IP_PATH_VERSIONS[ip_path_version]['RIB_IP_JMESPATH'],
                 "datatype": "state",
             },
             
@@ -194,18 +245,7 @@ class SrLinux:
         path_spec = PATH_SPECS[route_fam]
         resp = self.get(paths = [ path_spec.get("path")], datatype=path_spec["datatype"])
         for ni in resp[0].get("network-instance", []):
-            if route_fam == "evpn":
-                for route in ni.get("bgp-rib",{}).get("evpn", {}).get('rib-in-out', {}).get('rib-in-post', {}).get(ROUTE_TYPE[route_type], []):
-                    route.update(attribs[ni["name"]][route["attr-id"]])
-                    route['_r_state'] = ('u' if route['used-route'] else '') + ('*' if route['valid-route'] else '') + ('>' if route['best-route'] else '')
-                    if route.get('vni', 0) == 0:
-                        route['vni'] = '-'
-            elif route_fam == "ipv4":
-                for route in ni['bgp-rib'][ROUTE_FAMILY[route_fam]]['local-rib']['routes']:
-                    route.update(attribs[ni["name"]][route["attr-id"]])
-                    route['_r_state'] = ('u' if route['used-route'] else '') + ('*' if route['valid-route'] else '') + ('>' if route['best-route'] else '')
-            elif route_fam == "ipv6":
-                pass
+            ni = augment_routes(ni, attribs[ni["name"]])
 
         res = jmespath.search(path_spec["jmespath"], resp[0])
         if res:
@@ -336,7 +376,7 @@ class SrLinux:
         path_spec = {
                 "path": f"/network-instance[name={nw_instance}]",
                 "jmespath": '"network-instance"[].{name:name,oper:"oper-state",type:type,itfs: interface[].{Subitf:name,\
-                      "if-oper":"oper-state", "if-dwn-reason":"oper-down-reason","mac-learning":"oper-mac-learning"}}',
+                      "if-oper":"oper-state", "if-dwn-reason":"oper-down-reason"}}',
                 "datatype": "state",
             }
         resp = self.get(paths = [ path_spec.get("path")], datatype=path_spec["datatype"])
