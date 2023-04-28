@@ -209,7 +209,7 @@ testing = ["pytest (>=6)", "pytest-checkdocs (>=2.4)", "pytest-flake8", "flake8 
 
 [[package]]
 name = "ipython"
-version = "8.12.0"
+version = "8.13.0"
 description = "IPython: Productive Interactive Computing"
 category = "dev"
 optional = false
