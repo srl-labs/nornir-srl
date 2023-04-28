@@ -78,8 +78,6 @@ def print_table ( title: str, resource: str, results: AggregatedResult, filter: 
         'active': '[cyan]',
     }
 
-    
-
     console = Console(theme=table_theme)
     if kwargs.get("box_type") and kwargs["box_type"] != None:
         box_type = str(kwargs["box_type"]).upper()

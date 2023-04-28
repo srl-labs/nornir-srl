@@ -257,27 +257,44 @@ class SrLinux:
         return {'bgp_rib': res }
 
     def get_sum_bgp(self, network_instance:Optional[str] = '*' ) -> Dict[str, Any]:
+        BGP_MOD = 'urn:srl_nokia/bgp:srl_nokia-bgp'
+        mod_version = [ m for m in self.capabilities.get("supported_models", []) if BGP_MOD == m.get("name")][0].get("version") 
+        BGP_VERSION_MAP = {
+            1: ("2021-", "2022-"),
+            2: ("2023-3", "20")
+        }
+        our_version = [ k for k,v  in sorted(BGP_VERSION_MAP.items(), key=lambda item: item[0]) if len ( [ ver for ver in v if mod_version.startswith(ver)]) > 0 ] [0]
         def augment_resp(resp):
             for ni in resp[0]["network-instance"]:
                 if ni.get('protocols') and ni['protocols'].get('bgp'):
                     for peer in ni['protocols']['bgp']['neighbor']:
-                        if peer.get('evpn'):
-                            peer["_evpn"] = str(peer["evpn"]["received-routes"]) + "/" + \
-                            str(peer["evpn"]["active-routes"]) + "/" + \
-                            str(peer["evpn"]["sent-routes"]) if peer["evpn"]["admin-state"] == "enable" else "disabled"
+                        peer_data = dict()
+                        if our_version == 1:
+                            peer_data['evpn'] = peer.get('evpn')
+                            peer_data['ipv4-unicast'] = peer.get('ipv4-unicast')
+                        elif our_version == 2:
+                            for afi in peer.get('afi-safi', []):
+                                if afi['afi-safi-name'] == 'evpn':
+                                    peer_data['evpn'] = afi
+                                elif afi['afi-safi-name'] == 'ipv4-unicast':
+                                    peer_data['ipv4-unicast'] = afi
+                        if peer_data.get('evpn'):
+                            peer["_evpn"] = str(peer_data["evpn"]["received-routes"]) + "/" + \
+                            str(peer_data["evpn"]["active-routes"]) + "/" + \
+                            str(peer_data["evpn"]["sent-routes"]) if peer_data["evpn"]["admin-state"] == "enable" else "disabled"
                         else:
-                            peer["_evpn"] = "disabled"
-                        if peer.get('ipv4-unicast'):
-                            if peer["ipv4-unicast"]["admin-state"] == "enable":
-                                peer["_ipv4"] = str(peer["ipv4-unicast"]["received-routes"]) + "/" + \
-                                    str(peer["ipv4-unicast"]["active-routes"]) + "/" + \
-                                    str(peer["ipv4-unicast"]["sent-routes"])
-                                if peer["ipv4-unicast"].get("oper-state")== "down":
+                            peer["_evpn"] = "-"
+                        if peer_data.get('ipv4-unicast'):
+                            if peer_data["ipv4-unicast"]["admin-state"] == "enable":
+                                peer["_ipv4"] = str(peer_data["ipv4-unicast"]["received-routes"]) + "/" + \
+                                    str(peer_data["ipv4-unicast"]["active-routes"]) + "/" + \
+                                    str(peer_data["ipv4-unicast"]["sent-routes"])
+                                if peer_data["ipv4-unicast"].get("oper-state")== "down":
                                     peer["_ipv4"] = "down"
                             else:
                                 peer["_ipv4"] = "disabled"
                         else:
-                            peer["_ipv4"] = "disabled"
+                            peer["_ipv4"] = "-"
 
         path_spec = {
                 "path": f"/network-instance[name={network_instance}]/protocols/bgp/neighbor",
