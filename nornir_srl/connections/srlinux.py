@@ -272,12 +272,15 @@ class SrLinux:
                         if our_version == 1:
                             peer_data['evpn'] = peer.get('evpn')
                             peer_data['ipv4-unicast'] = peer.get('ipv4-unicast')
+                            peer_data['local-as'] = peer.get('local-as', [{}])[0].get('as-number', '-')
                         elif our_version == 2:
+                            peer_data['local-as'] = peer.get('local-as', {}).get('as-number', '-')
                             for afi in peer.get('afi-safi', []):
                                 if afi['afi-safi-name'] == 'evpn':
                                     peer_data['evpn'] = afi
                                 elif afi['afi-safi-name'] == 'ipv4-unicast':
                                     peer_data['ipv4-unicast'] = afi
+                        peer["_local-asn"] = peer_data['local-as']
                         if peer_data.get('evpn'):
                             peer["_evpn"] = str(peer_data["evpn"]["received-routes"]) + "/" + \
                             str(peer_data["evpn"]["active-routes"]) + "/" + \
@@ -299,7 +302,7 @@ class SrLinux:
         path_spec = {
                 "path": f"/network-instance[name={network_instance}]/protocols/bgp/neighbor",
                 "jmespath": '"network-instance"[].{NetwInst:name, Neighbors: protocols.bgp.neighbor[].{"1_peer":"peer-address",\
-                    peer_as:"peer-as", state:"session-state",local_as:"local-as"[]."as-number",\
+                    peer_as:"peer-as", state:"session-state",local_as:"_local-asn",\
                     "group":"peer-group", "export_policy":"export-policy", "import_policy":"import-policy",\
                     "AFI/SAFI\\nIPv4-UC\\nRx/Act/Tx":"_ipv4", "AFI/SAFI\\nEVPN\\nRx/Act/Tx":"_evpn"}}',
                 "datatype": "state",
