@@ -1,4 +1,5 @@
-## 0.1.1
+
+## 0.1.2
 
 - major rework of bgp-rib, bgp-peers to support yang changes across releases
 - bug fixes
