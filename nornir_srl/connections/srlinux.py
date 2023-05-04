@@ -1,4 +1,4 @@
-from typing import TYPE_CHECKING, Any, List, Dict, Optional, Tuple
+from typing import TYPE_CHECKING, Any, List, Dict, Optional, Union
 import difflib
 import json
 import re
@@ -511,15 +511,16 @@ class SrLinux:
             "path": f"/network-instance[name={nw_instance}]",
             "jmespath": '"network-instance"[].{ni:name,oper:"oper-state",type:type,"router-id":protocols.bgp."router-id",\
                     itfs: interface[].{Subitf:name,"if-oper":"oper-state", ipv4:ipv4.address[]."ip-prefix",\
-                        vlan:vlan.encap."single-tagged"."vlan-id"}}',
+                        vlan:vlan.encap."single-tagged"."vlan-id", "mtu":"_mtu"}}',
             "datatype": "state",
         }
-        subitf: Dict[str, Dict[str, Any]] = {}
-        resp = self.get(paths=[SUBITF_PATH], datatype="config")
+        subitf = {}
+        resp = self.get(paths=[SUBITF_PATH], datatype="state")
         for itf in resp[0].get("interface", []):
             for si in itf.get("subinterface", []):
                 subif_name = itf["name"] + "." + str(si.pop("index"))
                 subitf[subif_name] = si
+                subitf[subif_name]["_mtu"] = si.get("l2-mtu") if "l2-mtu" in si else si.get("ip-mtu", "")
 
         resp = self.get(
             paths=[path_spec.get("path", "")], datatype=path_spec["datatype"]

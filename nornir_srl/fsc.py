@@ -1,5 +1,6 @@
 from typing import Any, Dict, List, Optional, Callable
 import importlib
+import fnmatch
 
 from nornir import InitNornir
 
@@ -138,7 +139,7 @@ def print_table(
             {
                 k: v
                 for k, v in row.items()
-                if filter.get(k) and str(filter[k]) in str(row[k])
+                if filter.get(k) and fnmatch.fnmatch(str(row[k]), str(filter[k]))
             }
         ) < len(filter):
             return False
