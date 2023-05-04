@@ -3,6 +3,7 @@ import json
 import difflib
 import re
 
+
 def normalize_gnmi_resp(resp: Dict) -> List[Dict[str, Any]]:
     """
     remove gnmi notification and update envelopes from payload
@@ -10,34 +11,35 @@ def normalize_gnmi_resp(resp: Dict) -> List[Dict[str, Any]]:
 
     Args:
         resp: dictionary as returned by gnmi client (get)
-    
+
     Returns:
         dict: with notif and update envelopes removed
     """
     r = []
-    for notif in resp.get("notification"):
+    for notif in resp.get("notification", {}):
         if "update" in notif:
-            updates = [ upd for upd in notif.get("update")]
+            updates = [upd for upd in notif.get("update")]
             for u in updates:
                 if u.get("path"):
-                    r.append( { u.get("path") : u.get("val") } )
+                    r.append({u.get("path"): u.get("val")})
                 else:
-                    if isinstance(u.get("val"), dict) and len(u["val"])>1: # no path with multiple dicts in val: path='/', as per gnmi-spec
-                        r.append( { "/": u["val"] })
+                    if (
+                        isinstance(u.get("val"), dict) and len(u["val"]) > 1
+                    ):  # no path with multiple dicts in val: path='/', as per gnmi-spec
+                        r.append({"/": u["val"]})
                     else:
-                        r.append(u["val"]) # a yang-list that gets a None path in SRL, e.g. /interface
+                        r.append(
+                            u["val"]
+                        )  # a yang-list that gets a None path in SRL, e.g. /interface
         else:
             r.append({})
     return r
 
-def diff_obj(
-        a:Dict, 
-        a_name: str,
-        b:Dict,
-        b_name: str) -> Tuple[bool, str]:
+
+def diff_obj(a: Dict, a_name: str, b: Dict, b_name: str) -> Tuple[bool, str]:
     """
     compares to dicts and show diff
-    
+
     Args:
         a: dict to compare against b
         a_name: name of source of 'a' to show in diff output
@@ -66,13 +68,12 @@ def diff_obj(
     else:
         return (False, "")
 
+
 def filter_fields(d: Dict, *fields: str) -> Dict:
-    return  { 
-            k:v for k,v in d.items()
-                if k in [ f.replace('_', '-') for f in fields ]
-        }
-    
-def strip_modules(d: Dict) -> Dict:
+    return {k: v for k, v in d.items() if k in [f.replace("_", "-") for f in fields]}
+
+
+def strip_modules(d: Dict) -> Any:
     p = re.compile(r"srl_nokia-[^:]+:")
 
     if isinstance(d, list):
@@ -81,14 +82,14 @@ def strip_modules(d: Dict) -> Dict:
         return {strip_modules(k): strip_modules(v) for k, v in d.items()}
     elif isinstance(d, str):
         if d.startswith("srl_nokia-") and ":" in d:
-#            return d[(d.index(":") + 1):]
-            return re.sub(p, '', d)
+            #            return d[(d.index(":") + 1):]
+            return re.sub(p, "", d)
         return d
     else:
         return d
 
 
-#def strip_modules(d: Dict) -> Dict:
+# def strip_modules(d: Dict) -> Dict:
 #    stripped = {}
 #    for k,v in d.items():
 #        k = '/'.join([e.split(':')[-1] for e in k.split('/')])
@@ -102,20 +103,26 @@ def strip_modules(d: Dict) -> Dict:
 #            stripped[k] = v.split(':')[-1] if v.startswith('srl_nokia') else v
 #    return stripped
 
-def get_fields_at_depth(d:Dict, depth:int) -> Dict:
-    if depth == 1:
-        return {k: v for k,v in d.items() if isinstance(v, (str, int, float, list))}
-    return {k: get_fields_at_depth(v, depth-1) for k,v in d.items() if isinstance(v, dict)}
 
-def flatten_dict(d: Dict, depth:Optional[int]) -> Dict:
+def get_fields_at_depth(d: Dict, depth: int) -> Dict:
+    if depth == 1:
+        return {k: v for k, v in d.items() if isinstance(v, (str, int, float, list))}
+    return {
+        k: get_fields_at_depth(v, depth - 1)
+        for k, v in d.items()
+        if isinstance(v, dict)
+    }
+
+
+def flatten_dict(d: Dict) -> Dict:
     r = {}
-    for k,v in d.items():
+    for k, v in d.items():
         if isinstance(v, dict):
             v = [v]
         if isinstance(v, list):
             for e in v:
                 tmp = flatten_dict(e)
-                r.update({ k + '_' + k2:v2 for k2,v2 in tmp.items() } )
+                r.update({k + "_" + k2: v2 for k2, v2 in tmp.items()})
         else:
             r[k] = v
     return r

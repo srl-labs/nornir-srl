@@ -107,4 +107,9 @@ output/
 
 pip-wheel-metadata/
 
+### Project specific
 tests/.backup
+.backup
+inventory
+intent
+**pem
