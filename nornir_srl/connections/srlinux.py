@@ -222,12 +222,14 @@ class SrLinux:
             raise ValueError(f"Invalid route type {route_type}")
 
         PATH_BGP_PATH_ATTRIBS = (
-            f"/network-instance[name={network_instance}]/bgp-rib/attr-sets/attr-set"
+            "/network-instance[name="
+            + network_instance
+            + "]/bgp-rib/attr-sets/attr-set"
         )
-        RIB_EVPN_PATH_VERSIONS = {
+        RIB_EVPN_PATH_VERSIONS: Dict[int, Dict[str, Any]] = {
             1: {
                 "RIB_EVPN_PATH": (
-                    f"/network-instance[name={network_instance}]/bgp-rib/"
+                    "/network-instance[name=" + network_instance + "]/bgp-rib/"  # type: ignore
                     f"{ROUTE_FAMILY[route_fam]}/rib-in-out/rib-in-post/"
                     f"{ROUTE_TYPE[route_type]}"  # type: ignore
                 ),
@@ -285,7 +287,9 @@ class SrLinux:
                 "datatype": "state",
             },
         }
-        attribs = dict()
+
+        attribs: Dict[str, Dict[str, Any]] = dict()
+
         resp = self.get(paths=[PATH_BGP_PATH_ATTRIBS], datatype="state")
         for ni in resp[0].get("network-instance", []):
             if ni["name"] not in attribs:
@@ -294,8 +298,10 @@ class SrLinux:
                 path_copy = copy.deepcopy(path)
                 attribs[ni["name"]].update({path_copy.pop("index"): path_copy})
 
-        path_spec = PATH_SPECS[route_fam]
-        resp = self.get(paths=[path_spec.get("path")], datatype=path_spec["datatype"])
+        path_spec: Dict[str, str] = PATH_SPECS[route_fam]
+        resp = self.get(
+            paths=[str(path_spec.get("path"))], datatype=path_spec["datatype"]
+        )
         for ni in resp[0].get("network-instance", []):
             ni = augment_routes(ni, attribs[ni["name"]])
 
@@ -473,14 +479,14 @@ class SrLinux:
         nhgroup_mapping = {}
         for ni in nhgroups[0].get("network-instance", {}):
             network_instance = ni["name"]
-            tmp_map = {}
+            nh_map: Dict[str, List] = {}
             for nhgroup in ni["route-table"]["next-hop-group"]:
                 #                    tmp_map[nhgroup["index"]] = [ nh["next-hop"] for nh in nhgroup["next-hop"] ]
-                tmp_map[nhgroup["index"]] = [
+                nh_map[nhgroup["index"]] = [
                     nh_mapping[network_instance][nh.get("next-hop")]
                     for nh in nhgroup["next-hop"]
                 ]
-            nhgroup_mapping.update({ni["name"]: tmp_map})
+            nhgroup_mapping.update({ni["name"]: nh_map})
 
         resp = self.get(
             paths=[path_spec.get("path", "")], datatype=path_spec["datatype"]
@@ -520,7 +526,9 @@ class SrLinux:
             for si in itf.get("subinterface", []):
                 subif_name = itf["name"] + "." + str(si.pop("index"))
                 subitf[subif_name] = si
-                subitf[subif_name]["_mtu"] = si.get("l2-mtu") if "l2-mtu" in si else si.get("ip-mtu", "")
+                subitf[subif_name]["_mtu"] = (
+                    si.get("l2-mtu") if "l2-mtu" in si else si.get("ip-mtu", "")
+                )
 
         resp = self.get(
             paths=[path_spec.get("path", "")], datatype=path_spec["datatype"]
@@ -559,7 +567,7 @@ class SrLinux:
         strip_mod: Optional[bool] = True,
     ) -> str:
         device_cfg_after = []
-        r_list = []
+        r_list: List[str] = []
         for r in input:
             r_list += r.keys()
         #        r_list = [ list(r.keys())[0] for r in input ]

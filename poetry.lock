@@ -243,19 +243,20 @@ python-versions = ">=3.7"
 
 [[package]]
 name = "mypy"
-version = "0.942"
+version = "0.991"
 description = "Optional static typing for Python"
 category = "dev"
 optional = false
-python-versions = ">=3.6"
+python-versions = ">=3.7"
 
 [package.dependencies]
 mypy-extensions = ">=0.4.3"
-tomli = ">=1.1.0"
+tomli = {version = ">=1.1.0", markers = "python_version < \"3.11\""}
 typing-extensions = ">=3.10"
 
 [package.extras]
 dmypy = ["psutil (>=4.0)"]
+install-types = ["pip"]
 python2 = ["typed-ast (>=1.4.0,<2)"]
 reports = ["lxml"]
 
@@ -405,7 +406,7 @@ dev = ["pre-commit", "tox"]
 
 [[package]]
 name = "protobuf"
-version = "4.22.3"
+version = "4.22.4"
 description = ""
 category = "main"
 optional = false
@@ -440,7 +441,7 @@ plugins = ["importlib-metadata"]
 
 [[package]]
 name = "pygnmi"
-version = "0.8.9"
+version = "0.8.12"
 description = "Pure Python gNMI client to manage network functions and collect telemetry."
 category = "main"
 optional = false
@@ -492,7 +493,7 @@ jupyter = ["ipywidgets (>=7.5.1,<8.0.0)"]
 
 [[package]]
 name = "ruamel.yaml"
-version = "0.17.21"
+version = "0.17.22"
 description = "ruamel.yaml is a YAML parser/emitter that supports roundtrip preservation of comments, seq/map flow style, and map key order"
 category = "main"
 optional = false
@@ -643,7 +644,7 @@ testing = ["pytest (>=6)", "pytest-checkdocs (>=2.4)", "flake8 (<5)", "pytest-co
 [metadata]
 lock-version = "1.1"
 python-versions = "^3.8"
-content-hash = "e838ab9a4cd56df1498c6f242923f861d92efc21de81482397415cde389658d1"
+content-hash = "045f4ca0679fb198b5ba71631d7cef56787e52ce573d2ea229524a8681fbadd2"
 
 [metadata.files]
 atomicwrites = []

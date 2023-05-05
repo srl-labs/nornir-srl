@@ -1,6 +1,7 @@
 from typing import Any, Dict, List, Optional, Callable
 import importlib
 import fnmatch
+import json
 
 from nornir import InitNornir
 
@@ -103,16 +104,16 @@ def print_table(
     if kwargs.get("box_type") and kwargs["box_type"] != None:
         box_type = str(kwargs["box_type"]).upper()
         try:
-            box_type = getattr(importlib.import_module("rich.box"), box_type)
+            box_t = getattr(importlib.import_module("rich.box"), box_type)
         except AttributeError:
             print(
                 f"Unknown box type {box_type}. Check 'python -m rich.box' for valid box types."
             )
-            box_type = MINIMAL_DOUBLE_HEAD
+            box_t = MINIMAL_DOUBLE_HEAD
     else:
-        box_type = MINIMAL_DOUBLE_HEAD
+        box_t = MINIMAL_DOUBLE_HEAD
     #    table = Table(title=title, highlight=True, box=MINIMAL_DOUBLE_HEAD)
-    table = Table(title=title, highlight=True, box=box_type)
+    table = Table(title=title, highlight=True, box=box_t)
     table.add_column("Node", no_wrap=True)
 
     # get fields across a nested dict with dicts and lists of dicts
@@ -146,75 +147,81 @@ def print_table(
         else:
             return True
 
-    col_names = []
+    col_names: List[str] = []
     for host, host_result in results.items():
         rows = []
-        r = host_result[0]  # only look at result of first task, 1 task per table
+        r: Result = host_result[
+            0
+        ]  # only look at result of first task, 1 task per table
         if r.failed:
             print(f"Failed to get {resource} for {host}. Exception: {r.exception}")
             continue
-        if r.result.get(resource) == None:
-            continue
-        for n, l in enumerate(r.result.get(resource)):
-            if len(col_names) == 0:
-                col_names = get_fields(l)
-                for col in col_names:
-                    table.add_column(col, no_wrap=True)
-            common = {
-                x: y
-                for x, y in l.items()
-                if isinstance(y, (str, int, float))
-                or (isinstance(y, list) and len(y) > 0 and not isinstance(y[0], dict))
-            }
-            if (
-                len([v for v in l.values() if isinstance(v, list)]) == 0
-            ):  # single row per host
-                if pass_filter(common, filter):
-                    rows.append(common)
-            #                if pass_filter(row, filter):
-            #                    rows.append({k:v for k,v in l.items()})
-            else:
-                for key, v in l.items():
-                    if isinstance(v, list):
-                        first_row = True
-                        for item in v:
-                            row = {}
-                            row.update(
-                                {
-                                    k: y
-                                    for k, y in item.items()
-                                    if isinstance(y, (str, int, float))
-                                    or (
-                                        isinstance(y, list)
-                                        and len(y) > 0
-                                        and not isinstance(y[0], dict)
-                                    )
-                                }
-                            )
-                            if pass_filter(
-                                {
-                                    k: v
-                                    for k, v in list(common.items()) + list(row.items())
-                                },
-                                filter,
-                            ):
-                                if first_row:
-                                    rows.append(
-                                        {
-                                            k: v
-                                            for k, v in list(common.items())
-                                            + list(row.items())
-                                        }
-                                    )
-                                else:
-                                    rows.append(row)
-                                first_row = False
+        if r.result and r.result.get(resource) is not None:
+            for n, l in enumerate(r.result.get(resource)):
+                if len(col_names) == 0:
+                    col_names = get_fields(l)
+                    for col in col_names:
+                        table.add_column(col, no_wrap=True)
+                common = {
+                    x: y
+                    for x, y in l.items()
+                    if isinstance(y, (str, int, float))
+                    or (
+                        isinstance(y, list)
+                        and len(y) > 0
+                        and not isinstance(y[0], dict)
+                    )
+                }
+                if (
+                    len([v for v in l.values() if isinstance(v, list)]) == 0
+                ):  # single row per host
+                    if pass_filter(common, filter):
+                        rows.append(common)
+                #                if pass_filter(row, filter):
+                #                    rows.append({k:v for k,v in l.items()})
+                else:
+                    for key, v in l.items():
+                        if isinstance(v, list):
+                            first_row = True
+                            for item in v:
+                                row = {}
+                                row.update(
+                                    {
+                                        k: y
+                                        for k, y in item.items()
+                                        if isinstance(y, (str, int, float))
+                                        or (
+                                            isinstance(y, list)
+                                            and len(y) > 0
+                                            and not isinstance(y[0], dict)
+                                        )
+                                    }
+                                )
+                                if pass_filter(
+                                    {
+                                        k: v
+                                        for k, v in list(common.items())
+                                        + list(row.items())
+                                    },
+                                    filter,
+                                ):
+                                    if first_row:
+                                        rows.append(
+                                            {
+                                                k: v
+                                                for k, v in list(common.items())
+                                                + list(row.items())
+                                            }
+                                        )
+                                    else:
+                                        rows.append(row)
+                                    first_row = False
 
         first_row = True
         for row in rows:
             for k, v in row.items():
                 row[k] = str(STYLE_MAP.get(str(v), "")) + str(v)
-            values = [row.get(k, "") for k in col_names]
+            values = [str(row.get(k, "")) for k in col_names]
             if first_row:
                 table.add_row(host, *values)
                 first_row = False
@@ -244,7 +251,7 @@ def print_table(
     "--field-filter",
     "-f",
     multiple=True,
-    help="filter fields, e.g. -f state=up -f admin_state=enable",
+    help='filter fields with <field-name>=<glob-pattern>, e.g. -f state=up -f admin_state="ena*"',
 )
 @click.option(
     "--box-type",
@@ -272,7 +279,7 @@ def cli(
     f_filter = (
         {k: v for k, v in [f.split("=") for f in field_filter]} if field_filter else {}
     )
-    report_options = (
+    r_options = (
         {k: v for k, v in [f.split("=") for f in report_options]}
         if report_options
         else {}
@@ -297,14 +304,14 @@ def cli(
             f"Report {report} not found. Available reports: {list(reports.keys())}"
         )
         return
-    if not field_filter:
-        field_filter = {}
+    #    if not field_filter:
+    #        field_filter = {}
     fabric = InitNornir(config_file=cfg)
     if i_filter:
         target = fabric.filter(**i_filter)
     else:
         target = fabric
-    result = target.run(task=reports[report][0], raise_on_error=False, **report_options)
+    result = target.run(task=reports[report][0], raise_on_error=False, **r_options)
     title = "[bold]" + reports[report][1] + "[/bold]"
     if f_filter:
         title += "\nFields:" + str(f_filter)

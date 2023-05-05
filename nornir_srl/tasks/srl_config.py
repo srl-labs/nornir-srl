@@ -97,16 +97,20 @@ def configure_device(
             task=backup_config,
             backup_base_path=backup_path,
         )
+    return Result(host=task.host, result={}, changed=config_changed)
 
 
 def backup_config(
     task: Task,
     backup_base_path: str,
-    history_len: Optional[int] = 10,
+    history_len: int = 10,
 ) -> None:
     p = Path(backup_base_path)
     suffix = datetime.now().strftime("%Y%m%d%H%M%S")
-    p = p / task.host.hostname / f"{task.host.hostname}.{suffix}.json"
+    if task.host.hostname:
+        p = p / task.host.hostname / f"{task.host.hostname}.{suffix}.json"
+    else:
+        raise ValueError(f"Hostname not set in task {task.name}")
     p.parent.mkdir(parents=True, exist_ok=True)
 
     device = task.host.get_connection(CONNECTION_NAME, task.nornir.config)
@@ -126,7 +130,10 @@ def restore_config(
     dry_run: Optional[bool] = True,
 ) -> Result:
     p = Path(backup_base_path)
-    p = p / task.host.hostname
+    if task.host.hostname:
+        p = p / task.host.hostname
+    else:
+        raise ValueError(f"Hostname not set in task {task.name}")
     backup_files = sorted(p.glob("*.json"), reverse=True)
     if len(backup_files) < version:
         raise ValueError(
