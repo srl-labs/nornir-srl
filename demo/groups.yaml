@@ -9,7 +9,7 @@ srl:
             username: admin
             password: NokiaSrl1!
             extras:
-                path_cert: "./root-ca.pem"
+                path_cert: "./startup/root-ca.pem"
 pod1:
     data:
         domain: pod1.clab

@@ -3,9 +3,9 @@ inventory:
     #    plugin: SimpleInventory
     plugin: YAMLInventory
     options:
-        host_file: "/cfg/hosts.yaml"
-        group_file: "/cfg/groups.yaml"
-        defaults_file: "/cfg/defaults.yaml"
+        host_file: "./hosts.yaml"
+        group_file: "./groups.yaml"
+        defaults_file: "./defaults.yaml"
 runner:
     plugin: threaded
     options:

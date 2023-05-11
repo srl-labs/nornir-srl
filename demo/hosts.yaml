@@ -1,5 +1,5 @@
-clab-4l2s-l1:
-    hostname: clab-4l2s-l1
+clab-fcli_demo-l1:
+    hostname: clab-fcli_demo-l1
     groups: [srl, fabric, leafs]
     username: admin
     password: NokiaSrl1!
@@ -15,8 +15,8 @@ clab-4l2s-l1:
             ethernet-1/49:
                 ipv4_address: 192.168.0.3/31
 
-clab-4l2s-l2:
-    hostname: clab-4l2s-l2
+clab-fcli_demo-l2:
+    hostname: clab-fcli_demo-l2
     groups: [srl, fabric, leafs]
     username: admin
     password: NokiaSrl1!
@@ -27,8 +27,8 @@ clab-4l2s-l2:
         side: B
         leafpair: P1
         
-clab-4l2s-l3:
-    hostname: clab-4l2s-l3
+clab-fcli_demo-l3:
+    hostname: clab-fcli_demo-l3
     groups: [srl, fabric, leafs]
     username: admin
     password: NokiaSrl1!
@@ -39,8 +39,8 @@ clab-4l2s-l3:
         side: A
         leafpair: P2
         
-clab-4l2s-l4:
-    hostname: clab-4l2s-l4
+clab-fcli_demo-l4:
+    hostname: clab-fcli_demo-l4
     groups: [srl, fabric, leafs]
     username: admin
     password: NokiaSrl1!
@@ -51,8 +51,8 @@ clab-4l2s-l4:
         side: B
         leafpair: P2
 
-clab-4l2s-s1:
-    hostname: clab-4l2s-s1
+clab-fcli_demo-s1:
+    hostname: clab-fcli_demo-s1
     groups: [srl, fabric, spines]
     username: admin
     password: NokiaSrl1!
@@ -62,8 +62,8 @@ clab-4l2s-s1:
         router_id: 192.168.255.101
         side: A
 
-clab-4l2s-s2:
-    hostname: clab-4l2s-s2
+clab-fcli_demo-s2:
+    hostname: clab-fcli_demo-s2
     groups: [srl, fabric, spines]
     username: admin
     password: NokiaSrl1!
@@ -72,10 +72,3 @@ clab-4l2s-s2:
     data:
         router_id: 192.168.255.102
         side: B
-#clab-4l2s-tor34:
-#    hostname: clab-4l2s-tor34
-#    username: admin
-#    password: NokiaSrl1!
-#    groups: [ srl ]
-#    port: 57400
-#    platform: ixr-d2
