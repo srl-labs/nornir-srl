@@ -3,6 +3,13 @@
 set -e
 GRACE_PERIOD=10
 WAIT_PERIOD=5
+interrupt_handler() {
+	echo -e "\n\nDon't forget to destroy lab with 'sudo clab destroy -t demo.clab.yaml'."
+	exit 0
+}
+
+trap interrupt_handler SIGINT
+
 spin () {
   rotations=$1
   delay=0.5
@@ -29,16 +36,24 @@ for report in sys-info lldp-nbrs bgp-peers mac-table nwi-itfs ; do
 	clear
 	case $report in
 	"lldp-nbrs")
-		fcli $report -f interface=ethernet
+		cmd="fcli $report -f interface=ethernet"
+		echo "\$ $cmd"
+		$cmd
 		;;
 	"bgp-peers")
-		fcli $report -i role=spine
+		cmd="fcli $report -i role=spine"
+		echo "\$ $cmd"
+		$cmd
 		;;
 	"nwi-itfs")
-		fcli $report -f type=vrf
+		cmd="fcli $report -f type=vrf"
+		echo "\$ $cmd"
+		$cmd
 		;;
 	*)
-		fcli $report
+		cmd="fcli $report"
+		echo "\$ $cmd"
+		$cmd
 		;;
 	esac
 	spin $WAIT_PERIOD
@@ -47,15 +62,21 @@ for rt in 1 2 3 4 5 ; do
 	clear
 	case $rt in
 	"5")
-		fcli bgp-rib -r route_fam=evpn -r route_type=$rt -f 0_st="u*>"
+		cmd='fcli bgp-rib -r route_fam=evpn -r route_type=5 -f 0_st=u*>'
+		echo "\$ $cmd"
+		$cmd
 		;;
 	*)
-		fcli bgp-rib -r route_fam=evpn -r route_type=$rt
+		cmd="fcli bgp-rib -r route_fam=evpn -r route_type=$rt"
+		echo "\$ $cmd"
+		$cmd
 		;;
 	esac
 	spin $WAIT_PERIOD
 done
 clear
-fcli bgp-rib -r route_fam=ipv4 
+cmd="fcli bgp-rib -r route_fam=ipv4"
+echo "\$ $cmd"
+$cmd
 spin $WAIT_PERIOD
 done
