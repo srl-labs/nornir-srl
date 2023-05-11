@@ -1,7 +1,8 @@
 #!/bin/bash
 
 set -e
-
+GRACE_PERIOD=10
+WAIT_PERIOD=5
 spin () {
   rotations=$1
   delay=0.5
@@ -15,9 +16,15 @@ spin () {
     done
   done
 }
-
+if ! command -v fcli >/dev/null 2>&1; then
+	echo "fcli command is not installed. Exitting..."
+	exit 1
+fi
 sudo clab deploy -c -t ./demo.clab.yaml
+echo "Waiting $GRACE_PERIOD spins to allow control plane to settle"
+spin $GRACE_PERIOD
 
+while true ; do
 for report in sys-info lldp-nbrs bgp-peers mac-table nwi-itfs ; do
 	clear
 	case $report in
@@ -34,7 +41,7 @@ for report in sys-info lldp-nbrs bgp-peers mac-table nwi-itfs ; do
 		fcli $report
 		;;
 	esac
-	spin 3
+	spin $WAIT_PERIOD
 done
 for rt in 1 2 3 4 5 ; do
 	clear
@@ -46,7 +53,9 @@ for rt in 1 2 3 4 5 ; do
 		fcli bgp-rib -r route_fam=evpn -r route_type=$rt
 		;;
 	esac
-	spin 3
+	spin $WAIT_PERIOD
 done
 clear
 fcli bgp-rib -r route_fam=ipv4 
+spin $WAIT_PERIOD
+done
