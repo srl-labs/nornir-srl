@@ -5,6 +5,7 @@ GRACE_PERIOD=10
 WAIT_PERIOD=5
 interrupt_handler() {
 	echo -e "\n\nDon't forget to destroy lab with 'sudo clab destroy -t demo.clab.yaml'."
+	echo "Feel free to explore 'fcli' from this directory"
 	exit 0
 }
 
@@ -66,6 +67,11 @@ for rt in 1 2 3 4 5 ; do
 		echo "\$ $cmd"
 		$cmd
 		;;
+	"2")
+		cmd='fcli bgp-rib -r route_fam=evpn -r route_type=2 -f vni=202 -f 0_st=u*>'
+		echo "\$ $cmd"
+		$cmd
+		;;
 	*)
 		cmd="fcli bgp-rib -r route_fam=evpn -r route_type=$rt"
 		echo "\$ $cmd"
@@ -75,7 +81,7 @@ for rt in 1 2 3 4 5 ; do
 	spin $WAIT_PERIOD
 done
 clear
-cmd="fcli bgp-rib -r route_fam=ipv4"
+cmd="fcli bgp-rib -r route_fam=ipv4 -f Pfx=192.168.255.2/32"
 echo "\$ $cmd"
 $cmd
 spin $WAIT_PERIOD
