@@ -133,7 +133,7 @@ clone the `nornir-srl` repo and cd into the `demo` folder
 ```
 git clone https://github.com/srl-labs/nornir-srl.git
 cd nornir-srl/demo
-./run-demo.sh
+./run_demo.sh
 ```
 
 It will spin up a 6-node SRLinux fabric and run all the available `fcli` reports sequentially.
