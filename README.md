@@ -117,58 +117,27 @@ Optionally, you can specify filters to control the output. There are 2 types of 
 - field filters, specified with the `-f` option. This filters based on the fields shown in the report and a glob pattern, e.g. `-f state="esta*"`. Multiple field filters can be specified by repeated `-f` options
 - report-specific options are options specific to a report, if applicable. Currently, the only report that needs extra arguments is 'bgp-rib', i.e. `route_fam=evpn|ipv4|ipv6` and `route_type=1|2|3|4|5`. The latter relates to EVPN route-trypes and is optional. Defaults to '2' (mac-ip-routes). 
 
-Examples:
+
+# Demo
+
+## Prerequisites
+
+- Containerlab binary installed
+- `nornir-srl` installed as described above
+- sufficient resources to run 6 SRLinux containers
+- big screen estate to show the output (or small font size)
+
+## Run the demo
+
+clone the `nornir-srl` repo and cd into the `demo` folder
 ```
-$ fcli bgp-peers -i role=spine
-                                        BGP Peers                                         
-                               Inventory:{'role': 'spine'}                              
-               ╷          ╷                 ╷         ╷          ╷         ╷              
-  Node         │ NetwInst │ 1_Peer          │ 2_Group │ local_as │ peer_as │ state        
- ══════════════╪══════════╪═════════════════╪═════════╪══════════╪═════════╪═════════════ 
-  clab-4l2s-s1 │ default  │ 192.168.0.1     │ leafs   │ [65100]  │ 65001   │ established  
-               │          │ 192.168.0.3     │ leafs   │ [65100]  │ 65002   │ established  
-               │          │ 192.168.0.5     │ leafs   │ [65100]  │ 65003   │ established  
-               │          │ 192.168.0.7     │ leafs   │ [65100]  │ 65004   │ established  
-               │          │ 192.168.0.225   │ dcgw    │ [65100]  │ 65200   │ active       
-               │          │ 192.168.0.227   │ dcgw    │ [65100]  │ 65201   │ active       
-               │          │ 192.168.255.1   │ overlay │ [100]    │ 100     │ established  
-               │          │ 192.168.255.2   │ overlay │ [100]    │ 100     │ established  
-               │          │ 192.168.255.3   │ overlay │ [100]    │ 100     │ established  
-               │          │ 192.168.255.4   │ overlay │ [100]    │ 100     │ established  
-               │          │ 192.168.255.200 │ overlay │ [100]    │ 100     │ connect      
-               │          │ 192.168.255.201 │ overlay │ [100]    │ 100     │ connect      
- ──────────────┼──────────┼─────────────────┼─────────┼──────────┼─────────┼───────────── 
-  clab-4l2s-s2 │ default  │ 192.168.0.229   │ dcgw    │ [65100]  │ 65200   │ active       
-               │          │ 192.168.0.231   │ dcgw    │ [65100]  │ 65201   │ active       
-               │          │ 192.168.1.1     │ leafs   │ [65100]  │ 65001   │ established  
-               │          │ 192.168.1.3     │ leafs   │ [65100]  │ 65002   │ established  
-               │          │ 192.168.1.5     │ leafs   │ [65100]  │ 65003   │ established  
-               │          │ 192.168.1.7     │ leafs   │ [65100]  │ 65004   │ established  
-               │          │ 192.168.255.1   │ overlay │ [100]    │ 100     │ established  
-               │          │ 192.168.255.2   │ overlay │ [100]    │ 100     │ established  
-               │          │ 192.168.255.3   │ overlay │ [100]    │ 100     │ established  
-               │          │ 192.168.255.4   │ overlay │ [100]    │ 100     │ established  
-               │          │ 192.168.255.200 │ overlay │ [100]    │ 100     │ connect     
+git clone https://github.com/srl-labs/nornir-srl.git
+cd nornir-srl/demo
+./run-demo.sh
 ```
 
-```
-fcli bgp-rib -r route_fam=evpn -r route_type=2 -f 0_st='u*>'
-                                                                                      BGP RIB                                                                                      
-                                                                              Fields:{'0_st': 'u*>'}                                                                               
-                                                              Report options:{'route_fam': 'evpn', 'route_type': '2'}                                                              
-               ╷         ╷      ╷                               ╷              ╷                   ╷                   ╷         ╷               ╷        ╷                 ╷      
-  Node         │ ni      │ 0_st │ ESI                           │ IP           │ MAC               │ RD                │ as-path │ next-hop      │ origin │ peer            │ vni  
- ══════════════╪═════════╪══════╪═══════════════════════════════╪══════════════╪═══════════════════╪═══════════════════╪═════════╪═══════════════╪════════╪═════════════════╪═════ 
-  clab-4l2s-l1 │ default │ u*>  │ 00:00:00:00:00:00:00:00:00:00 │ 10.200.1.254 │ 00:00:5E:00:01:01 │ 192.168.255.2:202 │ i       │ 192.168.255.2 │ igp    │ 192.168.255.101 │ 202  
-               │         │ u*>  │ 01:24:24:24:24:24:24:00:00:01 │ 0.0.0.0      │ 1A:41:0E:FF:00:41 │ 192.168.255.2:202 │ i       │ 192.168.255.2 │ igp    │ 192.168.255.101 │ 202  
-               │         │ u*>  │ 01:24:24:24:24:24:24:00:00:01 │ 10.200.1.10  │ 1A:41:0E:FF:00:41 │ 192.168.255.2:202 │ i       │ 192.168.255.2 │ igp    │ 192.168.255.101 │ 202  
-               │         │ u*>  │ 00:00:00:00:00:00:00:00:00:00 │ 0.0.0.0      │ 1A:A2:09:FF:00:42 │ 192.168.255.2:202 │ i       │ 192.168.255.2 │ igp    │ 192.168.255.101 │ 202  
-               │         │ u*>  │ 00:00:00:00:00:00:00:00:00:00 │ 10.200.1.2   │ 1A:A2:09:FF:00:42 │ 192.168.255.2:202 │ i       │ 192.168.255.2 │ igp    │ 192.168.255.101 │ 202  
- ──────────────┼─────────┼──────┼───────────────────────────────┼──────────────┼───────────────────┼───────────────────┼─────────┼───────────────┼────────┼─────────────────┼───── 
-  clab-4l2s-l2 │ default │ u*>  │ 00:00:00:00:00:00:00:00:00:00 │ 10.200.1.254 │ 00:00:5E:00:01:01 │ 192.168.255.1:202 │ i       │ 192.168.255.1 │ igp    │ 192.168.255.101 │ 202  
-               │         │ u*>  │ 00:00:00:00:00:00:00:00:00:00 │ 0.0.0.0      │ 1A:5B:08:FF:00:42 │ 192.168.255.1:202 │ i       │ 192.168.255.1 │ igp    │ 192.168.255.101 │ 202  
-               │         │ u*>  │ 00:00:00:00:00:00:00:00:00:00 │ 10.200.1.1   │ 1A:5B:08:FF:00:42 │ 192.168.255.1:202 │ i       │ 192.168.255.1 │ igp    │ 192.168.255.101 │ 202  
-```
+It will spin up a 6-node SRLinux fabric and run all the available `fcli` reports sequentially.
 
+Remove the lab with `clab destroy -t nornir-srl`
 
   
