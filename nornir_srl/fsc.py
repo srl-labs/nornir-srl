@@ -1,11 +1,15 @@
 from typing import Any, Dict, List, Optional, Callable
 import importlib
 import fnmatch
-import json
+import sys
+import tempfile
+
+from ruamel.yaml import YAML
 
 from nornir import InitNornir
 
 from nornir.core.task import Result, Task, AggregatedResult
+from nornir.core.inventory import Host
 
 from rich.console import Console
 from rich.table import Table
@@ -14,12 +18,37 @@ from rich.box import MINIMAL_DOUBLE_HEAD
 from rich.style import Style
 from rich.theme import Theme
 
+
 from nornir_utils.plugins.functions import print_result
 from nornir_srl.tasks.srl_config import configure_device, restore_config
 
 from nornir_srl.connections.srlinux import CONNECTION_NAME
 
 import click
+
+SRL_DEFAULT_USERNAME = "admin"
+SRL_DEFAULT_PASSWORD = "NokiaSrl1!"
+SRL_DEFAULT_GNMI_PORT = 57400
+
+NORNIR_DEFAULT_CONFIG: Dict[str, Any] = {
+    "inventory": {
+        "plugin": "YAMLInventory",
+        "options": {
+            "host_file": "clab_hosts.yml",
+            "group_file": "clab_groups.yml",
+            "defaults_file": "clab_defaults.yml",
+        },
+    },
+    "runner": {
+        "plugin": "threaded",
+        "options": {
+            "num_workers": 20,
+        },
+    },
+    "user_defined": {
+        "intent_dir": "intent",
+    },
+}
 
 
 def sys_info(task: Task) -> Result:
@@ -150,9 +179,8 @@ def print_table(
     col_names: List[str] = []
     for host, host_result in results.items():
         rows = []
-        r: Result = host_result[
-            0
-        ]  # only look at result of first task, 1 task per table
+        r: Result = host_result[0]
+        node: Host = r.host if r.host else Host("unkown")
         if r.failed:
             print(f"Failed to get {resource} for {host}. Exception: {r.exception}")
             continue
@@ -223,7 +251,8 @@ def print_table(
                 row[k] = str(STYLE_MAP.get(str(v), "")) + str(v)
             values = [str(row.get(k, "")) for k in col_names]
             if first_row:
-                table.add_row(host, *values)
+                node_name: str = node.hostname if node.hostname else node.name
+                table.add_row(node_name, *values)
                 first_row = False
             else:
                 table.add_row("", *values)
@@ -265,14 +294,96 @@ def print_table(
     multiple=True,
     help="report-specific options, e.g. -o route_fam=evpn -o route_type=2 for 'bgp-rib report",
 )
+@click.option(
+    "--topo-file",
+    "-t",
+    multiple=False,
+    help="CLAB topology file, e.g. -t topo.yaml",
+)
+@click.option(
+    "--cert-file",
+    multiple=False,
+    help="CLAB certificate file, e.g. -c ca-root.pem",
+)
 def cli(
     report: str,
-    cfg: str = "config.yaml",
+    cfg: str,
     inv_filter: Optional[List] = None,
     field_filter: Optional[List] = None,
     report_options: Optional[List] = None,
     box_type: Optional[str] = None,
+    topo_file: Optional[str] = None,
+    cert_file: Optional[str] = None,
 ) -> None:
+    if topo_file:  # CLAB mode, -c ignored, inventory generated from topo file
+        yaml = YAML(typ="safe")
+        try:
+            with open(topo_file, "r") as f:
+                topo = yaml.load(f)
+        except Exception as e:
+            print(f"Failed to load topology file {topo_file}: {e}")
+            sys.exit(1)
+        lab_name = topo["name"]
+        if "prefix" not in topo:
+            prefix = f"clab-{lab_name}-"
+        else:
+            if topo["prefix"] == "__lab-name":
+                prefix = f"{lab_name}-"
+            elif topo["prefix"] == "":
+                prefix = ""
+            else:
+                prefix = f"{topo['prefix']}-{lab_name}-"
+        hosts: Dict[str, Dict[str, Any]] = {}
+        clab_nodes: Dict[str, Dict] = topo["topology"]["nodes"]
+        for node, node_spec in clab_nodes.items():
+            if node_spec["kind"] == "srl":
+                hosts[f"{prefix}{node}"] = {
+                    "hostname": f"{prefix}{node}",
+                    "platform": "srlinux",
+                    "groups": ["srl"],
+                    "data": node_spec.get("labels", {}),
+                }
+        groups: Dict[str, Dict[str, Any]] = {
+            "srl": {
+                "connection_options": {
+                    "srlinux": {
+                        "username": SRL_DEFAULT_USERNAME,
+                        "password": SRL_DEFAULT_PASSWORD,
+                        "port": SRL_DEFAULT_GNMI_PORT,
+                        "extras": {},
+                    }
+                }
+            }
+        }
+        if cert_file:
+            groups["srl"]["connection_options"]["srlinux"]["extras"][
+                "path_cert"
+            ] = cert_file
+
+        try:
+            with tempfile.NamedTemporaryFile("w+") as hosts_f:
+                yaml.dump(hosts, hosts_f)
+                hosts_f.seek(0)
+                with tempfile.NamedTemporaryFile("w+") as groups_f:
+                    yaml.dump(groups, groups_f)
+                    groups_f.seek(0)
+                    conf: Dict[str, Any] = NORNIR_DEFAULT_CONFIG
+                    conf.update(
+                        {
+                            "inventory": {
+                                "options": {
+                                    "host_file": hosts_f.name,
+                                    "group_file": groups_f.name,
+                                }
+                            }
+                        }
+                    )
+                    fabric = InitNornir(**conf)
+        except Exception as e:
+            raise e
+    else:
+        fabric = InitNornir(config_file=cfg)
+
     i_filter = (
         {k: v for k, v in [f.split("=") for f in inv_filter]} if inv_filter else {}
     )
@@ -306,7 +417,7 @@ def cli(
         return
     #    if not field_filter:
     #        field_filter = {}
-    fabric = InitNornir(config_file=cfg)
+#    fabric = InitNornir(config_file=cfg)
     if i_filter:
         target = fabric.filter(**i_filter)
     else:
