@@ -41,13 +41,15 @@ Usage: fcli [OPTIONS] REPORT
 Options:
   -c, --cfg TEXT             Nornir config file  [default: nornir_config.yaml]
   -i, --inv-filter TEXT      filter inventory, e.g. -i site=lab -i role=leaf
-  -f, --field-filter TEXT    filter fields, e.g. -f state=up -f
-                             admin_state=enable
+  -f, --field-filter TEXT    filter fields with <field-name>=<glob-pattern>,
+                             e.g. -f state=up -f admin_state="ena*"
   -b, --box-type TEXT        box type of printed table, e.g. -b
                              minimal_double_head. 'python -m rich.box' for
                              options
   -r, --report-options TEXT  report-specific options, e.g. -o route_fam=evpn
                              -o route_type=2 for 'bgp-rib report
+  -t, --topo-file TEXT       CLAB topology file, e.g. -t topo.yaml
+  --cert-file TEXT           CLAB certificate file, e.g. -c ca-root.pem
   --help                     Show this message and exit.
   ```
   `REPORT` is a mandatory argument and specifies the report to run. To know which reports are supported, specify a dummy report name:
