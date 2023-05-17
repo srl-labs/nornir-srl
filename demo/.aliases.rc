@@ -1,0 +1,1 @@
+alias fcli="docker run -t --rm -v /etc/hosts:/etc/hosts:ro -v ${PWD}/demo.clab.yaml:/topo.yml wdesmedt/srl-fcli:0.1.5 -t /topo.yml"
