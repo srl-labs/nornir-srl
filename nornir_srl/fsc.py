@@ -415,9 +415,7 @@ def cli(
             f"Report {report} not found. Available reports: {list(reports.keys())}"
         )
         return
-    #    if not field_filter:
-    #        field_filter = {}
-#    fabric = InitNornir(config_file=cfg)
+
     if i_filter:
         target = fabric.filter(**i_filter)
     else:

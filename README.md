@@ -110,7 +110,15 @@ $ fcli test
 Report test not found. Available reports: ['bgp-peers', 'subinterface', 'ipv4-rib', 'mac-table', 'sys-info', 'nwi-itfs', 'lldp-nbrs']
 ```
 
-The nornir configuration file (`-c` option) is mandatory for nornir to find the inventory files.
+## Nornir-based inventory mode
+
+In this mode, a Nornir configuration file must be provided with the `-c` option. The Nornir inventory is polulated by the `InventoryPlugin` and associated options as specified in the config file. See above for an example with the included `YAMLInventory` plugin and the associated inventory files.
+
+This mode is used for real hardware-based fabric.
+## CLAB-based inventory mode
+
+In this mode, the Nornir inventory is populated by a containerlab topology file and no further configuration files are needed. The containerlab topo file is specified with the `-t` option. `fcli` converts the topology file to a _hosts_ and _groups_ file. Only nodes of kind=srl are populated in the host inventory. Furthermore, the `prefix` parameter in the topo file is considered to generate the hostnames. Also, the presence of _labels_ in the topo file is mapped into node-specific attribs that can be used in inventory filters (`-i` option).
+
 Optionally, you can specify filters to control the output. There are 2 types of filters:
 
 - inventory filters, specified with the `-i` option, filter on the inventory, e.g. `-i hostname=clab-4l2s-l1`  or `-i role=leaf` based on inventory data
@@ -123,9 +131,9 @@ Optionally, you can specify filters to control the output. There are 2 types of 
 ## Prerequisites
 
 - Containerlab binary installed
-- `nornir-srl` installed as described above: `pip install -U nornir-srl` in a Python virtual-env. `nornir_config.yaml` and inventory files are not required for this demo.
-- sufficient resources to run 6 SRLinux containers
-- big screen estate to show the output (or small font size) ;-)
+- `nornir-srl` installed as described above: `pip install -U nornir-srl` in a Python virtual-env
+- sufficient resources to run 8 SRLinux containers
+- big screen estate to show the output (or small font size) 
 
 ## Run the demo
 
