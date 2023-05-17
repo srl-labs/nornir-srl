@@ -18,37 +18,37 @@ topology:
       kind: srl
       type: ixrd2
       mgmt_ipv4: 172.66.22.11
-      labels: {role: leaf}
+      labels: {role: leaf, side: a, fabric_node: yes}
       startup-config: startup/l1.json
     l2:
       kind: srl
       type: ixrd2
       mgmt_ipv4: 172.66.22.12
-      labels: {role: leaf}
+      labels: {role: leaf, side: b, fabric_node: yes}
       startup-config: startup/l2.json
     l3:
       kind: srl
       type: ixrd2
       mgmt_ipv4: 172.66.22.13
-      labels: {role: leaf}
+      labels: {role: leaf, side: a, fabric_node: yes}
       startup-config: startup/l3.json
     l4:
       kind: srl
       type: ixrd2
       mgmt_ipv4: 172.66.22.14
-      labels: {role: leaf}
+      labels: {role: leaf, side: b, fabric_node: yes}
       startup-config: startup/l4.json
     s1:
       kind: srl
       type: ixrd2
       mgmt_ipv4: 172.66.22.101
-      labels: {role: spine}
+      labels: {role: spine, side: a, fabric_node: yes}
       startup-config: startup/s1.json
     s2:
       kind: srl
       type: ixrd2
       mgmt_ipv4: 172.66.22.102
-      labels: {role: spine}
+      labels: {role: spine, side: b, fabric_node: yes}
       startup-config: startup/s2.json
     tor12:
       kind: srl
