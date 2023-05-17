@@ -126,6 +126,8 @@ This mode is used for real hardware-based fabric.
 
 In this mode, the Nornir inventory is populated by a containerlab topology file and no further configuration files are needed. The containerlab topo file is specified with the `-t` option. `fcli` converts the topology file to a _hosts_ and _groups_ file. Only nodes of kind=srl are populated in the host inventory. Furthermore, the `prefix` parameter in the topo file is considered to generate the hostnames. Also, the presence of _labels_ in the topo file is mapped into node-specific attribs that can be used in inventory filters (`-i` option).
 
+## Filtering
+
 Optionally, you can specify filters to control the output. There are 2 types of filters:
 
 - inventory filters, specified with the `-i` option, filter on the inventory, e.g. `-i hostname=clab-4l2s-l1`  or `-i role=leaf` based on inventory data
