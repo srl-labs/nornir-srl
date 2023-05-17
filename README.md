@@ -21,7 +21,7 @@ Since this module is using gNMI as the management inteface, at a minimum, a CA c
 
 This is the easiest way to get started. It requires [Docker](https://docs.docker.com/get-docker/) and optionally  [Containerlab](https://containerlab.dev/) to be installed on your system.
 
-To run fcli, create an alias in your shell profile, for example, asuming that you have a `clab_topo.yml` file in your current directory and lab is up and running:
+To run fcli, create an alias in your shell profile, for example, assuming that you have a `clab_topo.yml` file in your current directory and lab is up and running:
 
 ```
 alias fcli="docker run -t --rm -v /etc/hosts:/etc/hosts:ro -v ${PWD}/clab_topo.yml:/topo.yml wdesmedt/srl-fcli -t /topo.yml"
