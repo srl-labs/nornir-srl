@@ -3,6 +3,7 @@ import importlib
 import fnmatch
 import sys
 import tempfile
+import pkg_resources
 
 from ruamel.yaml import YAML
 
@@ -25,6 +26,8 @@ from nornir_srl.tasks.srl_config import configure_device, restore_config
 from nornir_srl.connections.srlinux import CONNECTION_NAME
 
 import click
+
+PYTHON_PKG_NAME = "nornir_srl"
 
 SRL_DEFAULT_USERNAME = "admin"
 SRL_DEFAULT_PASSWORD = "NokiaSrl1!"
@@ -50,6 +53,13 @@ NORNIR_DEFAULT_CONFIG: Dict[str, Any] = {
     },
 }
 
+def get_project_version():
+    try:
+        version = pkg_resources.get_distribution(PYTHON_PKG_NAME).version
+    except pkg_resources.DistributionNotFound:
+        version = "Version not found"
+    
+    return version
 
 def sys_info(task: Task) -> Result:
     device = task.host.get_connection(CONNECTION_NAME, task.nornir.config)
@@ -305,6 +315,7 @@ def print_table(
     multiple=False,
     help="CLAB certificate file, e.g. -c ca-root.pem",
 )
+@click.version_option(version=get_project_version())
 def cli(
     report: str,
     cfg: str,
