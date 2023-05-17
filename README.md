@@ -29,6 +29,37 @@ Following command will install the the `nornir_srl` module and all its dependenc
 pip install wheel
 pip install -U nornir-srl
 ```
+
+
+# Use
+
+Currently, only the network-wide cli functionality is supported via the `fcli` command
+```
+$ fcli --help
+Usage: fcli [OPTIONS] REPORT
+
+Options:
+  -c, --cfg TEXT             Nornir config file  [default: nornir_config.yaml]
+  -i, --inv-filter TEXT      filter inventory, e.g. -i site=lab -i role=leaf
+  -f, --field-filter TEXT    filter fields, e.g. -f state=up -f
+                             admin_state=enable
+  -b, --box-type TEXT        box type of printed table, e.g. -b
+                             minimal_double_head. 'python -m rich.box' for
+                             options
+  -r, --report-options TEXT  report-specific options, e.g. -o route_fam=evpn
+                             -o route_type=2 for 'bgp-rib report
+  --help                     Show this message and exit.
+  ```
+  `REPORT` is a mandatory argument and specifies the report to run. To know which reports are supported, specify a dummy report name:
+```
+$ fcli test
+Report test not found. Available reports: ['bgp-peers', 'subinterface', 'ipv4-rib', 'mac-table', 'sys-info', 'nwi-itfs', 'lldp-nbrs']
+```
+
+## Nornir-based inventory mode
+
+In this mode, a Nornir configuration file must be provided with the `-c` option. The Nornir inventory is polulated by the `InventoryPlugin` and associated options as specified in the config file. See below for an example with the included `YAMLInventory` plugin and the associated inventory files.
+
 Create the Nornir confguration file, for example:
 
 ```yaml
@@ -45,7 +76,9 @@ runner:
     options:
         num_workers: 20
 ```
+
 Create the inventory files as referenced in the above configuration file, for example:
+
 ```yaml
 ## hosts.yaml
 clab-4l2s-l1:
@@ -85,36 +118,8 @@ leafs:
 ```
 The root certificate is specified once for all devices in group `srl` via the `connection_options.srlinux.extras.path_cert` parameter.
 
-# Use
-
-Currently, only the network-wide cli functionality is supported via the `fcli` command
-```
-$ fcli --help
-Usage: fcli [OPTIONS] REPORT
-
-Options:
-  -c, --cfg TEXT             Nornir config file  [default: nornir_config.yaml]
-  -i, --inv-filter TEXT      filter inventory, e.g. -i site=lab -i role=leaf
-  -f, --field-filter TEXT    filter fields, e.g. -f state=up -f
-                             admin_state=enable
-  -b, --box-type TEXT        box type of printed table, e.g. -b
-                             minimal_double_head. 'python -m rich.box' for
-                             options
-  -r, --report-options TEXT  report-specific options, e.g. -o route_fam=evpn
-                             -o route_type=2 for 'bgp-rib report
-  --help                     Show this message and exit.
-  ```
-  `REPORT` is a mandatory argument and specifies the report to run. To know which reports are supported, specify a dummy report name:
-```
-$ fcli test
-Report test not found. Available reports: ['bgp-peers', 'subinterface', 'ipv4-rib', 'mac-table', 'sys-info', 'nwi-itfs', 'lldp-nbrs']
-```
-
-## Nornir-based inventory mode
-
-In this mode, a Nornir configuration file must be provided with the `-c` option. The Nornir inventory is polulated by the `InventoryPlugin` and associated options as specified in the config file. See above for an example with the included `YAMLInventory` plugin and the associated inventory files.
-
 This mode is used for real hardware-based fabric.
+
 ## CLAB-based inventory mode
 
 In this mode, the Nornir inventory is populated by a containerlab topology file and no further configuration files are needed. The containerlab topo file is specified with the `-t` option. `fcli` converts the topology file to a _hosts_ and _groups_ file. Only nodes of kind=srl are populated in the host inventory. Furthermore, the `prefix` parameter in the topo file is considered to generate the hostnames. Also, the presence of _labels_ in the topo file is mapped into node-specific attribs that can be used in inventory filters (`-i` option).
