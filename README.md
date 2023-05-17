@@ -33,7 +33,7 @@ pip install -U nornir-srl
 
 # Use
 
-Currently, only the network-wide cli functionality is supported via the `fcli` command
+Currently, only the network-wide report functionality is supported via the `fcli` command
 ```
 $ fcli --help
 Usage: fcli [OPTIONS] REPORT
