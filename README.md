@@ -17,6 +17,24 @@ Since this module is using gNMI as the management inteface, at a minimum, a CA c
 
 # Installation
 
+## Docker-based installation
+
+This is the easiest way to get started. It requires [Docker](https://docs.docker.com/get-docker/) and optionally  [Containerlab](https://containerlab.dev/) to be installed on your system.
+
+To run fcli, create an alias in your shell profile, for example, asuming that you have a `clab_topo.yml` file in your current directory and lab is up and running:
+
+```
+alias fcli="docker run -t --rm -v /etc/hosts:/etc/hosts:ro -v ${PWD}/clab_topo.yml:/topo.yml wdesmedt/srl-fcli -t /topo.yml"
+```
+To run a report, specify the report name as the first argument to the alias, for example:
+```
+fcli sys-info # for system information like NOS version, uptime, etc
+
+fcli bgp-peers # for BGP peers
+```
+
+## Python-based installation with `pip`
+
 Create a Python virtual-env using your favorite workflow, For example:
 ```
 mkdir nornir-srl && cd nornir-srl
