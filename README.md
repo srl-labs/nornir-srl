@@ -8,14 +8,31 @@ In addition to the connection plugin, there is a set of Nornir tasks that use th
 The current functionality is focused on a read-only _network-wide CLI_ to perform show commands across an entire set or subset for SRLinux nodes, as defined in the Nornir inventory and through command-line filter options. It shows output in a tabular format for easy reading.
 Following versions may focus on configuration management and command execution on the nodes.
 
-# Prerequisites
-
-This module requires [Nornir Core](https://github.com/nornir-automation/nornir) that includes the Nornir core components for which this module is an add-on.
-Nornir needs a [configuration file](https://nornir.readthedocs.io/en/latest/configuration/index.html) to tell it at a minimum where to find the inventory and what inventory plugin is used. Also runner configuration parameters, like #threads/workers for parallel execution are defined here but sane defaults are used.
-
-Since this module is using gNMI as the management inteface, at a minimum, a CA certificate is required that was used to create per-device certs and keys. If you use [Containerlab](https://containerlab.dev/) this root cert is auto-generated for SRLinux nodes and available in the lab subfolder created by the containerlab cli. This file needs to be referenced via the inventory (per-device or per-group). See below for details.
-
 # Installation
+
+## Docker-based installation
+
+This is the easiest way to get started. It requires [Docker](https://docs.docker.com/get-docker/) and optionally  [Containerlab](https://containerlab.dev/) to be installed on your system.
+
+> NOTE: if you have issues connecting to the docker network of containerlab, make sure proper `iptables` rules are in place to permit incomming traffic on the docker network interface. For example, on Ubuntu 20.04, you can use the following command:
+
+```
+iptables -I DOCKER-USER -o docker0 -j ACCEPT -m comment --comment "allow inter-network comms"
+```
+
+To run fcli, create an alias in your shell profile, for example, assuming that you have a `clab_topo.yml` file in your current directory and lab is up and running:
+
+```
+CLAB_TOPO=clab_topo.yml alias fcli="docker run -t --rm -v /etc/hosts:/etc/hosts:ro -v ${PWD}/${CLAB_TOPO}:/topo.yml wdesmedt/srl-fcli"
+```
+To run a report, specify the report name as the first argument to the alias, for example:
+```
+fcli sys-info # for system information like NOS version, uptime, etc
+
+fcli bgp-peers # for BGP peers
+```
+
+## Python-based installation with `pip`
 
 Create a Python virtual-env using your favorite workflow, For example:
 ```
@@ -124,7 +141,11 @@ This mode is used for real hardware-based fabric.
 
 ## CLAB-based inventory mode
 
-In this mode, the Nornir inventory is populated by a containerlab topology file and no further configuration files are needed. The containerlab topo file is specified with the `-t` option. `fcli` converts the topology file to a _hosts_ and _groups_ file. Only nodes of kind=srl are populated in the host inventory. Furthermore, the `prefix` parameter in the topo file is considered to generate the hostnames. Also, the presence of _labels_ in the topo file is mapped into node-specific attribs that can be used in inventory filters (`-i` option).
+In this mode, the Nornir inventory is populated by a containerlab topology file and no further configuration files are needed. The containerlab topo file is specified with the `-t` option. 
+
+`fcli` converts the topology file to a _hosts_ and _groups_ file and only nodes of kind=srl are populated in the host inventory. Furthermore, the `prefix` parameter in the topo file is considered to generate the hostnames. The presence of _labels_ in the topo file is mapped into node-specific attribs that can be used in inventory filters (`-i` option).
+
+## Filtering
 
 ## Filtering
 

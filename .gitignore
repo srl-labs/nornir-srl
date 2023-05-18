@@ -114,3 +114,5 @@ inventory
 intent
 *.pem
 .dockerignore
+**/*.bak
+**/*.sav

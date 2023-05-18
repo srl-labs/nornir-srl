@@ -4,7 +4,7 @@ version = "0.1.5"
 description = "Nornir connection plugin for SRLinux"
 authors = ["Walter De Smedt <walter.de.smedt@gmail.com>"]
 readme = "README.md"
-repository = "https://github.com/wdesmedt/nornir_srl"
+repository = "https://github.com/srl-labs/nornir-srl"
 
 [tool.poetry.dependencies]
 python = "^3.8"
