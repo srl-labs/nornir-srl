@@ -18,6 +18,6 @@ RUN poetry config virtualenvs.create false \
     && poetry install --no-dev --no-interaction --no-ansi
 
 
-ENTRYPOINT [ "fcli" , "-t", "/topo.yml" ]
+ENTRYPOINT [ "fcli" ]
 
 
