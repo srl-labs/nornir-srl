@@ -14,10 +14,16 @@ Following versions may focus on configuration management and command execution o
 
 This is the easiest way to get started. It requires [Docker](https://docs.docker.com/get-docker/) and optionally  [Containerlab](https://containerlab.dev/) to be installed on your system.
 
+> NOTE: if you have issues connecting to the docker network of containerlab, make sure proper `iptables` rules are in place to permit incomming traffic on the docker network interface. For example, on Ubuntu 20.04, you can use the following command:
+
+```
+iptables -I DOCKER-USER -o docker0 -j ACCEPT -m comment --comment "allow inter-network comms"
+```
+
 To run fcli, create an alias in your shell profile, for example, assuming that you have a `clab_topo.yml` file in your current directory and lab is up and running:
 
 ```
-alias fcli="docker run -t --rm -v /etc/hosts:/etc/hosts:ro -v ${PWD}/clab_topo.yml:/topo.yml wdesmedt/srl-fcli -t /topo.yml"
+CLAB_TOPO=clab_topo.yml alias fcli="docker run -t --rm -v /etc/hosts:/etc/hosts:ro -v ${PWD}/${CLAB_TOPO}:/topo.yml wdesmedt/srl-fcli"
 ```
 To run a report, specify the report name as the first argument to the alias, for example:
 ```
@@ -135,7 +141,9 @@ This mode is used for real hardware-based fabric.
 
 ## CLAB-based inventory mode
 
-In this mode, the Nornir inventory is populated by a containerlab topology file and no further configuration files are needed. The containerlab topo file is specified with the `-t` option. `fcli` converts the topology file to a _hosts_ and _groups_ file. Only nodes of kind=srl are populated in the host inventory. Furthermore, the `prefix` parameter in the topo file is considered to generate the hostnames. Also, the presence of _labels_ in the topo file is mapped into node-specific attribs that can be used in inventory filters (`-i` option).
+In this mode, the Nornir inventory is populated by a containerlab topology file and no further configuration files are needed. The containerlab topo file is specified with the `-t` option. 
+
+`fcli` converts the topology file to a _hosts_ and _groups_ file and only nodes of kind=srl are populated in the host inventory. Furthermore, the `prefix` parameter in the topo file is considered to generate the hostnames. The presence of _labels_ in the topo file is mapped into node-specific attribs that can be used in inventory filters (`-i` option).
 
 ## Filtering
 
