@@ -140,6 +140,7 @@ def print_table(
     }
 
     console = Console(theme=table_theme)
+    console._emoji = False
     if kwargs.get("box_type") and kwargs["box_type"] != None:
         box_type = str(kwargs["box_type"]).upper()
         try:
