@@ -1,0 +1,39 @@
+name: ci
+on: [push, pull_request]
+jobs:
+  linters:
+    name: linters
+    strategy:
+      matrix:
+        python-version: [3.9 ]
+        platform: [ubuntu-latest]
+    runs-on: ${{ matrix.platform }}
+    steps:
+        - uses: actions/checkout@v2
+        - name: Setup Python ${{ matrix.python-version }}
+          uses: actions/setup-python@v2
+          with:
+            python-version: ${{ matrix.python-version }}
+        - name: Install Poetry
+          uses: snok/install-poetry@v1
+          with:
+            version: 1.3.2
+            virtualenvs-create: true
+            virtualenvs-in-project: true
+
+        - name: Cache Poetry env
+          uses: actions/cache@v2
+          id: cache-poetry-env
+          with:
+            path: .venv
+            key: ${{ runner.os }}-poetry-${{ hashFiles('**/poetry.lock') }}
+        - name: Install dependencies
+          if: steps.cache-poetry-env.outputs.cache-hit != 'true'
+          run: |
+            poetry install
+        - name: Run black
+          run: |
+            poetry run black .
+        - name: Run Mypy
+          run: |
+            poetry run mypy .
