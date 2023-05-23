@@ -53,13 +53,15 @@ NORNIR_DEFAULT_CONFIG: Dict[str, Any] = {
     },
 }
 
+
 def get_project_version():
     try:
         version = pkg_resources.get_distribution(PYTHON_PKG_NAME).version
     except pkg_resources.DistributionNotFound:
         version = "Version not found"
-    
+
     return version
+
 
 def sys_info(task: Task) -> Result:
     device = task.host.get_connection(CONNECTION_NAME, task.nornir.config)

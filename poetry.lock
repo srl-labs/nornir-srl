@@ -614,6 +614,14 @@ optional = false
 python-versions = ">=3.7"
 
 [[package]]
+name = "types-setuptools"
+version = "67.8.0.0"
+description = "Typing stubs for setuptools"
+category = "dev"
+optional = false
+python-versions = "*"
+
+[[package]]
 name = "typing-extensions"
 version = "4.5.0"
 description = "Backported and Experimental Type Hints for Python 3.7+"
@@ -644,7 +652,7 @@ testing = ["pytest (>=6)", "pytest-checkdocs (>=2.4)", "flake8 (<5)", "pytest-co
 [metadata]
 lock-version = "1.1"
 python-versions = "^3.8"
-content-hash = "045f4ca0679fb198b5ba71631d7cef56787e52ce573d2ea229524a8681fbadd2"
+content-hash = "01c7a4a43b7f99bee66bc47f1714777616128e7898d00c0a7e66e8b187e7692c"
 
 [metadata.files]
 atomicwrites = []
@@ -696,6 +704,7 @@ scrapli-netconf = []
 six = []
 textfsm = []
 tomli = []
+types-setuptools = []
 typing-extensions = []
 wcwidth = []
 zipp = []

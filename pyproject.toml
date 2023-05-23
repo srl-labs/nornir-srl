@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "nornir_srl"
-version = "0.1.5"
+version = "0.1.6"
 description = "Nornir connection plugin for SRLinux"
 authors = ["Walter De Smedt <walter.de.smedt@gmail.com>"]
 readme = "README.md"
@@ -28,6 +28,7 @@ pytest = "^5.2"
 blessings = "^1.7"
 black = "^23.3.0"
 mypy = "^0.991"
+types-setuptools = "^67.8.0"
 
 [build-system]
 requires = ["poetry-core>=1.0.0"]
