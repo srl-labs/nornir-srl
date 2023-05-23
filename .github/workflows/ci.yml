@@ -31,9 +31,6 @@ jobs:
           if: steps.cache-poetry-env.outputs.cache-hit != 'true'
           run: |
             poetry install
-        - name: Run black
+        - name: Run tests
           run: |
-            poetry run black .
-        - name: Run Mypy
-          run: |
-            poetry run mypy .
+            make tests
