@@ -17,7 +17,7 @@ Following versions may focus on configuration management and command execution o
 
 This is the easiest way to get started. It requires [Docker](https://docs.docker.com/get-docker/) and optionally  [Containerlab](https://containerlab.dev/) to be installed on your system.
 
-> NOTE: if you have issues connecting to the docker network of containerlab, make sure proper `iptables` rules are in place to permit incomming traffic on the docker network interface. For example, on Ubuntu 20.04, you can use the following command:
+> NOTE: if you have issues connecting to the docker network of containerlab from the `srl-fcli` container that uses the standard bridge `docker0`, make sure proper `iptables` rules are in place to permit traffic between different Docker networks, which is **by default blocked**. For example, on Ubuntu 20.04, you can use the following command:
 
 ```
 iptables -I DOCKER-USER -o docker0 -j ACCEPT -m comment --comment "allow inter-network comms"
@@ -147,8 +147,6 @@ This mode is used for real hardware-based fabric.
 In this mode, the Nornir inventory is populated by a containerlab topology file and no further configuration files are needed. The containerlab topo file is specified with the `-t` option. 
 
 `fcli` converts the topology file to a _hosts_ and _groups_ file and only nodes of kind=srl are populated in the host inventory. Furthermore, the `prefix` parameter in the topo file is considered to generate the hostnames. The presence of _labels_ in the topo file is mapped into node-specific attribs that can be used in inventory filters (`-i` option).
-
-## Filtering
 
 ## Filtering
 
