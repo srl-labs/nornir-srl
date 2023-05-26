@@ -6,7 +6,7 @@ GRACE_PERIOD=10
 WAIT_PERIOD=5
 CLAB_FILE="./demo.clab.yaml"
 #FCLI_IMG="wdesmedt/srl-fcli:0.1.5"
-FCLI_IMG="ghcr.io/wdesmedt/nornir-srl"
+FCLI_IMG="ghcr.io/wdesmedt/nornir-srl:0.1.6"
 FCLI="docker run -t --rm -v /etc/hosts:/etc/hosts:ro -v ${PWD}/$CLAB_FILE:/topo.yml $FCLI_IMG -t /topo.yml"
 FCLI_ALL_ARGS=""
 FCLI_FAB_ARGS="-i fabric_node=yes"
