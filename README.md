@@ -1,5 +1,5 @@
 
-![Demo](https://github.com/wdesmedt/nornir_srl/blob/main/imgs/fcli_demo.gif)
+![Demo](https://github.com/srl-labs/nornir-srl/blob/main/imgs/fcli_demo.gif)
 # nornir-srl
 
 This module provides a [Nornir](https://nornir.readthedocs.io/en/latest/) connection [plugin](https://nornir.tech/nornir/plugins/) for Nokia SRLinux devices. It uses the gNMI management interface of SRLinux to fetch state and push configurations and the [PyGNMI](https://github.com/akarneliuk/pygnmi) Python module to interact with gNMI. 
@@ -26,7 +26,7 @@ iptables -I DOCKER-USER -o docker0 -j ACCEPT -m comment --comment "allow inter-n
 To run fcli, create an alias in your shell profile, for example, assuming that you have a `clab_topo.yml` file in your current directory and lab is up and running:
 
 ```
-CLAB_TOPO=clab_topo.yml alias fcli="docker run -t --rm -v /etc/hosts:/etc/hosts:ro -v ${PWD}/${CLAB_TOPO}:/topo.yml ghcr.io/wdesmedt/nornir-srl -t /topo.yml"
+CLAB_TOPO=clab_topo.yml alias fcli="docker run -t --rm -v /etc/hosts:/etc/hosts:ro -v ${PWD}/${CLAB_TOPO}:/topo.yml ghcr.io/srl-labs/nornir-srl -t /topo.yml"
 ```
 To run a report, specify the report name as the first argument to the alias, for example:
 ```
@@ -43,7 +43,7 @@ mkdir nornir-srl && cd nornir-srl
 python3 -m venv .venv
 source .venv/bin/activate
 ```
-Following command will install the the `nornir_srl` module and all its dependencies, including Nornir core.
+Following command will install the the `nornir-srl` module and all its dependencies, including Nornir core.
 
 ```
 pip install wheel
