@@ -26,7 +26,7 @@ iptables -I DOCKER-USER -o docker0 -j ACCEPT -m comment --comment "allow inter-n
 To run fcli, create an alias in your shell profile, for example, assuming that you have a `clab_topo.yml` file in your current directory and lab is up and running:
 
 ```
-CLAB_TOPO=clab_topo.yml alias fcli="docker run -t --rm -v /etc/hosts:/etc/hosts:ro -v ${PWD}/${CLAB_TOPO}:/topo.yml wdesmedt/srl-fcli -t /topo.yml"
+CLAB_TOPO=clab_topo.yml alias fcli="docker run -t --rm -v /etc/hosts:/etc/hosts:ro -v ${PWD}/${CLAB_TOPO}:/topo.yml ghcr.io/wdesmedt/nornir-srl -t /topo.yml"
 ```
 To run a report, specify the report name as the first argument to the alias, for example:
 ```
