@@ -4,9 +4,6 @@ on:
   release:
     types: [published]
 
-  # Run tests for any PRs.
-  pull_request:
-
 env:
   IMAGE_NAME: nornir-srl
 
