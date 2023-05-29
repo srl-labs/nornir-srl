@@ -17,17 +17,22 @@ Following versions may focus on configuration management and command execution o
 
 This is the easiest way to get started. It requires [Docker](https://docs.docker.com/get-docker/) and optionally  [Containerlab](https://containerlab.dev/) to be installed on your system.
 
-> NOTE: if you have issues connecting to the docker network of containerlab from the `srl-fcli` container that uses the standard bridge `docker0`, make sure proper `iptables` rules are in place to permit traffic between different Docker networks, which is **by default blocked**. For example, on Ubuntu 20.04, you can use the following command:
+> NOTE: if you have issues connecting to the docker network of containerlab from the `nornir-srl` container that uses the standard bridge `docker0`, make sure proper `iptables` rules are in place to permit traffic between different Docker networks, which is **by default blocked**. For example, on Ubuntu 20.04, you can use the following command:
 
 ```
 iptables -I DOCKER-USER -o docker0 -j ACCEPT -m comment --comment "allow inter-network comms"
 ```
 
-To run fcli, create an alias in your shell profile, for example, assuming that you have a `clab_topo.yml` file in your current directory and lab is up and running:
+Alternatively, you can attach the `nornir-srl` container to the containerlab network to avoid adding iptables rules (cf. aliases below).
+
+To run fcli, create an alias in your shell session. For example, assuming you're using containerlab and  you have a `clab_topo.yml` file in your current directory and lab is up and running:
 
 ```
-CLAB_TOPO=clab_topo.yml alias fcli="docker run -t --rm -v /etc/hosts:/etc/hosts:ro -v ${PWD}/${CLAB_TOPO}:/topo.yml ghcr.io/srl-labs/nornir-srl -t /topo.yml"
+CLAB_TOPO=clab_topo.yml alias fcli="docker run -t --network $(grep '^name:' $CLAB_TOPO | awk '{print $2}') --rm -v /etc/hosts:/etc/hosts:ro -v ${PWD}/${CLAB_TOPO}:/topo.yml ghcr.io/srl-labs/nornir-srl -t /topo.yml"
 ```
+
+This command assumes that the containerlab topology file is named `clab_topo.yml` and is in the current directory. If not, change the `CLAB_TOPO` variable accordingly. Also, it assumes that the containerlab topology is using the default containerlab docker-network naming, i.e. name of the lab. If you have overridden the management network with `.mgmt.network` in the topology file, change the `--network` option accordingly.
+
 To run a report, specify the report name as the first argument to the alias, for example:
 ```
 fcli sys-info # for system information like NOS version, uptime, etc
