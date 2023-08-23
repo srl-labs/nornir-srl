@@ -4,7 +4,6 @@ import json
 import re
 import copy
 
-from deepdiff import DeepDiff
 from natsort import natsorted
 import jmespath
 
@@ -171,7 +170,8 @@ class SrLinux:
         }
         BGP_IP_VERSION_MAP = {
             1: ("2021-", "2022-"),
-            2: ("2023-", "20"),
+            2: ("2023-03",),
+            3: ("2023-07",),
         }
         ROUTE_FAMILY = {
             "evpn": "evpn",
@@ -266,7 +266,17 @@ class SrLinux:
                 "RIB_IP_JMESPATH": '"network-instance"[].{ni:name, Rib:"bgp-rib"."afi-safi"[]."'
                 + ROUTE_FAMILY[route_fam]
                 + '"."local-rib"."routes"[]'
-                + '.{neighbor:neighbor, "0_st":"_r_state", "Pfx":prefix, "lpref":"local-pref", med:med, "next-hop":"next-hop","as-path":"as-path".segment[0].member}}',
+                + '.{neighbor:neighbor, "0_st":"_r_state", "Pfx":prefix, "lpref":"local-pref", med:med, "next-hop":"next-hop","as-path":"as-path".segment[0].member, "communities":communities.community}}',
+            },
+            3: {
+                "RIB_IP_PATH": (
+                    f"/network-instance[name={network_instance}]/bgp-rib/afi-safi[afi-safi-name={ROUTE_FAMILY[route_fam]}]/"
+                    f"{ROUTE_FAMILY[route_fam]}/local-rib/route"
+                ),
+                "RIB_IP_JMESPATH": '"network-instance"[].{ni:name, Rib:"bgp-rib"."afi-safi"[]."'
+                + ROUTE_FAMILY[route_fam]
+                + '"."local-rib"."route"[]'
+                + '.{neighbor:neighbor, "0_st":"_r_state", "Pfx":prefix, "lpref":"local-pref", med:med, "next-hop":"next-hop","as-path":"as-path".segment[0].member, "communities":communities.community}}',
             },
         }
 
@@ -599,7 +609,7 @@ class SrLinux:
         else:
             device_cfg_after = input
 
-        dd = DeepDiff(device_cfg_before, device_cfg_after)
+#        dd = DeepDiff(device_cfg_before, device_cfg_after)
         diff = ""
         for i in range(len(r_list)):
             before_json = json.dumps(device_cfg_before[i], indent=2, sort_keys=True)
