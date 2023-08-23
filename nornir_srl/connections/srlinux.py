@@ -609,7 +609,7 @@ class SrLinux:
         else:
             device_cfg_after = input
 
-#        dd = DeepDiff(device_cfg_before, device_cfg_after)
+        #        dd = DeepDiff(device_cfg_before, device_cfg_after)
         diff = ""
         for i in range(len(r_list)):
             before_json = json.dumps(device_cfg_before[i], indent=2, sort_keys=True)
