@@ -14,7 +14,7 @@ from nornir.core.configuration import Config
 from nornir.core.exceptions import ConnectionException
 
 
-from .helpers import strip_modules, normalize_gnmi_resp, filter_fields, flatten_dict
+from .helpers import strip_modules, normalize_gnmi_resp, lpm
 
 CONNECTION_NAME = "srlinux"
 
@@ -438,11 +438,11 @@ class SrLinux:
         res = jmespath.search(path_spec["jmespath"], resp[0])
         return {"mac_table": res}
 
-    def get_rib_ipv4(self, network_instance: Optional[str] = "*") -> Dict[str, Any]:
+    def get_rib_ipv4(self, network_instance: Optional[str] = "*", lpm_address: Optional[str] = None) -> Dict[str, Any]:
         path_spec = {
             "path": f"/network-instance[name={network_instance}]/route-table/ipv4-unicast",
-            "jmespath": '"network-instance"[].{"Netw-Inst":name, Rib:"route-table"."ipv4-unicast".route[].{"Prefix":"ipv4-prefix",\
-                    "next-hop":"_next-hop",type:"route-type", metric:metric, pref:preference, itf:"_nh_itf"}}',
+            "jmespath": '"network-instance"[?_hasrib].{NI:name, Rib:"route-table"."ipv4-unicast".route[].{"Prefix":"ipv4-prefix",\
+                    "next-hop":"_next-hop",type:"route-type", Act:active, metric:metric, pref:preference, itf:"_nh_itf"}}',
             "datatype": "state",
         }
 
@@ -502,8 +502,27 @@ class SrLinux:
             paths=[path_spec.get("path", "")], datatype=path_spec["datatype"]
         )
         for ni in resp[0].get("network-instance", {}):
-            if len(ni["route-table"]["ipv4-unicast"]) > 0:
+            if len(ni["route-table"]["ipv4-unicast"]) == 0:
+                ni["_hasrib"] = False
+            else:
+                ni["_hasrib"] = True
+                if lpm_address:
+                    lpm_prefix = lpm(lpm_address, [route["ipv4-prefix"] for route in ni["route-table"]["ipv4-unicast"]["route"]])
+                    if lpm_prefix:
+                        ni["route-table"]["ipv4-unicast"]["route"] = [
+                            r
+                            for r in ni["route-table"]["ipv4-unicast"]["route"]
+                            if r["ipv4-prefix"] == lpm_prefix
+                        ]
+                    else:
+                        ni["route-table"]["ipv4-unicast"]["route"] = []
+                        ni["_hasrib"] = False
+                        continue
                 for route in ni["route-table"]["ipv4-unicast"]["route"]:
+                    if route["active"]:
+                        route["active"] = "Yes"
+                    else:
+                        route["active"] = "No"
                     if "next-hop-group" in route:
                         route["_next-hop"] = [
                             nh.get("ip-address")
@@ -511,12 +530,27 @@ class SrLinux:
                                 route["next-hop-group"]
                             ]
                         ]
+                        
                         route["_nh_itf"] = [
                             nh.get("subinterface")
                             for nh in nhgroup_mapping[ni["name"]][
                                 route["next-hop-group"]
-                            ]
+                            ] if nh.get("subinterface")
                         ]
+                        if len(route["_nh_itf"]) == 0:
+                            route["_nh_itf"] = [
+                                nh.get("tunnel")
+                                for nh in nhgroup_mapping[ni["name"]][
+                                    route["next-hop-group"]
+                                ] if nh.get("tunnel")
+                            ]
+                        if len(route["_nh_itf"]) == 0:
+                            resolving_routes = [ nh.get("resolving-route", {}) for nh in nhgroup_mapping[ni["name"]][
+                                    route["next-hop-group"]
+                                ] if nh.get("resolving-route")
+                            ]
+#                            if len(resolving_routes) > 0:
+#                                route["_nh_itf"] = [ rt.get("_nh_itf") for rt in ni["route-table"]["ipv4-unicast"]["route"] if rt.get("ipv4-prefix") in [ res_rt.get("ip-prefix") for res_rt in resolving_routes ] ]
 
         res = jmespath.search(path_spec["jmespath"], resp[0])
         return {"ipv4_rib": res}

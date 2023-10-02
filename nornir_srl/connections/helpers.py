@@ -1,8 +1,8 @@
-from typing import Any, Dict, List, Tuple, Optional
+from typing import Any, Dict, List, Tuple, Optional, Union
 import json
 import difflib
 import re
-
+import ipaddress
 
 def normalize_gnmi_resp(resp: Dict) -> List[Dict[str, Any]]:
     """
@@ -34,6 +34,29 @@ def normalize_gnmi_resp(resp: Dict) -> List[Dict[str, Any]]:
         else:
             r.append({})
     return r
+
+def lpm(ip_address: str, prefix_list: List[str]) -> str:
+    """
+    longest prefix match
+
+    Args:
+        ip_address: ip address to match (v6 or v4)
+        prefix_list: list of prefixes to match against
+
+    Returns:
+        str: longest prefix matched
+    """
+    ip_addr = ipaddress.ip_address(ip_address)
+    longest_pfx_str: str = ""
+
+    max_pfx_len = -1
+    for prefix in prefix_list:
+        ip_pfx = ipaddress.ip_network(prefix)
+        if ip_addr in ip_pfx:
+            if ip_pfx.prefixlen > max_pfx_len:
+                max_pfx_len = ip_pfx.prefixlen
+                longest_pfx_str = str(ip_pfx)
+    return longest_pfx_str
 
 
 def diff_obj(a: Dict, a_name: str, b: Dict, b_name: str) -> Tuple[bool, str]:
