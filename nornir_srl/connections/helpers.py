@@ -4,6 +4,7 @@ import difflib
 import re
 import ipaddress
 
+
 def normalize_gnmi_resp(resp: Dict) -> List[Dict[str, Any]]:
     """
     remove gnmi notification and update envelopes from payload
@@ -34,6 +35,7 @@ def normalize_gnmi_resp(resp: Dict) -> List[Dict[str, Any]]:
         else:
             r.append({})
     return r
+
 
 def lpm(ip_address: str, prefix_list: List[str]) -> str:
     """

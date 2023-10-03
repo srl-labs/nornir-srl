@@ -55,6 +55,7 @@ NORNIR_DEFAULT_CONFIG: Dict[str, Any] = {
     },
 }
 
+
 def get_project_version():
     try:
         version = pkg_resources.get_distribution(PYTHON_PKG_NAME).version
@@ -223,7 +224,7 @@ def print_table(
     if len(table.columns) > 1:
         console.print(table)
     else:
-        console.print("[i]No data...[/i]")    
+        console.print("[i]No data...[/i]")
 
 
 @click.group()
@@ -262,10 +263,11 @@ def print_table(
 )
 @click.pass_context
 @click.version_option(version=get_project_version())
-def cli(ctx: Context,
+def cli(
+    ctx: Context,
     cfg: str,
     inv_filter: Optional[List] = None,
-#    field_filter: Optional[List] = None,
+    #    field_filter: Optional[List] = None,
     box_type: Optional[str] = None,
     topo_file: Optional[str] = None,
     cert_file: Optional[str] = None,
@@ -355,15 +357,15 @@ def cli(ctx: Context,
         box_type = box_type.upper()
     ctx.obj["box_type"] = box_type
 
-def print_report(
-        result: AggregatedResult,
-        name: str,
-        failed_hosts: List,
-        box_type: Optional[str] = None,
-        f_filter: Optional[Dict] = None,
-        i_filter: Optional[Dict] = None,
-) -> None:
 
+def print_report(
+    result: AggregatedResult,
+    name: str,
+    failed_hosts: List,
+    box_type: Optional[str] = None,
+    f_filter: Optional[Dict] = None,
+    i_filter: Optional[Dict] = None,
+) -> None:
     title = "[bold]" + name + "[/bold]"
     if f_filter:
         title += "\nFields filter:" + str(f_filter)
@@ -379,6 +381,7 @@ def print_report(
         box_type=box_type,
     )
 
+
 @cli.command()
 @click.pass_context
 @click.option(
@@ -388,7 +391,8 @@ def print_report(
     help='filter fields with <field-name>=<glob-pattern>, e.g. -f state=up -f admin_state="ena*". Fieldnames correspond to column names of a report',
 )
 def bgp_peers(ctx: Context, field_filter: Optional[List] = None):
-    """Displayt BGP Peers and their status"""
+    """Displays BGP Peers and their status"""
+
     def _bgp_peers(task: Task) -> Result:
         device = task.host.get_connection(CONNECTION_NAME, task.nornir.config)
         return Result(host=task.host, result=device.get_sum_bgp())
@@ -396,7 +400,9 @@ def bgp_peers(ctx: Context, field_filter: Optional[List] = None):
     f_filter = (
         {k: v for k, v in [f.split("=") for f in field_filter]} if field_filter else {}
     )
-    result = ctx.obj["target"].run(task=_bgp_peers, name="bgp_peers", raise_on_error=True)
+    result = ctx.obj["target"].run(
+        task=_bgp_peers, name="bgp_peers", raise_on_error=False
+    )
     print_report(
         result=result,
         name="BGP Peers",
@@ -405,6 +411,7 @@ def bgp_peers(ctx: Context, field_filter: Optional[List] = None):
         f_filter=f_filter,
         i_filter=ctx.obj["i_filter"],
     )
+
 
 @cli.command()
 @click.pass_context
@@ -416,13 +423,17 @@ def bgp_peers(ctx: Context, field_filter: Optional[List] = None):
 )
 def sys_info(ctx: Context, field_filter: Optional[List] = None):
     """Displays System Info of nodes"""
+
     def _sys_info(task: Task) -> Result:
         device = task.host.get_connection(CONNECTION_NAME, task.nornir.config)
         return Result(host=task.host, result=device.get_info())
+
     f_filter = (
         {k: v for k, v in [f.split("=") for f in field_filter]} if field_filter else {}
     )
-    result = ctx.obj["target"].run(task=_sys_info, name="sys_info", raise_on_error=True)
+    result = ctx.obj["target"].run(
+        task=_sys_info, name="sys_info", raise_on_error=False
+    )
     print_report(
         result=result,
         name="System Info",
@@ -432,6 +443,7 @@ def sys_info(ctx: Context, field_filter: Optional[List] = None):
         i_filter=ctx.obj["i_filter"],
     )
 
+
 @cli.command()
 @click.pass_context
 @click.option(
@@ -440,8 +452,9 @@ def sys_info(ctx: Context, field_filter: Optional[List] = None):
     multiple=True,
     help='filter fields with <field-name>=<glob-pattern>, e.g. -f state=up -f admin_state="ena*". Fieldnames correspond to column names of a report',
 )
-def subinterfaces(ctx: Context, field_filter: Optional[List] = None):
+def subif(ctx: Context, field_filter: Optional[List] = None):
     """Displays Sub-Interfaces of nodes"""
+
     def _subinterfaces(task: Task) -> Result:
         device = task.host.get_connection(CONNECTION_NAME, task.nornir.config)
         return Result(host=task.host, result=device.get_sum_subitf())
@@ -449,7 +462,9 @@ def subinterfaces(ctx: Context, field_filter: Optional[List] = None):
     f_filter = (
         {k: v for k, v in [f.split("=") for f in field_filter]} if field_filter else {}
     )
-    result = ctx.obj["target"].run(task=_subinterfaces, name="subinterface", raise_on_error=True)
+    result = ctx.obj["target"].run(
+        task=_subinterfaces, name="subinterface", raise_on_error=False
+    )
     print_report(
         result=result,
         name="Sub-Interfaces",
@@ -458,6 +473,7 @@ def subinterfaces(ctx: Context, field_filter: Optional[List] = None):
         f_filter=f_filter,
         i_filter=ctx.obj["i_filter"],
     )
+
 
 @cli.command()
 @click.pass_context
@@ -473,16 +489,21 @@ def subinterfaces(ctx: Context, field_filter: Optional[List] = None):
     multiple=False,
     help="Look up specified address in the IPv4 RIB using LPM",
 )
-def ipv4_rib(ctx: Context, address: Optional[str] = None, field_filter: Optional[List] = None):
+def ipv4_rib(
+    ctx: Context, address: Optional[str] = None, field_filter: Optional[List] = None
+):
     """Displays IPv4 RIB entries, LPM lookup"""
+
     def _ipv4_rib(task: Task) -> Result:
         device = task.host.get_connection(CONNECTION_NAME, task.nornir.config)
         return Result(host=task.host, result=device.get_rib_ipv4(lpm_address=address))
-    
+
     f_filter = (
         {k: v for k, v in [f.split("=") for f in field_filter]} if field_filter else {}
     )
-    result = ctx.obj["target"].run(task=_ipv4_rib, name="ipv4_rib", raise_on_error=True)
+    result = ctx.obj["target"].run(
+        task=_ipv4_rib, name="ipv4_rib", raise_on_error=False
+    )
     print_report(
         result=result,
         name=f"IPv4 RIB {'- hunting for ' + address if address else ''}",
@@ -491,6 +512,7 @@ def ipv4_rib(ctx: Context, address: Optional[str] = None, field_filter: Optional
         f_filter=f_filter,
         i_filter=ctx.obj["i_filter"],
     )
+
 
 @cli.command()
 @click.pass_context
@@ -502,7 +524,7 @@ def ipv4_rib(ctx: Context, address: Optional[str] = None, field_filter: Optional
 )
 @click.option(
     "--route-fam",
-    "-f",
+    "-r",
     multiple=False,
     required=True,
     type=click.Choice(["evpn", "ipv4"]),
@@ -516,16 +538,25 @@ def ipv4_rib(ctx: Context, address: Optional[str] = None, field_filter: Optional
     default="2",
     help="Route type for EVPN routes",
 )
-def bgp_rib(ctx: Context, route_fam: str, route_type: Optional[str] = None, field_filter: Optional[List] = None):
+def bgp_rib(
+    ctx: Context,
+    route_fam: str,
+    route_type: Optional[str] = None,
+    field_filter: Optional[List] = None,
+):
     """Displays BGP RIB"""
+
     def _bgp_rib(task: Task) -> Result:
         device = task.host.get_connection(CONNECTION_NAME, task.nornir.config)
-        return Result(host=task.host, result=device.get_bgp_rib(route_fam=route_fam, route_type=route_type))
+        return Result(
+            host=task.host,
+            result=device.get_bgp_rib(route_fam=route_fam, route_type=route_type),
+        )
 
     f_filter = (
         {k: v for k, v in [f.split("=") for f in field_filter]} if field_filter else {}
     )
-    result = ctx.obj["target"].run(task=_bgp_rib, name="bgp_rib", raise_on_error=True)
+    result = ctx.obj["target"].run(task=_bgp_rib, name="bgp_rib", raise_on_error=False)
     print_report(
         result=result,
         name=f"BGP RIB - {route_fam.upper()}{' route-type ' + route_type if route_type and route_fam == 'evpn' else ''}",
@@ -535,6 +566,7 @@ def bgp_rib(ctx: Context, route_fam: str, route_type: Optional[str] = None, fiel
         i_filter=ctx.obj["i_filter"],
     )
 
+
 @cli.command()
 @click.pass_context
 @click.option(
@@ -543,8 +575,9 @@ def bgp_rib(ctx: Context, route_fam: str, route_type: Optional[str] = None, fiel
     multiple=True,
     help='filter fields with <field-name>=<glob-pattern>, e.g. -f state=up -f admin_state="ena*". Fieldnames correspond to column names of a report',
 )
-def mac_table(ctx: Context,field_filter: Optional[List] = None):
+def mac(ctx: Context, field_filter: Optional[List] = None):
     """Displays MAC Table"""
+
     def _mac_table(task: Task) -> Result:
         device = task.host.get_connection(CONNECTION_NAME, task.nornir.config)
         return Result(host=task.host, result=device.get_mac_table())
@@ -552,7 +585,9 @@ def mac_table(ctx: Context,field_filter: Optional[List] = None):
     f_filter = (
         {k: v for k, v in [f.split("=") for f in field_filter]} if field_filter else {}
     )
-    result = ctx.obj["target"].run(task=_mac_table, name="mac_table", raise_on_error=True)
+    result = ctx.obj["target"].run(
+        task=_mac_table, name="mac_table", raise_on_error=False
+    )
     print_report(
         result=result,
         name="MAC Table",
@@ -562,6 +597,7 @@ def mac_table(ctx: Context,field_filter: Optional[List] = None):
         i_filter=ctx.obj["i_filter"],
     )
 
+
 @cli.command()
 @click.pass_context
 @click.option(
@@ -570,8 +606,9 @@ def mac_table(ctx: Context,field_filter: Optional[List] = None):
     multiple=True,
     help='filter fields with <field-name>=<glob-pattern>, e.g. -f state=up -f admin_state="ena*". Fieldnames correspond to column names of a report',
 )
-def network_instances(ctx: Context, field_filter: Optional[List] = None):
+def ni(ctx: Context, field_filter: Optional[List] = None):
     """Displays Network Instances and interfaces"""
+
     def _network_instances(task: Task) -> Result:
         device = task.host.get_connection(CONNECTION_NAME, task.nornir.config)
         return Result(host=task.host, result=device.get_nwi_itf())
@@ -579,7 +616,9 @@ def network_instances(ctx: Context, field_filter: Optional[List] = None):
     f_filter = (
         {k: v for k, v in [f.split("=") for f in field_filter]} if field_filter else {}
     )
-    result = ctx.obj["target"].run(task=_network_instances, name="nwi_itfs", raise_on_error=True)
+    result = ctx.obj["target"].run(
+        task=_network_instances, name="nwi_itfs", raise_on_error=False
+    )
     print_report(
         result=result,
         name="Network Instances and interfaces",
@@ -589,6 +628,7 @@ def network_instances(ctx: Context, field_filter: Optional[List] = None):
         i_filter=ctx.obj["i_filter"],
     )
 
+
 @cli.command()
 @click.pass_context
 @click.option(
@@ -597,8 +637,9 @@ def network_instances(ctx: Context, field_filter: Optional[List] = None):
     multiple=True,
     help='filter fields with <field-name>=<glob-pattern>, e.g. -f state=up -f admin_state="ena*". Fieldnames correspond to column names of a report',
 )
-def lldp_neighbors(ctx: Context, field_filter: Optional[List] = None):
+def lldp(ctx: Context, field_filter: Optional[List] = None):
     """Displays LLDP Neighbors"""
+
     def _lldp_neighbors(task: Task) -> Result:
         device = task.host.get_connection(CONNECTION_NAME, task.nornir.config)
         return Result(host=task.host, result=device.get_lldp_sum())
@@ -606,7 +647,9 @@ def lldp_neighbors(ctx: Context, field_filter: Optional[List] = None):
     f_filter = (
         {k: v for k, v in [f.split("=") for f in field_filter]} if field_filter else {}
     )
-    result = ctx.obj["target"].run(task=_lldp_neighbors, name="lldp_nbrs", raise_on_error=True)
+    result = ctx.obj["target"].run(
+        task=_lldp_neighbors, name="lldp_nbrs", raise_on_error=False
+    )
     print_report(
         result=result,
         name="LLDP Neighbors",
@@ -615,6 +658,7 @@ def lldp_neighbors(ctx: Context, field_filter: Optional[List] = None):
         f_filter=f_filter,
         i_filter=ctx.obj["i_filter"],
     )
+
 
 if __name__ == "__main__":
     cli(obj={})
