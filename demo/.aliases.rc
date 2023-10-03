@@ -1,1 +1,0 @@
-alias fcli="docker run -t --network $(grep '^name:' demo.clab.yaml | awk '{print $2}') --rm -v /etc/hosts:/etc/hosts:ro -v ${PWD}/demo.clab.yaml:/topo.yml ghcr.io/srl-labs/nornir-srl -t /topo.yml"
