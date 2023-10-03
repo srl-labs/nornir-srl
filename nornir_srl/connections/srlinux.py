@@ -14,7 +14,7 @@ from nornir.core.configuration import Config
 from nornir.core.exceptions import ConnectionException
 
 
-from .helpers import strip_modules, normalize_gnmi_resp, filter_fields, flatten_dict
+from .helpers import strip_modules, normalize_gnmi_resp, lpm
 
 CONNECTION_NAME = "srlinux"
 
@@ -233,7 +233,7 @@ class SrLinux:
                     f"{ROUTE_FAMILY[route_fam]}/rib-in-out/rib-in-post/"
                     f"{ROUTE_TYPE[route_type]}"  # type: ignore
                 ),
-                "RIB_EVPN_JMESPATH_COMMON": '"network-instance"[].{ni:name, Rib:"bgp-rib"."'
+                "RIB_EVPN_JMESPATH_COMMON": '"network-instance"[].{NI:name, Rib:"bgp-rib"."'
                 + ROUTE_FAMILY[route_fam]
                 + '"."rib-in-out"."rib-in-post"."'
                 + ROUTE_TYPE[route_type]  # type: ignore
@@ -253,7 +253,7 @@ class SrLinux:
                     f"/network-instance[name={network_instance}]/bgp-rib/"
                     f"{ROUTE_FAMILY[route_fam]}/local-rib/routes"
                 ),
-                "RIB_IP_JMESPATH": '"network-instance"[].{ni:name, Rib:"bgp-rib"."'
+                "RIB_IP_JMESPATH": '"network-instance"[].{NI:name, Rib:"bgp-rib"."'
                 + ROUTE_FAMILY[route_fam]
                 + '"."local-rib"."routes"[]'
                 + '.{neighbor:neighbor, "0_st":"_r_state", "Pfx":prefix, "lpref":"local-pref", med:med, "next-hop":"next-hop","as-path":"as-path".segment[0].member}}',
@@ -263,7 +263,7 @@ class SrLinux:
                     f"/network-instance[name={network_instance}]/bgp-rib/afi-safi[afi-safi-name={ROUTE_FAMILY[route_fam]}]/"
                     f"{ROUTE_FAMILY[route_fam]}/local-rib/routes"
                 ),
-                "RIB_IP_JMESPATH": '"network-instance"[].{ni:name, Rib:"bgp-rib"."afi-safi"[]."'
+                "RIB_IP_JMESPATH": '"network-instance"[].{NI:name, Rib:"bgp-rib"."afi-safi"[]."'
                 + ROUTE_FAMILY[route_fam]
                 + '"."local-rib"."routes"[]'
                 + '.{neighbor:neighbor, "0_st":"_r_state", "Pfx":prefix, "lpref":"local-pref", med:med, "next-hop":"next-hop","as-path":"as-path".segment[0].member, "communities":communities.community}}',
@@ -273,7 +273,7 @@ class SrLinux:
                     f"/network-instance[name={network_instance}]/bgp-rib/afi-safi[afi-safi-name={ROUTE_FAMILY[route_fam]}]/"
                     f"{ROUTE_FAMILY[route_fam]}/local-rib/route"
                 ),
-                "RIB_IP_JMESPATH": '"network-instance"[].{ni:name, Rib:"bgp-rib"."afi-safi"[]."'
+                "RIB_IP_JMESPATH": '"network-instance"[].{NI:name, Rib:"bgp-rib"."afi-safi"[]."'
                 + ROUTE_FAMILY[route_fam]
                 + '"."local-rib"."route"[]'
                 + '.{neighbor:neighbor, "0_st":"_r_state", "Pfx":prefix, "lpref":"local-pref", med:med, "next-hop":"next-hop","as-path":"as-path".segment[0].member, "communities":communities.community}}',
@@ -398,7 +398,7 @@ class SrLinux:
 
         path_spec = {
             "path": f"/network-instance[name={network_instance}]/protocols/bgp/neighbor",
-            "jmespath": '"network-instance"[].{NetwInst:name, Neighbors: protocols.bgp.neighbor[].{"1_peer":"peer-address",\
+            "jmespath": '"network-instance"[].{NI:name, Neighbors: protocols.bgp.neighbor[].{"1_peer":"peer-address",\
                     peer_as:"peer-as", state:"session-state",local_as:"_local-asn",\
                     "group":"peer-group", "export_policy":"export-policy", "import_policy":"import-policy",\
                     "AFI/SAFI\\nIPv4-UC\\nRx/Act/Tx":"_ipv4", "AFI/SAFI\\nEVPN\\nRx/Act/Tx":"_evpn"}}',
@@ -428,7 +428,7 @@ class SrLinux:
     def get_mac_table(self, network_instance: Optional[str] = "*") -> Dict[str, Any]:
         path_spec = {
             "path": f"/network-instance[name={network_instance}]/bridge-table/mac-table/mac",
-            "jmespath": '"network-instance"[].{"Netw-Inst":name, Fib:"bridge-table"."mac-table".mac[].{Address:address,\
+            "jmespath": '"network-instance"[].{"NI":name, Fib:"bridge-table"."mac-table".mac[].{Address:address,\
                         Dest:destination, Type:type}}',
             "datatype": "state",
         }
@@ -438,11 +438,13 @@ class SrLinux:
         res = jmespath.search(path_spec["jmespath"], resp[0])
         return {"mac_table": res}
 
-    def get_rib_ipv4(self, network_instance: Optional[str] = "*") -> Dict[str, Any]:
+    def get_rib_ipv4(
+        self, network_instance: Optional[str] = "*", lpm_address: Optional[str] = None
+    ) -> Dict[str, Any]:
         path_spec = {
             "path": f"/network-instance[name={network_instance}]/route-table/ipv4-unicast",
-            "jmespath": '"network-instance"[].{"Netw-Inst":name, Rib:"route-table"."ipv4-unicast".route[].{"Prefix":"ipv4-prefix",\
-                    "next-hop":"_next-hop",type:"route-type", metric:metric, pref:preference, itf:"_nh_itf"}}',
+            "jmespath": '"network-instance"[?_hasrib].{NI:name, Rib:"route-table"."ipv4-unicast".route[].{"Prefix":"ipv4-prefix",\
+                    "next-hop":"_next-hop",type:"route-type", Act:active, metric:metric, pref:preference, itf:"_nh_itf"}}',
             "datatype": "state",
         }
 
@@ -502,8 +504,33 @@ class SrLinux:
             paths=[path_spec.get("path", "")], datatype=path_spec["datatype"]
         )
         for ni in resp[0].get("network-instance", {}):
-            if len(ni["route-table"]["ipv4-unicast"]) > 0:
+            if len(ni["route-table"]["ipv4-unicast"]) == 0:
+                ni["_hasrib"] = False
+            else:
+                ni["_hasrib"] = True
+                if lpm_address:
+                    lpm_prefix = lpm(
+                        lpm_address,
+                        [
+                            route["ipv4-prefix"]
+                            for route in ni["route-table"]["ipv4-unicast"]["route"]
+                        ],
+                    )
+                    if lpm_prefix:
+                        ni["route-table"]["ipv4-unicast"]["route"] = [
+                            r
+                            for r in ni["route-table"]["ipv4-unicast"]["route"]
+                            if r["ipv4-prefix"] == lpm_prefix
+                        ]
+                    else:
+                        ni["route-table"]["ipv4-unicast"]["route"] = []
+                        ni["_hasrib"] = False
+                        continue
                 for route in ni["route-table"]["ipv4-unicast"]["route"]:
+                    if route["active"]:
+                        route["active"] = "Yes"
+                    else:
+                        route["active"] = "No"
                     if "next-hop-group" in route:
                         route["_next-hop"] = [
                             nh.get("ip-address")
@@ -511,12 +538,32 @@ class SrLinux:
                                 route["next-hop-group"]
                             ]
                         ]
+
                         route["_nh_itf"] = [
                             nh.get("subinterface")
                             for nh in nhgroup_mapping[ni["name"]][
                                 route["next-hop-group"]
                             ]
+                            if nh.get("subinterface")
                         ]
+                        if len(route["_nh_itf"]) == 0:
+                            route["_nh_itf"] = [
+                                nh.get("tunnel")
+                                for nh in nhgroup_mapping[ni["name"]][
+                                    route["next-hop-group"]
+                                ]
+                                if nh.get("tunnel")
+                            ]
+                        if len(route["_nh_itf"]) == 0:
+                            resolving_routes = [
+                                nh.get("resolving-route", {})
+                                for nh in nhgroup_mapping[ni["name"]][
+                                    route["next-hop-group"]
+                                ]
+                                if nh.get("resolving-route")
+                            ]
+        #                            if len(resolving_routes) > 0:
+        #                                route["_nh_itf"] = [ rt.get("_nh_itf") for rt in ni["route-table"]["ipv4-unicast"]["route"] if rt.get("ipv4-prefix") in [ res_rt.get("ip-prefix") for res_rt in resolving_routes ] ]
 
         res = jmespath.search(path_spec["jmespath"], resp[0])
         return {"ipv4_rib": res}
@@ -525,7 +572,7 @@ class SrLinux:
         SUBITF_PATH = "/interface[name=*]/subinterface"
         path_spec = {
             "path": f"/network-instance[name={nw_instance}]",
-            "jmespath": '"network-instance"[].{ni:name,oper:"oper-state",type:type,"router-id":protocols.bgp."router-id",\
+            "jmespath": '"network-instance"[].{NI:name,oper:"oper-state",type:type,"router-id":protocols.bgp."router-id",\
                     itfs: interface[].{Subitf:name,"if-oper":"oper-state", ipv4:ipv4.address[]."ip-prefix",\
                         vlan:vlan.encap."single-tagged"."vlan-id", "mtu":"_mtu"}}',
             "datatype": "state",
