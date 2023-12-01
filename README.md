@@ -24,10 +24,10 @@ Following versions may focus on configuration management and command execution o
 - go to the directory where your containerlab topology file is located
 - create an alias for `fcli` as follows and modify the `CLAB_TOPO` to match your topology file name
 - modify the `--network` option to match your containerlab network name (default is the name of the lab)
-- latest version of `nornir-srl` is `0.2.1`, modify the tag accordingly if you want to use a different version
+- latest version of `nornir-srl` container image is [here](https://github.com/srl-labs/nornir-srl/pkgs/container/nornir-srl). Modify the tag accordingly if you want to use a different version
 
 ```
-CLAB_TOPO=topo.yaml && alias fcli="docker run -t --network $(grep '^name:' $CLAB_TOPO | awk '{print $2}') --rm -v /etc/hosts:/etc/hosts:ro -v ${PWD}/${CLAB_TOPO}:/topo.yml ghcr.io/srl-labs/nornir-srl:0.2.1 -t /topo.yml"
+CLAB_TOPO=topo.yaml && alias fcli="docker run -t --network $(grep '^name:' $CLAB_TOPO | awk '{print $2}') --rm -v /etc/hosts:/etc/hosts:ro -v ${PWD}/${CLAB_TOPO}:/topo.yml ghcr.io/srl-labs/nornir-srl:latest -t /topo.yml"
 ```
 
 ## Run `fcli`
