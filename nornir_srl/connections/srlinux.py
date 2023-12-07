@@ -171,7 +171,7 @@ class SrLinux:
         BGP_IP_VERSION_MAP = {
             1: ("2021-", "2022-"),
             2: ("2023-03",),
-            3: ("2023-07",),
+            3: ("2023-",),
         }
         ROUTE_FAMILY = {
             "evpn": "evpn",
