@@ -482,6 +482,7 @@ def subif(ctx: Context, field_filter: Optional[List] = None):
         i_filter=ctx.obj["i_filter"],
     )
 
+
 @cli.command()
 @click.pass_context
 @click.option(
@@ -500,9 +501,7 @@ def lag(ctx: Context, field_filter: Optional[List] = None):
     f_filter = (
         {k: v for k, v in [f.split("=") for f in field_filter]} if field_filter else {}
     )
-    result = ctx.obj["target"].run(
-        task=_lag, name="lag", raise_on_error=False
-    )
+    result = ctx.obj["target"].run(task=_lag, name="lag", raise_on_error=False)
     print_report(
         result=result,
         name="LAGs",
@@ -511,6 +510,7 @@ def lag(ctx: Context, field_filter: Optional[List] = None):
         f_filter=f_filter,
         i_filter=ctx.obj["i_filter"],
     )
+
 
 @cli.command()
 @click.pass_context
@@ -696,6 +696,7 @@ def lldp(ctx: Context, field_filter: Optional[List] = None):
         i_filter=ctx.obj["i_filter"],
     )
 
+
 @cli.command()
 @click.pass_context
 @click.option(
@@ -722,8 +723,9 @@ def es(ctx: Context, field_filter: Optional[List] = None):
         failed_hosts=result.failed_hosts,
         box_type=ctx.obj["box_type"],
         f_filter=f_filter,
-        i_filter=ctx.obj["i_filter"]
+        i_filter=ctx.obj["i_filter"],
     )
-    
+
+
 if __name__ == "__main__":
     cli(obj={})
