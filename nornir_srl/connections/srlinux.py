@@ -597,6 +597,62 @@ class SrLinux:
         res = jmespath.search(path_spec["jmespath"], resp[0])
         return {"nwi_itfs": res}
 
+    def get_lag(self, lag_id: str = "*") -> Dict[str, Any]:
+        path_spec = {
+            "path": f"/interface[name=lag{lag_id}]",
+            "jmespath": '"interface"[].{lag:name, oper:"oper-state",mtu:mtu,num:lag.member|length(@),"min":lag."min-links",desc:description, type:lag."lag-type", speed:lag."lag-speed","stby-sig":ethernet."standby-signaling",\
+                  "lacp-key":lag.lacp."admin-key","lacp-itvl":lag.lacp.interval,"lacp-mode":lag.lacp."lacp-mode","lacp-sysid":lag.lacp."system-id-mac","lacp-prio":lag.lacp."system-priority",\
+                    members:lag.member[].{"member-itf":name, "member-oper":"oper-state","act":lacp."activity"}}',
+            "datatype": "state",
+        }
+        resp = self.get(
+            paths=[path_spec.get("path", "")], datatype=path_spec["datatype"]
+        )
+        res = jmespath.search(path_spec["jmespath"], resp[0])
+        return {"lag": res}
+
+    def get_es(self) -> Dict[str, Any]:
+        path_spec = {
+            "path": f"/system/network-instance/protocols/evpn/ethernet-segments",
+            "jmespath": '"system/network-instance/protocols/evpn/ethernet-segments"."bgp-instance"[]."ethernet-segment"[].{name:name, esi:esi, "mh-mode":"multi-homing-mode",\
+                oper:"oper-state",itfs:interface[]."ethernet-interface"|join(\' \',@), vrfs:association."network-instance"[].{ni:name, "peers":"_peers"}}',
+            "datatype": "state",
+        }
+
+        def set_es_peers(resp):
+            for bgp_inst in (
+                resp[0]
+                .get("system/network-instance/protocols/evpn/ethernet-segments", {})
+                .get("bgp-instance", [])
+            ):
+                for es in bgp_inst.get("ethernet-segment", []):
+                    for vrf in es.get("association", {}).get("network-instance", []):
+                        es_peers = (
+                            vrf["bgp-instance"][0]
+                            .get("computed-designated-forwarder-candidates", {})
+                            .get("designated-forwarder-candidate", [])
+                        )
+                        vrf["_peers"] = ", ".join(
+                            f"{peer['address']} (DF)"
+                            if peer["designated-forwarder"]
+                            else peer["address"]
+                            for peer in es_peers
+                        )
+
+        if (
+            not "evpn"
+            in self.get(paths=["/system/features"], datatype="state")[0][
+                "system/features"
+            ]
+        ):
+            return {"es": []}
+        resp = self.get(
+            paths=[path_spec.get("path", "")], datatype=path_spec["datatype"]
+        )
+        set_es_peers(resp)
+        res = jmespath.search(path_spec["jmespath"], resp[0])
+        return {"es": res}
+
     def get(
         self,
         paths: List[str],

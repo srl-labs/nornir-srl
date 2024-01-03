@@ -491,6 +491,35 @@ def subif(ctx: Context, field_filter: Optional[List] = None):
     multiple=True,
     help='filter fields with <field-name>=<glob-pattern>, e.g. -f state=up -f admin_state="ena*". Fieldnames correspond to column names of a report',
 )
+def lag(ctx: Context, field_filter: Optional[List] = None):
+    """Displays LAGs of nodes"""
+
+    def _lag(task: Task) -> Result:
+        device = task.host.get_connection(CONNECTION_NAME, task.nornir.config)
+        return Result(host=task.host, result=device.get_lag())
+
+    f_filter = (
+        {k: v for k, v in [f.split("=") for f in field_filter]} if field_filter else {}
+    )
+    result = ctx.obj["target"].run(task=_lag, name="lag", raise_on_error=False)
+    print_report(
+        result=result,
+        name="LAGs",
+        failed_hosts=result.failed_hosts,
+        box_type=ctx.obj["box_type"],
+        f_filter=f_filter,
+        i_filter=ctx.obj["i_filter"],
+    )
+
+
+@cli.command()
+@click.pass_context
+@click.option(
+    "--field-filter",
+    "-f",
+    multiple=True,
+    help='filter fields with <field-name>=<glob-pattern>, e.g. -f state=up -f admin_state="ena*". Fieldnames correspond to column names of a report',
+)
 @click.option(
     "--address",
     "-a",
@@ -661,6 +690,36 @@ def lldp(ctx: Context, field_filter: Optional[List] = None):
     print_report(
         result=result,
         name="LLDP Neighbors",
+        failed_hosts=result.failed_hosts,
+        box_type=ctx.obj["box_type"],
+        f_filter=f_filter,
+        i_filter=ctx.obj["i_filter"],
+    )
+
+
+@cli.command()
+@click.pass_context
+@click.option(
+    "--field-filter",
+    "-f",
+    multiple=True,
+    help='filter fields with <field-name>=<glob-pattern>, e.g. -f name=ge-0/0/0 -f admin_state="ena*". Fieldnames correspond to column names of a report',
+)
+def es(ctx: Context, field_filter: Optional[List] = None):
+    """Displays Ethernet Segments"""
+
+    def _es(task: Task) -> Result:
+        device = task.host.get_connection(CONNECTION_NAME, task.nornir.config)
+        return Result(host=task.host, result=device.get_es())
+
+    f_filter = (
+        {k: v for k, v in [f.split("=") for f in field_filter]} if field_filter else {}
+    )
+
+    result = ctx.obj["target"].run(task=_es, name="es", raise_on_error=False)
+    print_report(
+        result=result,
+        name="Ethernet Segments",
         failed_hosts=result.failed_hosts,
         box_type=ctx.obj["box_type"],
         f_filter=f_filter,
