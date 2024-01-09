@@ -3,6 +3,7 @@ import difflib
 import json
 import re
 import copy
+import datetime
 
 from natsort import natsorted
 import jmespath
@@ -432,6 +433,13 @@ class SrLinux:
                         Dest:destination, Type:type}}',
             "datatype": "state",
         }
+        if (
+            not "bridged"
+            in self.get(paths=["/system/features"], datatype="state")[0][
+                "system/features"
+            ]
+        ):
+            return {"mac_table": []}
         resp = self.get(
             paths=[path_spec.get("path", "")], datatype=path_spec["datatype"]
         )
@@ -652,6 +660,64 @@ class SrLinux:
         set_es_peers(resp)
         res = jmespath.search(path_spec["jmespath"], resp[0])
         return {"es": res}
+
+    def get_arp(self) -> Dict[str, Any]:
+        path_spec = {
+            "path": f"/interface[name=*]/subinterface[index=*]/ipv4/arp/neighbor",
+            "jmespath": '"interface"[*].subinterface[].{interface:"_subitf", entries:ipv4.arp.neighbor[].{IPv4:"ipv4-address",MAC:"link-layer-address",Type:origin,expiry:"_rel_expiry" }}',
+            "datatype": "state",
+        }
+        resp = self.get(
+            paths=[path_spec.get("path", "")], datatype=path_spec["datatype"]
+        )
+        for itf in resp[0].get("interface", []):
+            for subitf in itf.get("subinterface", []):
+                subitf["_subitf"] = f"{itf['name']}.{subitf['index']}"
+                for arp_entry in (
+                    subitf.get("ipv4", {}).get("arp", {}).get("neighbor", [])
+                ):
+                    try:
+                        ts = datetime.datetime.strptime(
+                            arp_entry["expiration-time"], "%Y-%m-%dT%H:%M:%S.%fZ"
+                        )
+                        arp_entry["_rel_expiry"] = (
+                            str(ts - datetime.datetime.now()).split(".")[0] + "s"
+                        )
+                    except:
+                        arp_entry["_rel_expiry"] = "-"
+
+        res = jmespath.search(path_spec["jmespath"], resp[0])
+        return {"arp": res}
+
+    def get_nd(self) -> Dict[str, Any]:
+        path_spec = {
+            "path": f"/interface[name=*]/subinterface[index=*]/ipv6/neighbor-discovery/neighbor",
+            "jmespath": '"interface"[*].subinterface[].{interface:"_subitf", entries:ipv6."neighbor-discovery".neighbor[].{IPv6:"ipv6-address",MAC:"link-layer-address",Type:origin,next_state:"_rel_expiry" }}',
+            "datatype": "state",
+        }
+        resp = self.get(
+            paths=[path_spec.get("path", "")], datatype=path_spec["datatype"]
+        )
+        for itf in resp[0].get("interface", []):
+            for subitf in itf.get("subinterface", []):
+                subitf["_subitf"] = f"{itf['name']}.{subitf['index']}"
+                for nd_entry in (
+                    subitf.get("ipv6", {})
+                    .get("neighbor-discovery", {})
+                    .get("neighbor", [])
+                ):
+                    try:
+                        ts = datetime.datetime.strptime(
+                            nd_entry["next-state-time"], "%Y-%m-%dT%H:%M:%S.%fZ"
+                        )
+                        nd_entry["_rel_expiry"] = (
+                            str(ts - datetime.datetime.now()).split(".")[0] + "s"
+                        )
+                    except:
+                        nd_entry["_rel_expiry"] = "-"
+
+        res = jmespath.search(path_spec["jmespath"], resp[0])
+        return {"nd": res}
 
     def get(
         self,

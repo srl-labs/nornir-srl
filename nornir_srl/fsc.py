@@ -152,7 +152,7 @@ def print_table(
                 if len(col_names) == 0:
                     col_names = get_fields(l)
                     for col in col_names:
-                        table.add_column(col, no_wrap=True)
+                        table.add_column(col, no_wrap=False)
                 common = {
                     x: y
                     for x, y in l.items()
@@ -720,6 +720,66 @@ def es(ctx: Context, field_filter: Optional[List] = None):
     print_report(
         result=result,
         name="Ethernet Segments",
+        failed_hosts=result.failed_hosts,
+        box_type=ctx.obj["box_type"],
+        f_filter=f_filter,
+        i_filter=ctx.obj["i_filter"],
+    )
+
+
+@cli.command()
+@click.pass_context
+@click.option(
+    "--field-filter",
+    "-f",
+    multiple=True,
+    help='filter fields with <field-name>=<glob-pattern>, e.g. -f name=ge-0/0/0 -f admin_state="ena*". Fieldnames correspond to column names of a report',
+)
+def arp(ctx: Context, field_filter: Optional[List] = None):
+    """Displays ARP table"""
+
+    def _arp(task: Task) -> Result:
+        device = task.host.get_connection(CONNECTION_NAME, task.nornir.config)
+        return Result(host=task.host, result=device.get_arp())
+
+    f_filter = (
+        {k: v for k, v in [f.split("=") for f in field_filter]} if field_filter else {}
+    )
+
+    result = ctx.obj["target"].run(task=_arp, name="arp", raise_on_error=False)
+    print_report(
+        result=result,
+        name="ARP table",
+        failed_hosts=result.failed_hosts,
+        box_type=ctx.obj["box_type"],
+        f_filter=f_filter,
+        i_filter=ctx.obj["i_filter"],
+    )
+
+
+@cli.command()
+@click.pass_context
+@click.option(
+    "--field-filter",
+    "-f",
+    multiple=True,
+    help='filter fields with <field-name>=<glob-pattern>, e.g. -f name=ge-0/0/0 -f admin_state="ena*". Fieldnames correspond to column names of a report',
+)
+def nd(ctx: Context, field_filter: Optional[List] = None):
+    """Displays IPv6 Neighbors"""
+
+    def _nd(task: Task) -> Result:
+        device = task.host.get_connection(CONNECTION_NAME, task.nornir.config)
+        return Result(host=task.host, result=device.get_nd())
+
+    f_filter = (
+        {k: v for k, v in [f.split("=") for f in field_filter]} if field_filter else {}
+    )
+
+    result = ctx.obj["target"].run(task=_nd, name="nd", raise_on_error=False)
+    print_report(
+        result=result,
+        name="IPv6 Neighbors",
         failed_hosts=result.failed_hosts,
         box_type=ctx.obj["box_type"],
         f_filter=f_filter,
