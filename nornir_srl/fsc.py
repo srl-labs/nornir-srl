@@ -128,11 +128,12 @@ def print_table(
     def pass_filter(row, filter):
         if filter == None:
             return True
+        filter = { str(k).lower(): v for k,v in filter.items() }
         if len(
             {
                 k: v
                 for k, v in row.items()
-                if filter.get(k) and fnmatch.fnmatch(str(row[k]), str(filter[k]))
+                if filter.get(str(k).lower()) and fnmatch.fnmatch(str(row[k]), str(filter[str(k).lower()]))
             }
         ) < len(filter):
             return False
