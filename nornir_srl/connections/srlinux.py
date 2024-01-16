@@ -552,16 +552,14 @@ class SrLinux:
                             nh_ni = ni["name"]
                         route["_next-hop"] = [
                             nh.get("ip-address")
-                            for nh in nhgroup_mapping[nh_ni][
-                                route["next-hop-group"]
-                            ]
+                            for nh in nhgroup_mapping[nh_ni][route["next-hop-group"]]
                         ]
 
                         route["_nh_itf"] = [
-                            nh.get("subinterface") + f"@vrf:{nh_ni}" if leaked else nh.get("subinterface")
-                            for nh in nhgroup_mapping[nh_ni][
-                                route["next-hop-group"]
-                            ]
+                            nh.get("subinterface") + f"@vrf:{nh_ni}"
+                            if leaked
+                            else nh.get("subinterface")
+                            for nh in nhgroup_mapping[nh_ni][route["next-hop-group"]]
                             if nh.get("subinterface")
                         ]
                         if len(route["_nh_itf"]) == 0:
