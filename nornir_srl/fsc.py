@@ -128,11 +128,13 @@ def print_table(
     def pass_filter(row, filter):
         if filter == None:
             return True
+        filter = {str(k).lower(): v for k, v in filter.items()}
         if len(
             {
                 k: v
                 for k, v in row.items()
-                if filter.get(k) and fnmatch.fnmatch(str(row[k]), str(filter[k]))
+                if filter.get(str(k).lower())
+                and fnmatch.fnmatch(str(row[k]), str(filter[str(k).lower()]))
             }
         ) < len(filter):
             return False
@@ -242,6 +244,14 @@ def print_table(
     multiple=True,
     help="inventory filter, e.g. -i site=lab -i role=leaf. Possible filter-fields are defined in inventory. Multiple filters are ANDed",
 )
+# @click.option(
+#    "--format",
+#    "-f",
+#    multiple=False,
+#    type=click.Choice(["table", "json", "yaml"]),
+#    default="table",
+#    help="Output format",
+# )
 @click.option(
     "--box-type",
     "-b",
@@ -266,6 +276,7 @@ def print_table(
 def cli(
     ctx: Context,
     cfg: str,
+    format: Optional[str] = None,
     inv_filter: Optional[List] = None,
     #    field_filter: Optional[List] = None,
     box_type: Optional[str] = None,
@@ -364,6 +375,7 @@ def cli(
     if box_type:
         box_type = box_type.upper()
     ctx.obj["box_type"] = box_type
+    ctx.obj["format"] = format
 
 
 def print_report(
@@ -411,14 +423,20 @@ def bgp_peers(ctx: Context, field_filter: Optional[List] = None):
     result = ctx.obj["target"].run(
         task=_bgp_peers, name="bgp_peers", raise_on_error=False
     )
-    print_report(
-        result=result,
-        name="BGP Peers",
-        failed_hosts=result.failed_hosts,
-        box_type=ctx.obj["box_type"],
-        f_filter=f_filter,
-        i_filter=ctx.obj["i_filter"],
-    )
+    if ctx.obj["format"] == "json":
+        print_result(result)
+    elif ctx.obj["format"] == "yaml":
+        yaml = YAML(typ="safe")
+        yaml.dump(result, sys.stdout)
+    else:
+        print_report(
+            result=result,
+            name="BGP Peers",
+            failed_hosts=result.failed_hosts,
+            box_type=ctx.obj["box_type"],
+            f_filter=f_filter,
+            i_filter=ctx.obj["i_filter"],
+        )
 
 
 @cli.command()
