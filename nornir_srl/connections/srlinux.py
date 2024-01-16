@@ -267,7 +267,8 @@ class SrLinux:
                 "RIB_IP_JMESPATH": '"network-instance"[].{NI:name, Rib:"bgp-rib"."afi-safi"[]."'
                 + ROUTE_FAMILY[route_fam]
                 + '"."local-rib"."routes"[]'
-                + '.{neighbor:neighbor, "0_st":"_r_state", "Pfx":prefix, "lpref":"local-pref", med:med, "next-hop":"next-hop","as-path":"as-path".segment[0].member, "communities":communities.community}}',
+                + '.{neighbor:neighbor, "0_st":"_r_state", "Pfx":prefix, "lpref":"local-pref", med:med, "next-hop":"next-hop","as-path":"as-path".segment[0].member,\
+                      "communities":[communities.community, communities."large-community"][]|join(\',\',@)}}',
             },
             3: {
                 "RIB_IP_PATH": (
@@ -277,7 +278,8 @@ class SrLinux:
                 "RIB_IP_JMESPATH": '"network-instance"[].{NI:name, Rib:"bgp-rib"."afi-safi"[]."'
                 + ROUTE_FAMILY[route_fam]
                 + '"."local-rib"."route"[]'
-                + '.{neighbor:neighbor, "0_st":"_r_state", "Pfx":prefix, "lpref":"local-pref", med:med, "next-hop":"next-hop","as-path":"as-path".segment[0].member, "communities":communities.community}}',
+                + '.{neighbor:neighbor, "0_st":"_r_state", "Pfx":prefix, "lpref":"local-pref", med:med, "next-hop":"next-hop","as-path":"as-path".segment[0].member,\
+                      "communities":[communities.community, communities."large-community"][]|join(\',\',@)}}',
             },
         }
 
@@ -452,7 +454,7 @@ class SrLinux:
         path_spec = {
             "path": f"/network-instance[name={network_instance}]/route-table/ipv4-unicast",
             "jmespath": '"network-instance"[?_hasrib].{NI:name, Rib:"route-table"."ipv4-unicast".route[].{"Prefix":"ipv4-prefix",\
-                    "next-hop":"_next-hop",type:"route-type", Act:active, metric:metric, pref:preference, itf:"_nh_itf"}}',
+                    "next-hop":"_next-hop",type:"route-type", Act:active, "orig-vrf":"_orig_vrf",metric:metric, pref:preference, itf:"_nh_itf"}}',
             "datatype": "state",
         }
 
@@ -504,7 +506,7 @@ class SrLinux:
                 #                    tmp_map[nhgroup["index"]] = [ nh["next-hop"] for nh in nhgroup["next-hop"] ]
                 nh_map[nhgroup["index"]] = [
                     nh_mapping[network_instance][nh.get("next-hop")]
-                    for nh in nhgroup["next-hop"]
+                    for nh in nhgroup.get("next-hop", [])
                 ]
             nhgroup_mapping.update({ni["name"]: nh_map})
 
@@ -540,16 +542,24 @@ class SrLinux:
                     else:
                         route["active"] = "No"
                     if "next-hop-group" in route:
+                        leaked = False
+                        if "origin-network-instance" in route:
+                            nh_ni = route["origin-network-instance"]
+                            if nh_ni != ni["name"]:
+                                leaked = True
+                                route["_orig_vrf"] = nh_ni
+                        else:
+                            nh_ni = ni["name"]
                         route["_next-hop"] = [
                             nh.get("ip-address")
-                            for nh in nhgroup_mapping[ni["name"]][
+                            for nh in nhgroup_mapping[nh_ni][
                                 route["next-hop-group"]
                             ]
                         ]
 
                         route["_nh_itf"] = [
-                            nh.get("subinterface")
-                            for nh in nhgroup_mapping[ni["name"]][
+                            nh.get("subinterface") + f"@vrf:{nh_ni}" if leaked else nh.get("subinterface")
+                            for nh in nhgroup_mapping[nh_ni][
                                 route["next-hop-group"]
                             ]
                             if nh.get("subinterface")
@@ -557,7 +567,7 @@ class SrLinux:
                         if len(route["_nh_itf"]) == 0:
                             route["_nh_itf"] = [
                                 nh.get("tunnel")
-                                for nh in nhgroup_mapping[ni["name"]][
+                                for nh in nhgroup_mapping[nh_ni][
                                     route["next-hop-group"]
                                 ]
                                 if nh.get("tunnel")
@@ -565,7 +575,7 @@ class SrLinux:
                         if len(route["_nh_itf"]) == 0:
                             resolving_routes = [
                                 nh.get("resolving-route", {})
-                                for nh in nhgroup_mapping[ni["name"]][
+                                for nh in nhgroup_mapping[nh_ni][
                                     route["next-hop-group"]
                                 ]
                                 if nh.get("resolving-route")
