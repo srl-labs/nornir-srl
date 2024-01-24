@@ -672,15 +672,25 @@ class SrLinux:
     def get_arp(self) -> Dict[str, Any]:
         path_spec = {
             "path": f"/interface[name=*]/subinterface[index=*]/ipv4/arp/neighbor",
-            "jmespath": '"interface"[*].subinterface[].{interface:"_subitf", entries:ipv4.arp.neighbor[].{IPv4:"ipv4-address",MAC:"link-layer-address",Type:origin,expiry:"_rel_expiry" }}',
+            "jmespath": '"interface"[*].subinterface[].{interface:"_subitf", NI:"_ni"|to_string(@), entries:ipv4.arp.neighbor[].{IPv4:"ipv4-address",MAC:"link-layer-address",Type:origin,expiry:"_rel_expiry" }}',
             "datatype": "state",
         }
+        ni_itfs = self.get(paths=["/network-instance[name=*]"], datatype="config")
+        ni_itf_map: Dict[str, List[str]] = {}
+        for ni in ni_itfs[0].get("network-instance", []):
+#            if ni.get("type", "") == "mac-vrf":
+#                continue
+            for ni_itf in ni.get("interface", []):
+                if ni_itf["name"] not in ni_itf_map:
+                    ni_itf_map[ni_itf["name"]] = []
+                ni_itf_map[ni_itf["name"]].append(ni["name"])
         resp = self.get(
             paths=[path_spec.get("path", "")], datatype=path_spec["datatype"]
         )
         for itf in resp[0].get("interface", []):
             for subitf in itf.get("subinterface", []):
                 subitf["_subitf"] = f"{itf['name']}.{subitf['index']}"
+                subitf["_ni"] = ni_itf_map.get(subitf["_subitf"], [])
                 for arp_entry in (
                     subitf.get("ipv4", {}).get("arp", {}).get("neighbor", [])
                 ):
