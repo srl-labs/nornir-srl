@@ -631,7 +631,7 @@ class SrLinux:
         path_spec = {
             "path": f"/system/network-instance/protocols/evpn/ethernet-segments",
             "jmespath": '"system/network-instance/protocols/evpn/ethernet-segments"."bgp-instance"[]."ethernet-segment"[].{name:name, esi:esi, "mh-mode":"multi-homing-mode",\
-                oper:"oper-state",itfs:interface[]."ethernet-interface"|join(\' \',@), vrfs:association."network-instance"[].{ni:name, "peers":"_peers"}}',
+                oper:"oper-state",itf:interface[]."ethernet-interface"|join(\' \',@), "ni-peers":association."network-instance"[]."_ni_peers"|join(\', \',@) }',
             "datatype": "state",
         }
 
@@ -642,18 +642,23 @@ class SrLinux:
                 .get("bgp-instance", [])
             ):
                 for es in bgp_inst.get("ethernet-segment", []):
-                    for vrf in es.get("association", {}).get("network-instance", []):
+                    if not "association" in es:
+                        es["association"] = {}
+                    if not "network-instance" in es["association"]:
+                        es["association"]["network-instance"] = []
+                    for vrf in es["association"]["network-instance"]:
                         es_peers = (
                             vrf["bgp-instance"][0]
                             .get("computed-designated-forwarder-candidates", {})
                             .get("designated-forwarder-candidate", [])
                         )
-                        vrf["_peers"] = ", ".join(
-                            f"{peer['address']} (DF)"
+                        vrf["_peers"] = " ".join(
+                            f"{peer['address']}(DF)"
                             if peer["designated-forwarder"]
                             else peer["address"]
                             for peer in es_peers
                         )
+                        vrf["_ni_peers"] = f"{vrf['name']}:[{vrf['_peers']}]"
 
         if (
             not "evpn"
@@ -678,8 +683,8 @@ class SrLinux:
         ni_itfs = self.get(paths=["/network-instance[name=*]"], datatype="config")
         ni_itf_map: Dict[str, List[str]] = {}
         for ni in ni_itfs[0].get("network-instance", []):
-#            if ni.get("type", "") == "mac-vrf":
-#                continue
+            #            if ni.get("type", "") == "mac-vrf":
+            #                continue
             for ni_itf in ni.get("interface", []):
                 if ni_itf["name"] not in ni_itf_map:
                     ni_itf_map[ni_itf["name"]] = []
