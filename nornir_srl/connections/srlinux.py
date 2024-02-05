@@ -589,7 +589,7 @@ class SrLinux:
         path_spec = {
             "path": f"/network-instance[name={nw_instance}]",
             "jmespath": '"network-instance"[].{NI:name,oper:"oper-state",type:type,"router-id":protocols.bgp."router-id",\
-                    itfs: interface[].{Subitf:name,"if-oper":"oper-state", ipv4:ipv4.address[]."ip-prefix",\
+                    itfs: interface[].{Subitf:name,"assoc-ni":"_other_ni","if-oper":"oper-state", ipv4:ipv4.address[]."ip-prefix",\
                         vlan:vlan.encap."single-tagged"."vlan-id", "mtu":"_mtu"}}',
             "datatype": "state",
         }
@@ -609,6 +609,12 @@ class SrLinux:
         for ni in resp[0].get("network-instance", {}):
             for ni_itf in ni.get("interface", []):
                 ni_itf.update(subitf.get(ni_itf["name"], {}))
+                if ni_itf["name"].startswith("irb"):
+                    ni_itf["_other_ni"] = " ".join(
+                        f"{vrf['name']}" for vrf in resp[0].get("network-instance", {}) 
+                            if ni_itf["name"] in [ i["name"] for i in vrf["interface"] ] 
+                                and vrf["name"] != ni["name"]
+                    )
 
         res = jmespath.search(path_spec["jmespath"], resp[0])
         return {"nwi_itfs": res}
