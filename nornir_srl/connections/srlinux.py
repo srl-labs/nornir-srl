@@ -632,7 +632,6 @@ class SrLinux:
             "path": f"/system/network-instance/protocols/evpn/ethernet-segments",
             "jmespath": '"system/network-instance/protocols/evpn/ethernet-segments"."bgp-instance"[]."ethernet-segment"[].{name:name, esi:esi, "mh-mode":"multi-homing-mode",\
                 oper:"oper-state",itf:interface[]."ethernet-interface"|join(\' \',@), "ni-peers":association."network-instance"[]."_ni_peers"|join(\', \',@) }',
-            #                        peers:association."network-instance"[]."_peers"|join(\', \',@)}',
             "datatype": "state",
         }
 
