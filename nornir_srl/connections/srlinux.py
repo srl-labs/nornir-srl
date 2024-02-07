@@ -268,7 +268,7 @@ class SrLinux:
                 + ROUTE_FAMILY[route_fam]
                 + '"."local-rib"."routes"[]'
                 + '.{neighbor:neighbor, "0_st":"_r_state", "Pfx":prefix, "lpref":"local-pref", med:med, "next-hop":"next-hop","as-path":"as-path".segment[0].member,\
-                      "communities":[communities.community, communities."large-community"][]|join(\',\',@)}}',
+                      "communities":[communities.community, communities."large-community"][]|join(\', \',@)}}',
             },
             3: {
                 "RIB_IP_PATH": (
@@ -538,9 +538,9 @@ class SrLinux:
                         continue
                 for route in ni["route-table"]["ipv4-unicast"]["route"]:
                     if route["active"]:
-                        route["active"] = "Yes"
+                        route["active"] = "yes"
                     else:
-                        route["active"] = "No"
+                        route["active"] = "no"
                     if "next-hop-group" in route:
                         leaked = False
                         if "origin-network-instance" in route:
@@ -552,30 +552,26 @@ class SrLinux:
                             nh_ni = ni["name"]
                         route["_next-hop"] = [
                             nh.get("ip-address")
-                            for nh in nhgroup_mapping[nh_ni][route["next-hop-group"]]
+                            for nh in nhgroup_mapping[nh_ni].get(route["next-hop-group"], {})
                         ]
 
                         route["_nh_itf"] = [
                             nh.get("subinterface") + f"@vrf:{nh_ni}"
                             if leaked
                             else nh.get("subinterface")
-                            for nh in nhgroup_mapping[nh_ni][route["next-hop-group"]]
+                            for nh in nhgroup_mapping[nh_ni].get(route["next-hop-group"], {})
                             if nh.get("subinterface")
                         ]
                         if len(route["_nh_itf"]) == 0:
                             route["_nh_itf"] = [
                                 nh.get("tunnel")
-                                for nh in nhgroup_mapping[nh_ni][
-                                    route["next-hop-group"]
-                                ]
+                                for nh in nhgroup_mapping[nh_ni].get(route["next-hop-group"], {})
                                 if nh.get("tunnel")
                             ]
                         if len(route["_nh_itf"]) == 0:
                             resolving_routes = [
                                 nh.get("resolving-route", {})
-                                for nh in nhgroup_mapping[nh_ni][
-                                    route["next-hop-group"]
-                                ]
+                                for nh in nhgroup_mapping[nh_ni].get(route["next-hop-group"], {})
                                 if nh.get("resolving-route")
                             ]
         #                            if len(resolving_routes) > 0:
@@ -611,9 +607,10 @@ class SrLinux:
                 ni_itf.update(subitf.get(ni_itf["name"], {}))
                 if ni_itf["name"].startswith("irb"):
                     ni_itf["_other_ni"] = " ".join(
-                        f"{vrf['name']}" for vrf in resp[0].get("network-instance", {}) 
-                            if ni_itf["name"] in [ i["name"] for i in vrf["interface"] ] 
-                                and vrf["name"] != ni["name"]
+                        f"{vrf['name']}"
+                        for vrf in resp[0].get("network-instance", {})
+                        if ni_itf["name"] in [i["name"] for i in vrf["interface"]]
+                        and vrf["name"] != ni["name"]
                     )
 
         res = jmespath.search(path_spec["jmespath"], resp[0])
