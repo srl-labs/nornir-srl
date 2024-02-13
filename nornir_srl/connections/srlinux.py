@@ -619,7 +619,7 @@ class SrLinux:
     def get_lag(self, lag_id: str = "*") -> Dict[str, Any]:
         path_spec = {
             "path": f"/interface[name=lag{lag_id}]",
-            "jmespath": '"interface"[].{lag:name, oper:"oper-state",mtu:mtu,num:lag.member|length(@),"min":lag."min-links",desc:description, type:lag."lag-type", speed:lag."lag-speed","stby-sig":ethernet."standby-signaling",\
+            "jmespath": '"interface"[].{lag:name, oper:"oper-state",mtu:mtu,"min":lag."min-links",desc:description, type:lag."lag-type", speed:lag."lag-speed","stby-sig":ethernet."standby-signaling",\
                   "lacp-key":lag.lacp."admin-key","lacp-itvl":lag.lacp.interval,"lacp-mode":lag.lacp."lacp-mode","lacp-sysid":lag.lacp."system-id-mac","lacp-prio":lag.lacp."system-priority",\
                     members:lag.member[].{"member-itf":name, "member-oper":"oper-state","act":lacp."activity"}}',
             "datatype": "state",
