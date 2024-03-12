@@ -200,6 +200,26 @@ class SrLinux:
                     )
                     if d.get("vni", 0) == 0:
                         d["vni"] = "-"
+                    d["_rt"] = ",".join(
+                        [
+                            x_comm.split("target:")[1]
+                            for x_comm in d.get("communities", {}).get(
+                                "ext-community", []
+                            )
+                            if "target:" in x_comm
+                        ]
+                    )
+                    d["_esi_lbl"] = ",".join(
+                        [
+                            str(x_comm.split("esi-label:")[1])
+                            .replace("Single-Active", "S-A")
+                            .replace("All-Active", "A-A")
+                            for x_comm in d.get("communities", {}).get(
+                                "ext-community", []
+                            )
+                            if "esi-label:" in x_comm
+                        ]
+                    )
                     return d
                 else:
                     return {k: augment_routes(v, attribs) for k, v in d.items()}
@@ -240,11 +260,11 @@ class SrLinux:
                 + ROUTE_TYPE[route_type]  # type: ignore
                 + '"[]',
                 "RIB_EVPN_JMESPATH_ATTRS": {
-                    "1": '.{RD:"route-distinguisher", peer:neighbor, ESI:esi, Tag:"ethernet-tag-id",vni:vni, "next-hop":"next-hop", origin:origin, "0_st":"_r_state"}}',
-                    "2": '.{RD:"route-distinguisher", peer:neighbor, ESI:esi, "MAC":"mac-address", "IP":"ip-address",vni:vni,"next-hop":"next-hop", origin:origin, "0_st":"_r_state"}}',
-                    "3": '.{RD:"route-distinguisher", peer:neighbor, Tag:"ethernet-tag-id", "next-hop":"next-hop", origin:origin, "0_st":"_r_state"}}',
-                    "4": '.{RD:"route-distinguisher", peer:neighbor, ESI:esi, "next-hop":"next-hop", origin:origin, "0_st":"_r_state"}}',
-                    "5": '.{RD:"route-distinguisher", peer:neighbor, lpref:"local-pref", "IP-Pfx":"ip-prefix",vni:vni, med:med, "next-hop":"next-hop", GW:"gateway-ip",origin:origin, "0_st":"_r_state"}}',
+                    "1": '.{RD:"route-distinguisher", peer:neighbor, ESI:esi, Tag:"ethernet-tag-id",vni:vni, "NextHop":"next-hop", RT:"_rt", "esi-lbl":"_esi_lbl", "0_st":"_r_state"}}',
+                    "2": '.{RD:"route-distinguisher", RT:"_rt", peer:neighbor, ESI:esi, "MAC":"mac-address", "IP":"ip-address",vni:vni,"next-hop":"next-hop", "0_st":"_r_state"}}',
+                    "3": '.{RD:"route-distinguisher", RT:"_rt", peer:neighbor, Tag:"ethernet-tag-id", "next-hop":"next-hop", origin:origin, "0_st":"_r_state"}}',
+                    "4": '.{RD:"route-distinguisher", RT:"_rt", peer:neighbor, ESI:esi, "next-hop":"next-hop", origin:origin, "0_st":"_r_state"}}',
+                    "5": '.{RD:"route-distinguisher", RT:"_rt", peer:neighbor, lpref:"local-pref", "IP-Pfx":"ip-prefix",vni:vni, med:med, "next-hop":"next-hop", GW:"gateway-ip",origin:origin, "0_st":"_r_state"}}',
                 },
             },
         }
@@ -268,7 +288,7 @@ class SrLinux:
                 + ROUTE_FAMILY[route_fam]
                 + '"."local-rib"."routes"[]'
                 + '.{neighbor:neighbor, "0_st":"_r_state", "Pfx":prefix, "lpref":"local-pref", med:med, "next-hop":"next-hop","as-path":"as-path".segment[0].member,\
-                      "communities":[communities.community, communities."large-community"][]|join(\',\',@)}}',
+                      "communities":[communities.community, communities."large-community"][]|join(\', \',@)}}',
             },
             3: {
                 "RIB_IP_PATH": (
@@ -538,9 +558,9 @@ class SrLinux:
                         continue
                 for route in ni["route-table"]["ipv4-unicast"]["route"]:
                     if route["active"]:
-                        route["active"] = "Yes"
+                        route["active"] = "yes"
                     else:
-                        route["active"] = "No"
+                        route["active"] = "no"
                     if "next-hop-group" in route:
                         leaked = False
                         if "origin-network-instance" in route:
@@ -552,30 +572,34 @@ class SrLinux:
                             nh_ni = ni["name"]
                         route["_next-hop"] = [
                             nh.get("ip-address")
-                            for nh in nhgroup_mapping[nh_ni][route["next-hop-group"]]
+                            for nh in nhgroup_mapping[nh_ni].get(
+                                route["next-hop-group"], {}
+                            )
                         ]
 
                         route["_nh_itf"] = [
                             nh.get("subinterface") + f"@vrf:{nh_ni}"
                             if leaked
                             else nh.get("subinterface")
-                            for nh in nhgroup_mapping[nh_ni][route["next-hop-group"]]
+                            for nh in nhgroup_mapping[nh_ni].get(
+                                route["next-hop-group"], {}
+                            )
                             if nh.get("subinterface")
                         ]
                         if len(route["_nh_itf"]) == 0:
                             route["_nh_itf"] = [
                                 nh.get("tunnel")
-                                for nh in nhgroup_mapping[nh_ni][
-                                    route["next-hop-group"]
-                                ]
+                                for nh in nhgroup_mapping[nh_ni].get(
+                                    route["next-hop-group"], {}
+                                )
                                 if nh.get("tunnel")
                             ]
                         if len(route["_nh_itf"]) == 0:
                             resolving_routes = [
                                 nh.get("resolving-route", {})
-                                for nh in nhgroup_mapping[nh_ni][
-                                    route["next-hop-group"]
-                                ]
+                                for nh in nhgroup_mapping[nh_ni].get(
+                                    route["next-hop-group"], {}
+                                )
                                 if nh.get("resolving-route")
                             ]
         #                            if len(resolving_routes) > 0:
@@ -589,7 +613,7 @@ class SrLinux:
         path_spec = {
             "path": f"/network-instance[name={nw_instance}]",
             "jmespath": '"network-instance"[].{NI:name,oper:"oper-state",type:type,"router-id":protocols.bgp."router-id",\
-                    itfs: interface[].{Subitf:name,"if-oper":"oper-state", ipv4:ipv4.address[]."ip-prefix",\
+                    itfs: interface[].{Subitf:name,"assoc-ni":"_other_ni","if-oper":"oper-state", ipv4:ipv4.address[]."ip-prefix",\
                         vlan:vlan.encap."single-tagged"."vlan-id", "mtu":"_mtu"}}',
             "datatype": "state",
         }
@@ -609,6 +633,13 @@ class SrLinux:
         for ni in resp[0].get("network-instance", {}):
             for ni_itf in ni.get("interface", []):
                 ni_itf.update(subitf.get(ni_itf["name"], {}))
+                if ni_itf["name"].startswith("irb"):
+                    ni_itf["_other_ni"] = " ".join(
+                        f"{vrf['name']}"
+                        for vrf in resp[0].get("network-instance", {})
+                        if ni_itf["name"] in [i["name"] for i in vrf["interface"]]
+                        and vrf["name"] != ni["name"]
+                    )
 
         res = jmespath.search(path_spec["jmespath"], resp[0])
         return {"nwi_itfs": res}
@@ -616,7 +647,7 @@ class SrLinux:
     def get_lag(self, lag_id: str = "*") -> Dict[str, Any]:
         path_spec = {
             "path": f"/interface[name=lag{lag_id}]",
-            "jmespath": '"interface"[].{lag:name, oper:"oper-state",mtu:mtu,num:lag.member|length(@),"min":lag."min-links",desc:description, type:lag."lag-type", speed:lag."lag-speed","stby-sig":ethernet."standby-signaling",\
+            "jmespath": '"interface"[].{lag:name, oper:"oper-state",mtu:mtu,"min":lag."min-links",desc:description, type:lag."lag-type", speed:lag."lag-speed","stby-sig":ethernet."standby-signaling",\
                   "lacp-key":lag.lacp."admin-key","lacp-itvl":lag.lacp.interval,"lacp-mode":lag.lacp."lacp-mode","lacp-sysid":lag.lacp."system-id-mac","lacp-prio":lag.lacp."system-priority",\
                     members:lag.member[].{"member-itf":name, "member-oper":"oper-state","act":lacp."activity"}}',
             "datatype": "state",
@@ -624,6 +655,9 @@ class SrLinux:
         resp = self.get(
             paths=[path_spec.get("path", "")], datatype=path_spec["datatype"]
         )
+        for itf in resp[0].get("interface", []):
+            for member in itf.get("lag", {}).get("member", []):
+                member["name"] = str(member.get("name", "")).replace("ethernet", "et")
         res = jmespath.search(path_spec["jmespath"], resp[0])
         return {"lag": res}
 
