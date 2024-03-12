@@ -200,6 +200,26 @@ class SrLinux:
                     )
                     if d.get("vni", 0) == 0:
                         d["vni"] = "-"
+                    d["_rt"] = ",".join(
+                        [
+                            x_comm.split("target:")[1]
+                            for x_comm in d.get("communities", {}).get(
+                                "ext-community", []
+                            )
+                            if "target:" in x_comm
+                        ]
+                    )
+                    d["_esi_lbl"] = ",".join(
+                        [
+                            str(x_comm.split("esi-label:")[1])
+                            .replace("Single-Active", "S-A")
+                            .replace("All-Active", "A-A")
+                            for x_comm in d.get("communities", {}).get(
+                                "ext-community", []
+                            )
+                            if "esi-label:" in x_comm
+                        ]
+                    )
                     return d
                 else:
                     return {k: augment_routes(v, attribs) for k, v in d.items()}
@@ -240,11 +260,11 @@ class SrLinux:
                 + ROUTE_TYPE[route_type]  # type: ignore
                 + '"[]',
                 "RIB_EVPN_JMESPATH_ATTRS": {
-                    "1": '.{RD:"route-distinguisher", peer:neighbor, ESI:esi, Tag:"ethernet-tag-id",vni:vni, "next-hop":"next-hop", origin:origin, "0_st":"_r_state"}}',
-                    "2": '.{RD:"route-distinguisher", peer:neighbor, ESI:esi, "MAC":"mac-address", "IP":"ip-address",vni:vni,"next-hop":"next-hop", origin:origin, "0_st":"_r_state"}}',
-                    "3": '.{RD:"route-distinguisher", peer:neighbor, Tag:"ethernet-tag-id", "next-hop":"next-hop", origin:origin, "0_st":"_r_state"}}',
-                    "4": '.{RD:"route-distinguisher", peer:neighbor, ESI:esi, "next-hop":"next-hop", origin:origin, "0_st":"_r_state"}}',
-                    "5": '.{RD:"route-distinguisher", peer:neighbor, lpref:"local-pref", "IP-Pfx":"ip-prefix",vni:vni, med:med, "next-hop":"next-hop", GW:"gateway-ip",origin:origin, "0_st":"_r_state"}}',
+                    "1": '.{RD:"route-distinguisher", peer:neighbor, ESI:esi, Tag:"ethernet-tag-id",vni:vni, "NextHop":"next-hop", RT:"_rt", "esi-lbl":"_esi_lbl", "0_st":"_r_state"}}',
+                    "2": '.{RD:"route-distinguisher", RT:"_rt", peer:neighbor, ESI:esi, "MAC":"mac-address", "IP":"ip-address",vni:vni,"next-hop":"next-hop", "0_st":"_r_state"}}',
+                    "3": '.{RD:"route-distinguisher", RT:"_rt", peer:neighbor, Tag:"ethernet-tag-id", "next-hop":"next-hop", origin:origin, "0_st":"_r_state"}}',
+                    "4": '.{RD:"route-distinguisher", RT:"_rt", peer:neighbor, ESI:esi, "next-hop":"next-hop", origin:origin, "0_st":"_r_state"}}',
+                    "5": '.{RD:"route-distinguisher", RT:"_rt", peer:neighbor, lpref:"local-pref", "IP-Pfx":"ip-prefix",vni:vni, med:med, "next-hop":"next-hop", GW:"gateway-ip",origin:origin, "0_st":"_r_state"}}',
                 },
             },
         }
@@ -552,26 +572,34 @@ class SrLinux:
                             nh_ni = ni["name"]
                         route["_next-hop"] = [
                             nh.get("ip-address")
-                            for nh in nhgroup_mapping[nh_ni].get(route["next-hop-group"], {})
+                            for nh in nhgroup_mapping[nh_ni].get(
+                                route["next-hop-group"], {}
+                            )
                         ]
 
                         route["_nh_itf"] = [
                             nh.get("subinterface") + f"@vrf:{nh_ni}"
                             if leaked
                             else nh.get("subinterface")
-                            for nh in nhgroup_mapping[nh_ni].get(route["next-hop-group"], {})
+                            for nh in nhgroup_mapping[nh_ni].get(
+                                route["next-hop-group"], {}
+                            )
                             if nh.get("subinterface")
                         ]
                         if len(route["_nh_itf"]) == 0:
                             route["_nh_itf"] = [
                                 nh.get("tunnel")
-                                for nh in nhgroup_mapping[nh_ni].get(route["next-hop-group"], {})
+                                for nh in nhgroup_mapping[nh_ni].get(
+                                    route["next-hop-group"], {}
+                                )
                                 if nh.get("tunnel")
                             ]
                         if len(route["_nh_itf"]) == 0:
                             resolving_routes = [
                                 nh.get("resolving-route", {})
-                                for nh in nhgroup_mapping[nh_ni].get(route["next-hop-group"], {})
+                                for nh in nhgroup_mapping[nh_ni].get(
+                                    route["next-hop-group"], {}
+                                )
                                 if nh.get("resolving-route")
                             ]
         #                            if len(resolving_routes) > 0:
