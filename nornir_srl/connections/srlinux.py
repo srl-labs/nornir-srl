@@ -655,6 +655,9 @@ class SrLinux:
         resp = self.get(
             paths=[path_spec.get("path", "")], datatype=path_spec["datatype"]
         )
+        for itf in resp[0].get("interface", []):
+            for member in itf.get("lag", {}).get("member", []):
+                member["name"] = str(member.get("name", "")).replace("ethernet", "et")
         res = jmespath.search(path_spec["jmespath"], resp[0])
         return {"lag": res}
 
