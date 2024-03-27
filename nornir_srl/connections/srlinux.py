@@ -157,11 +157,12 @@ class SrLinux:
         network_instance: str = "*",
     ) -> Dict[str, Any]:
         BGP_RIB_MOD = "bgp-rib"
+        BGP_RIB_MOD2 = "urn:nokia.com:srlinux:bgp:rib-bgp"
         if self.capabilities is not None:
             mod_version = [
                 m
                 for m in self.capabilities.get("supported_models", [])
-                if BGP_RIB_MOD in m.get("name")
+                if BGP_RIB_MOD in m.get("name") or BGP_RIB_MOD2 in m.get("name")
             ][0].get("version")
         else:
             raise Exception("Cannot get gNMI capabilities")
@@ -172,7 +173,7 @@ class SrLinux:
         BGP_IP_VERSION_MAP = {
             1: ("2021-", "2022-"),
             2: ("2023-03",),
-            3: ("2023-",),
+            3: ("20"),
         }
         ROUTE_FAMILY = {
             "evpn": "evpn",
@@ -351,12 +352,13 @@ class SrLinux:
 
     def get_sum_bgp(self, network_instance: Optional[str] = "*") -> Dict[str, Any]:
         BGP_MOD = "urn:srl_nokia/bgp:srl_nokia-bgp"
+        BGP_MOD2 = "urn:nokia.com:srlinux:bgp:bgp:srl_nokia-bgp"
 
         if self.capabilities is not None:
             mod_version = [
                 m
                 for m in self.capabilities.get("supported_models", [])
-                if BGP_MOD == m.get("name")
+                if BGP_MOD == m.get("name") or BGP_MOD2 == m.get("name")
             ][0].get("version")
         else:
             raise Exception("Capabilities not set")
