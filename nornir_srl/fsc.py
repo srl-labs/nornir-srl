@@ -303,7 +303,11 @@ def cli(
             else:
                 prefix = f"{topo['prefix']}-{lab_name}-"
         hosts: Dict[str, Dict[str, Any]] = {}
-        def_kind = topo["topology"].get("defaults", {}).get("kind")
+        srlinux_def = (
+            True
+            if "srlinux:" in topo["topology"].get("defaults", {}).get("image", "")
+            else False
+        )
         srl_kinds = [
             k
             for k, v in topo["topology"].get("kinds", {}).items()
@@ -311,9 +315,9 @@ def cli(
         ]
         clab_nodes: Dict[str, Dict] = topo["topology"]["nodes"]
         for node, node_spec in clab_nodes.items():
-            if node_spec.get("kind") == None:
-                node_spec["kind"] = def_kind
-            if node_spec["kind"] in srl_kinds:
+            if (not "kind" in node_spec and srlinux_def) or node_spec.get(
+                "kind"
+            ) in srl_kinds:
                 hosts[f"{prefix}{node}"] = {
                     "hostname": f"{prefix}{node}",
                     "platform": "srlinux",
