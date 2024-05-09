@@ -320,6 +320,11 @@ class SrLinux:
                 "jmespath": RIB_IP_PATH_VERSIONS[ip_path_version]["RIB_IP_JMESPATH"],
                 "datatype": "state",
             },
+            "ipv6": {
+                "path": RIB_IP_PATH_VERSIONS[ip_path_version]["RIB_IP_PATH"],
+                "jmespath": RIB_IP_PATH_VERSIONS[ip_path_version]["RIB_IP_JMESPATH"],
+                "datatype": "state",
+            },
         }
 
         attribs: Dict[str, Dict[str, Any]] = dict()
@@ -491,12 +496,19 @@ class SrLinux:
         res = jmespath.search(path_spec["jmespath"], resp[0])
         return {"mac_table": res}
 
-    def get_rib_ipv4(
-        self, network_instance: Optional[str] = "*", lpm_address: Optional[str] = None
+    def get_rib(
+        self,
+        afi: str,
+        network_instance: Optional[str] = "*",
+        lpm_address: Optional[str] = None,
     ) -> Dict[str, Any]:
         path_spec = {
-            "path": f"/network-instance[name={network_instance}]/route-table/ipv4-unicast",
-            "jmespath": '"network-instance"[?_hasrib].{NI:name, Rib:"route-table"."ipv4-unicast".route[].{"Prefix":"ipv4-prefix",\
+            "path": f"/network-instance[name={network_instance}]/route-table/{afi}",
+            "jmespath": '"network-instance"[?_hasrib].{NI:name, Rib:"route-table"."'
+            + afi
+            + '".route[].{"Prefix":"'
+            + ("ipv4-prefix" if afi == "ipv4-unicast" else "ipv6-prefix")
+            + '",\
                     "next-hop":"_next-hop",type:"route-type", Act:active, "orig-vrf":"_orig_vrf",metric:metric, pref:preference, itf:"_nh_itf"}}',
             "datatype": "state",
         }
@@ -557,7 +569,7 @@ class SrLinux:
             paths=[path_spec.get("path", "")], datatype=path_spec["datatype"]
         )
         for ni in resp[0].get("network-instance", {}):
-            if len(ni["route-table"]["ipv4-unicast"]) == 0:
+            if len(ni["route-table"][afi]) == 0:
                 ni["_hasrib"] = False
             else:
                 ni["_hasrib"] = True
@@ -565,21 +577,34 @@ class SrLinux:
                     lpm_prefix = lpm(
                         lpm_address,
                         [
-                            route["ipv4-prefix"]
-                            for route in ni["route-table"]["ipv4-unicast"]["route"]
+                            route[
+                                (
+                                    "ipv4-prefix"
+                                    if afi == "ipv4-unicast"
+                                    else "ipv6-prefix"
+                                )
+                            ]
+                            for route in ni["route-table"][afi]["route"]
                         ],
                     )
                     if lpm_prefix:
-                        ni["route-table"]["ipv4-unicast"]["route"] = [
+                        ni["route-table"][afi]["route"] = [
                             r
-                            for r in ni["route-table"]["ipv4-unicast"]["route"]
-                            if r["ipv4-prefix"] == lpm_prefix
+                            for r in ni["route-table"][afi]["route"]
+                            if r[
+                                (
+                                    "ipv4-prefix"
+                                    if afi == "ipv4-unicast"
+                                    else "ipv6-prefix"
+                                )
+                            ]
+                            == lpm_prefix
                         ]
                     else:
-                        ni["route-table"]["ipv4-unicast"]["route"] = []
+                        ni["route-table"][afi]["route"] = []
                         ni["_hasrib"] = False
                         continue
-                for route in ni["route-table"]["ipv4-unicast"]["route"]:
+                for route in ni["route-table"][afi]["route"]:
                     if route["active"]:
                         route["active"] = "yes"
                     else:
@@ -629,7 +654,7 @@ class SrLinux:
         #                                route["_nh_itf"] = [ rt.get("_nh_itf") for rt in ni["route-table"]["ipv4-unicast"]["route"] if rt.get("ipv4-prefix") in [ res_rt.get("ip-prefix") for res_rt in resolving_routes ] ]
 
         res = jmespath.search(path_spec["jmespath"], resp[0])
-        return {"ipv4_rib": res}
+        return {"ip_rib": res}
 
     def get_nwi_itf(self, nw_instance: str = "*") -> Dict[str, Any]:
         SUBITF_PATH = "/interface[name=*]/subinterface"

@@ -555,17 +555,58 @@ def ipv4_rib(
 
     def _ipv4_rib(task: Task) -> Result:
         device = task.host.get_connection(CONNECTION_NAME, task.nornir.config)
-        return Result(host=task.host, result=device.get_rib_ipv4(lpm_address=address))
+        return Result(
+            host=task.host,
+            result=device.get_rib(afi="ipv4-unicast", lpm_address=address),
+        )
 
     f_filter = (
         {k: v for k, v in [f.split("=") for f in field_filter]} if field_filter else {}
     )
-    result = ctx.obj["target"].run(
-        task=_ipv4_rib, name="ipv4_rib", raise_on_error=False
-    )
+    result = ctx.obj["target"].run(task=_ipv4_rib, name="ip_rib", raise_on_error=False)
     print_report(
         result=result,
         name=f"IPv4 RIB {'- hunting for ' + address if address else ''}",
+        failed_hosts=result.failed_hosts,
+        box_type=ctx.obj["box_type"],
+        f_filter=f_filter,
+        i_filter=ctx.obj["i_filter"],
+    )
+
+
+@cli.command()
+@click.pass_context
+@click.option(
+    "--field-filter",
+    "-f",
+    multiple=True,
+    help='filter fields with <field-name>=<glob-pattern>, e.g. -f state=up -f admin_state="ena*". Fieldnames correspond to column names of a report',
+)
+@click.option(
+    "--address",
+    "-a",
+    multiple=False,
+    help="Look up specified address in the IPv4 RIB using LPM",
+)
+def ipv6_rib(
+    ctx: Context, address: Optional[str] = None, field_filter: Optional[List] = None
+):
+    """Displays IPv4 RIB entries, LPM lookup"""
+
+    def _ipv6_rib(task: Task) -> Result:
+        device = task.host.get_connection(CONNECTION_NAME, task.nornir.config)
+        return Result(
+            host=task.host,
+            result=device.get_rib(afi="ipv6-unicast", lpm_address=address),
+        )
+
+    f_filter = (
+        {k: v for k, v in [f.split("=") for f in field_filter]} if field_filter else {}
+    )
+    result = ctx.obj["target"].run(task=_ipv6_rib, name="ip_rib", raise_on_error=False)
+    print_report(
+        result=result,
+        name=f"IPv6 RIB {'- hunting for ' + address if address else ''}",
         failed_hosts=result.failed_hosts,
         box_type=ctx.obj["box_type"],
         f_filter=f_filter,
@@ -586,7 +627,7 @@ def ipv4_rib(
     "-r",
     multiple=False,
     required=True,
-    type=click.Choice(["evpn", "ipv4"]),
+    type=click.Choice(["evpn", "ipv4", "ipv6"]),
     help="Route family for BGP RIB",
 )
 @click.option(
