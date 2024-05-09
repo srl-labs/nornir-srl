@@ -389,6 +389,8 @@ class SrLinux:
                                     peer_data["evpn"] = afi
                                 elif afi["afi-safi-name"] == "ipv4-unicast":
                                     peer_data["ipv4-unicast"] = afi
+                                elif afi["afi-safi-name"] == "ipv6-unicast":
+                                    peer_data["ipv6-unicast"] = afi
                         peer["_local-asn"] = peer_data["local-as"]
                         if peer_data.get("evpn"):
                             peer["_evpn"] = (
@@ -420,13 +422,32 @@ class SrLinux:
                                 peer["_ipv4"] = "disabled"
                         else:
                             peer["_ipv4"] = "-"
+                        if peer_data.get("ipv6-unicast"):
+                            if peer_data["ipv6-unicast"]["admin-state"] == "enable":
+                                peer["_ipv6"] = (
+                                    str(peer_data["ipv6-unicast"]["received-routes"])
+                                    + "/"
+                                    + str(peer_data["ipv6-unicast"]["active-routes"])
+                                    + "/"
+                                    + str(peer_data["ipv6-unicast"]["sent-routes"])
+                                )
+                                if (
+                                    peer_data["ipv6-unicast"].get("oper-state")
+                                    == "down"
+                                ):
+                                    peer["_ipv6"] = "down"
+                            else:
+                                peer["_ipv6"] = "disabled"
+                        else:
+                            peer["_ipv6"] = "-"
 
         path_spec = {
             "path": f"/network-instance[name={network_instance}]/protocols/bgp/neighbor",
             "jmespath": '"network-instance"[].{NI:name, Neighbors: protocols.bgp.neighbor[].{"1_peer":"peer-address",\
                     peer_as:"peer-as", state:"session-state",local_as:"_local-asn",\
                     "group":"peer-group", "export_policy":"export-policy", "import_policy":"import-policy",\
-                    "AFI/SAFI\\nIPv4-UC\\nRx/Act/Tx":"_ipv4", "AFI/SAFI\\nEVPN\\nRx/Act/Tx":"_evpn"}}',
+                    "AFI/SAFI\\nIPv4-UC\\nRx/Act/Tx":"_ipv4", "AFI/SAFI\\nIPv6-UC\\nRx/Act/Tx":"_ipv6", \
+                    "AFI/SAFI\\nEVPN\\nRx/Act/Tx":"_evpn"}}',
             "datatype": "state",
             "key": "index",
         }
