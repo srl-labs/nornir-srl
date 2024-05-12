@@ -140,7 +140,7 @@ class SrLinux:
             "path": f"/interface[name={interface}]/subinterface",
             "jmespath": 'interface[].{Itf:name, subitfs: subinterface[].{Subitf:name,\
                       type:type, admin:"admin-state",oper:"oper-state", \
-                        ipv4: ipv4.address[]."ip-prefix", vlan: vlan.encap."single-tagged"."vlan-id"}}',
+                        ipv4: ipv4.address[]."ip-prefix", ipv6: ipv6.address[]."ip-prefix", vlan: vlan.encap."single-tagged"."vlan-id"}}',
             "datatype": "state",
             "key": "index",
         }
@@ -278,7 +278,7 @@ class SrLinux:
                 "RIB_IP_JMESPATH": '"network-instance"[].{NI:name, Rib:"bgp-rib"."'
                 + ROUTE_FAMILY[route_fam]
                 + '"."local-rib"."routes"[]'
-                + '.{neighbor:neighbor, "0_st":"_r_state", "Pfx":prefix, "lpref":"local-pref", med:med, "next-hop":"next-hop","as-path":"as-path".segment[0].member}}',
+                + '.{neighbor:neighbor, "0_st":"_r_state", "Prefix":prefix, "lpref":"local-pref", med:med, "next-hop":"next-hop","as-path":"as-path".segment[0].member}}',
             },
             2: {
                 "RIB_IP_PATH": (
@@ -288,7 +288,7 @@ class SrLinux:
                 "RIB_IP_JMESPATH": '"network-instance"[].{NI:name, Rib:"bgp-rib"."afi-safi"[]."'
                 + ROUTE_FAMILY[route_fam]
                 + '"."local-rib"."routes"[]'
-                + '.{neighbor:neighbor, "0_st":"_r_state", "Pfx":prefix, "lpref":"local-pref", med:med, "next-hop":"next-hop","as-path":"as-path".segment[0].member,\
+                + '.{neighbor:neighbor, "0_st":"_r_state", "Prefix":prefix, "lpref":"local-pref", med:med, "next-hop":"next-hop","as-path":"as-path".segment[0].member,\
                       "communities":[communities.community, communities."large-community"][]|join(\', \',@)}}',
             },
             3: {
@@ -299,7 +299,7 @@ class SrLinux:
                 "RIB_IP_JMESPATH": '"network-instance"[].{NI:name, Rib:"bgp-rib"."afi-safi"[]."'
                 + ROUTE_FAMILY[route_fam]
                 + '"."local-rib"."route"[]'
-                + '.{neighbor:neighbor, "0_st":"_r_state", "Pfx":prefix, "lpref":"local-pref", med:med, "next-hop":"next-hop","as-path":"as-path".segment[0].member,\
+                + '.{neighbor:neighbor, "0_st":"_r_state", "Prefix":prefix, "lpref":"local-pref", med:med, "next-hop":"next-hop","as-path":"as-path".segment[0].member,\
                       "communities":[communities.community, communities."large-community"][]|join(\',\',@)}}',
             },
         }
@@ -451,8 +451,8 @@ class SrLinux:
             "jmespath": '"network-instance"[].{NI:name, Neighbors: protocols.bgp.neighbor[].{"1_peer":"peer-address",\
                     peer_as:"peer-as", state:"session-state",local_as:"_local-asn",\
                     "group":"peer-group", "export_policy":"export-policy", "import_policy":"import-policy",\
-                    "AFI/SAFI\\nIPv4-UC\\nRx/Act/Tx":"_ipv4", "AFI/SAFI\\nIPv6-UC\\nRx/Act/Tx":"_ipv6", \
-                    "AFI/SAFI\\nEVPN\\nRx/Act/Tx":"_evpn"}}',
+                    "AF: IPv4\\nRx/Act/Tx":"_ipv4", "AF: IPv6\\nRx/Act/Tx":"_ipv6", \
+                    "AF: EVPN\\nRx/Act/Tx":"_evpn"}}',
             "datatype": "state",
             "key": "index",
         }
