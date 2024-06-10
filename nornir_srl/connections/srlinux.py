@@ -661,7 +661,7 @@ class SrLinux:
         path_spec = {
             "path": f"/network-instance[name={nw_instance}]",
             "jmespath": '"network-instance"[].{NI:name,oper:"oper-state",type:type,"router-id":protocols.bgp."router-id",\
-                    itfs: interface[].{Subitf:name,"assoc-ni":"_other_ni","if-oper":"oper-state", ipv4:ipv4.address[]."ip-prefix",\
+                    itfs: interface[].{Subitf:name,"assoc-ni":"_other_ni","if-oper":"oper-state", "ip-prefix":*.address[]."ip-prefix",\
                         vlan:vlan.encap."single-tagged"."vlan-id", "mtu":"_mtu"}}',
             "datatype": "state",
         }
