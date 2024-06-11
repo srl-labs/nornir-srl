@@ -797,7 +797,7 @@ class SrLinux:
     def get_nd(self) -> Dict[str, Any]:
         path_spec = {
             "path": f"/interface[name=*]/subinterface[index=*]/ipv6/neighbor-discovery/neighbor",
-            "jmespath": '"interface"[*].subinterface[].{interface:"_subitf", entries:ipv6."neighbor-discovery".neighbor[].{IPv6:"ipv6-address",MAC:"link-layer-address",Type:origin,next_state:"_rel_expiry" }}',
+            "jmespath": '"interface"[*].subinterface[].{interface:"_subitf", entries:ipv6."neighbor-discovery".neighbor[].{IPv6:"ipv6-address",MAC:"link-layer-address",State:"current-state",Type:origin,next_state:"_rel_expiry" }}',
             "datatype": "state",
         }
         resp = self.get(
