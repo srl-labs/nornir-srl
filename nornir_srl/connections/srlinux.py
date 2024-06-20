@@ -199,8 +199,12 @@ class SrLinux:
                         + ("*" if d["valid-route"] else "")
                         + (">" if d["best-route"] else "")
                     )
-                    if d.get("vni", 0) == 0:
-                        d["vni"] = "-"
+                    if "label1" in d: # from SRL 24.3 onwards for mac/ip routes
+                        d["vni"] = d["label1"].get("value", "-")
+                    elif "label" in d:  # for SRL 24.3 onwards
+                        d["vni"] = d["label"].get("value", "-")
+                    else:
+                        d["vni"] = d.get("vni", "-") 
                     d["_rt"] = ",".join(
                         [
                             x_comm.split("target:")[1]
