@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "nornir-srl"
-version = "0.2.18"
+version = "0.2.19"
 description = "Nornir connection plugin for SRLinux"
 authors = ["Walter De Smedt <walter.de.smedt@gmail.com>"]
 readme = "README.md"
