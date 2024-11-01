@@ -25,7 +25,7 @@ jmespath = "^1.0.1"
 [tool.poetry.dev-dependencies]
 pytest = "^5.2"
 blessings = "^1.7"
-black = "^23.3.0"
+black = "^24.3.0"
 mypy = "^0.991"
 types-setuptools = "^67.8.0"
 
