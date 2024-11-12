@@ -1,9 +1,10 @@
+from importlib.metadata import PackageNotFoundError
 from typing import Any, Dict, List, Optional, Callable
 import importlib
 import fnmatch
 import sys
 import tempfile
-import pkg_resources
+
 
 from ruamel.yaml import YAML
 
@@ -58,8 +59,8 @@ NORNIR_DEFAULT_CONFIG: Dict[str, Any] = {
 
 def get_project_version():
     try:
-        version = pkg_resources.get_distribution(PYTHON_PKG_NAME).version
-    except pkg_resources.DistributionNotFound:
+        version = importlib.metadata.version(PYTHON_PKG_NAME)
+    except PackageNotFoundError:
         version = "Version not found"
 
     return version

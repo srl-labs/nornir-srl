@@ -1,13 +1,13 @@
 [tool.poetry]
 name = "nornir-srl"
-version = "0.2.19"
+version = "0.2.20"
 description = "Nornir connection plugin for SRLinux"
 authors = ["Walter De Smedt <walter.de.smedt@gmail.com>"]
 readme = "README.md"
 repository = "https://github.com/srl-labs/nornir-srl"
 
 [tool.poetry.dependencies]
-python = "^3.8"
+python = "^3.9"
 nornir = "^3.3.0"
 nornir-utils = "^0.2.0"
 pygnmi = "^0.8.9"
@@ -18,6 +18,7 @@ natsort = "^8.2.0"
 jsondiff = "^2.0.0"
 click = "^8.1.3"
 jmespath = "^1.0.1"
+setuptools = "^75.4.0"
 
 [tool.poetry.plugins."nornir.plugins.connections"]
 "srlinux" = "nornir_srl.connections.srlinux:SrLinux"

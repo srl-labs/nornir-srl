@@ -168,7 +168,12 @@ class SrLinux:
             raise Exception("Cannot get gNMI capabilities")
 
         BGP_EVPN_VERSION_MAP = {
-            1: ("20"),
+            1: ("2021-", "2022-", "2023-", "2024-03", "2024-07"),
+            2: ("20"),
+        }
+        BGP_EVPN_ROUTE_TYPE_MAP = {
+            1: ("2021-", "2022-", "2023-", "2024-03", "2024-07"),
+            2: ("20"),
         }
         BGP_IP_VERSION_MAP = {
             1: ("2021-", "2022-"),
@@ -180,12 +185,21 @@ class SrLinux:
             "ipv4": "ipv4-unicast",
             "ipv6": "ipv6-unicast",
         }
-        ROUTE_TYPE = {
-            "1": "ethernet-ad-routes",
-            "2": "mac-ip-routes",
-            "3": "imet-routes",
-            "4": "ethernet-segment-routes",
-            "5": "ip-prefix-routes",
+        ROUTE_TYPE_VERSIONS = {
+            1: {
+                "1": "ethernet-ad-routes",
+                "2": "mac-ip-routes",
+                "3": "imet-routes",
+                "4": "ethernet-segment-routes",
+                "5": "ip-prefix-routes",
+            },
+            2: {
+                "1": "ethernet-ad-route",
+                "2": "mac-ip-route",
+                "3": "imet-route",
+                "4": "ethernet-segment-route",
+                "5": "ip-prefix-route",
+            },
         }
 
         def augment_routes(d, attribs):  # augment routes with attributes
@@ -236,6 +250,13 @@ class SrLinux:
             for k, v in sorted(BGP_EVPN_VERSION_MAP.items(), key=lambda item: item[0])
             if len([ver for ver in v if mod_version.startswith(ver)]) > 0
         ][0]
+        evpn_route_type_version = [
+            k
+            for k, v in sorted(
+                BGP_EVPN_ROUTE_TYPE_MAP.items(), key=lambda item: item[0]
+            )
+            if len([ver for ver in v if mod_version.startswith(ver)]) > 0
+        ][0]
         ip_path_version = [
             k
             for k, v in sorted(BGP_IP_VERSION_MAP.items(), key=lambda item: item[0])
@@ -244,7 +265,10 @@ class SrLinux:
 
         if route_fam not in ROUTE_FAMILY:
             raise ValueError(f"Invalid route family {route_fam}")
-        if route_type and route_type not in ROUTE_TYPE:
+        if (
+            route_type
+            and route_type not in ROUTE_TYPE_VERSIONS[evpn_route_type_version]
+        ):
             raise ValueError(f"Invalid route type {route_type}")
 
         PATH_BGP_PATH_ATTRIBS = (
@@ -257,12 +281,31 @@ class SrLinux:
                 "RIB_EVPN_PATH": (
                     "/network-instance[name=" + network_instance + "]/bgp-rib/"  # type: ignore
                     f"{ROUTE_FAMILY[route_fam]}/rib-in-out/rib-in-post/"
-                    f"{ROUTE_TYPE[route_type]}"  # type: ignore
+                    f"{ROUTE_TYPE_VERSIONS[evpn_route_type_version][route_type]}"  # type: ignore
                 ),
                 "RIB_EVPN_JMESPATH_COMMON": '"network-instance"[].{NI:name, Rib:"bgp-rib"."'
                 + ROUTE_FAMILY[route_fam]
                 + '"."rib-in-out"."rib-in-post"."'
-                + ROUTE_TYPE[route_type]  # type: ignore
+                + ROUTE_TYPE_VERSIONS[evpn_route_type_version][route_type]  # type: ignore
+                + '"[]',
+                "RIB_EVPN_JMESPATH_ATTRS": {
+                    "1": '.{RD:"route-distinguisher", peer:neighbor, ESI:esi, Tag:"ethernet-tag-id",vni:vni, "NextHop":"next-hop", RT:"_rt", "esi-lbl":"_esi_lbl", "0_st":"_r_state"}}',
+                    "2": '.{RD:"route-distinguisher", RT:"_rt", peer:neighbor, ESI:esi, "MAC":"mac-address", "IP":"ip-address",vni:vni,"next-hop":"next-hop", "0_st":"_r_state"}}',
+                    "3": '.{RD:"route-distinguisher", RT:"_rt", peer:neighbor, Tag:"ethernet-tag-id", "next-hop":"next-hop", origin:origin, "0_st":"_r_state"}}',
+                    "4": '.{RD:"route-distinguisher", RT:"_rt", peer:neighbor, ESI:esi, "next-hop":"next-hop", origin:origin, "0_st":"_r_state"}}',
+                    "5": '.{RD:"route-distinguisher", RT:"_rt", peer:neighbor, lpref:"local-pref", "IP-Pfx":"ip-prefix",vni:vni, med:med, "next-hop":"next-hop", GW:"gateway-ip",origin:origin, "0_st":"_r_state"}}',
+                },
+            },
+            2: {
+                "RIB_EVPN_PATH": (
+                    "/network-instance[name=" + network_instance + f"]/bgp-rib/afi-safi[afi-safi-name={ROUTE_FAMILY[route_fam]}]/"  # type: ignore
+                    f"{ROUTE_FAMILY[route_fam]}/rib-in-out/rib-in-post/"
+                    f"{ROUTE_TYPE_VERSIONS[evpn_route_type_version][route_type]}"  # type: ignore
+                ),
+                "RIB_EVPN_JMESPATH_COMMON": '"network-instance"[].{NI:name, Rib:"bgp-rib"."afi-safi"[]."'
+                + ROUTE_FAMILY[route_fam]
+                + '"."rib-in-out"."rib-in-post"."'
+                + ROUTE_TYPE_VERSIONS[evpn_route_type_version][route_type]  # type: ignore
                 + '"[]',
                 "RIB_EVPN_JMESPATH_ATTRS": {
                     "1": '.{RD:"route-distinguisher", peer:neighbor, ESI:esi, Tag:"ethernet-tag-id",vni:vni, "NextHop":"next-hop", RT:"_rt", "esi-lbl":"_esi_lbl", "0_st":"_r_state"}}',
@@ -630,9 +673,11 @@ class SrLinux:
                         ]
 
                         route["_nh_itf"] = [
-                            nh.get("subinterface") + f"@vrf:{nh_ni}"
-                            if leaked
-                            else nh.get("subinterface")
+                            (
+                                nh.get("subinterface") + f"@vrf:{nh_ni}"
+                                if leaked
+                                else nh.get("subinterface")
+                            )
                             for nh in nhgroup_mapping[nh_ni].get(
                                 route["next-hop-group"], {}
                             )
@@ -739,9 +784,11 @@ class SrLinux:
                             .get("designated-forwarder-candidate", [])
                         )
                         vrf["_peers"] = " ".join(
-                            f"{peer['address']}(DF)"
-                            if peer["designated-forwarder"]
-                            else peer["address"]
+                            (
+                                f"{peer['address']}(DF)"
+                                if peer["designated-forwarder"]
+                                else peer["address"]
+                            )
                             for peer in es_peers
                         )
                         vrf["_ni_peers"] = f"{vrf['name']}:[{vrf['_peers']}]"
