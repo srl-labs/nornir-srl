@@ -445,9 +445,23 @@ class SrLinux:
                                     peer_data["ipv6-unicast"] = afi
                         peer["_local-asn"] = peer_data["local-as"]
                         peer["_flags"] = ""
-                        peer["_flags"] += "D" if peer.get("dynamic-neighbor", False) else "-"
-                        peer["_flags"] += "B"if peer.get("failure-detection", {}).get("enable-bfd", False) else "-"
-                        peer["_flags"] += "F"if peer.get("failure-detection", {}).get("fast-failover", False) else "-"
+                        peer["_flags"] += (
+                            "D" if peer.get("dynamic-neighbor", False) else "-"
+                        )
+                        peer["_flags"] += (
+                            "B"
+                            if peer.get("failure-detection", {}).get(
+                                "enable-bfd", False
+                            )
+                            else "-"
+                        )
+                        peer["_flags"] += (
+                            "F"
+                            if peer.get("failure-detection", {}).get(
+                                "fast-failover", False
+                            )
+                            else "-"
+                        )
                         if peer_data.get("evpn"):
                             peer["_evpn"] = (
                                 str(peer_data["evpn"]["received-routes"])
