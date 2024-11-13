@@ -444,6 +444,10 @@ class SrLinux:
                                 elif afi["afi-safi-name"] == "ipv6-unicast":
                                     peer_data["ipv6-unicast"] = afi
                         peer["_local-asn"] = peer_data["local-as"]
+                        peer["_flags"] = ""
+                        peer["_flags"] += "D" if peer.get("dynamic-neighbor", False) else "-"
+                        peer["_flags"] += "B"if peer.get("failure-detection", {}).get("enable-bfd", False) else "-"
+                        peer["_flags"] += "F"if peer.get("failure-detection", {}).get("fast-failover", False) else "-"
                         if peer_data.get("evpn"):
                             peer["_evpn"] = (
                                 str(peer_data["evpn"]["received-routes"])
@@ -496,8 +500,8 @@ class SrLinux:
         path_spec = {
             "path": f"/network-instance[name={network_instance}]/protocols/bgp/neighbor",
             "jmespath": '"network-instance"[].{NI:name, Neighbors: protocols.bgp.neighbor[].{"1_peer":"peer-address",\
-                    peer_as:"peer-as", state:"session-state",local_as:"_local-asn",\
-                    "group":"peer-group", "export_policy":"export-policy", "import_policy":"import-policy",\
+                    "peer-as":"peer-as", state:"session-state","local-as":"_local-asn",flags:"_flags",\
+                    "group":"peer-group", "export-policy":"export-policy", "import-policy":"import-policy",\
                     "AF: IPv4\\nRx/Act/Tx":"_ipv4", "AF: IPv6\\nRx/Act/Tx":"_ipv6", \
                     "AF: EVPN\\nRx/Act/Tx":"_evpn"}}',
             "datatype": "state",
