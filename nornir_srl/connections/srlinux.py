@@ -228,6 +228,12 @@ class SrLinux:
                             if "target:" in x_comm
                         ]
                     )
+                    d["_as_path"] = str(
+                        attribs[d["attr-id"]]
+                        .get("as-path", {})
+                        .get("segment", [{}])[0]
+                        .get("member", [])
+                    )
                     d["_esi_lbl"] = ",".join(
                         [
                             str(x_comm.split("esi-label:")[1])
@@ -289,11 +295,11 @@ class SrLinux:
                 + ROUTE_TYPE_VERSIONS[evpn_route_type_version][route_type]  # type: ignore
                 + '"[]',
                 "RIB_EVPN_JMESPATH_ATTRS": {
-                    "1": '.{RD:"route-distinguisher", peer:neighbor, ESI:esi, Tag:"ethernet-tag-id",vni:vni, "NextHop":"next-hop", RT:"_rt", "esi-lbl":"_esi_lbl", "0_st":"_r_state"}}',
-                    "2": '.{RD:"route-distinguisher", RT:"_rt", peer:neighbor, ESI:esi, "MAC":"mac-address", "IP":"ip-address",vni:vni,"next-hop":"next-hop", "0_st":"_r_state"}}',
-                    "3": '.{RD:"route-distinguisher", RT:"_rt", peer:neighbor, Tag:"ethernet-tag-id", "next-hop":"next-hop", origin:origin, "0_st":"_r_state"}}',
-                    "4": '.{RD:"route-distinguisher", RT:"_rt", peer:neighbor, ESI:esi, "next-hop":"next-hop", origin:origin, "0_st":"_r_state"}}',
-                    "5": '.{RD:"route-distinguisher", RT:"_rt", peer:neighbor, lpref:"local-pref", "IP-Pfx":"ip-prefix",vni:vni, med:med, "next-hop":"next-hop", GW:"gateway-ip",origin:origin, "0_st":"_r_state"}}',
+                    "1": '.{RD:"route-distinguisher", peer:neighbor, ESI:esi, Tag:"ethernet-tag-id",vni:vni, "NextHop":"next-hop", RT:"_rt", "esi-lbl":"_esi_lbl", "0_st":"_r_state", "as-path":"as-path".segment[0].member}}',
+                    "2": '.{RD:"route-distinguisher", RT:"_rt", peer:neighbor, ESI:esi, "MAC":"mac-address", "IP":"ip-address",vni:vni,"next-hop":"next-hop", "0_st":"_r_state", "as-path":"as-path".segment[0].member}}',
+                    "3": '.{RD:"route-distinguisher", RT:"_rt", peer:neighbor, Tag:"ethernet-tag-id", "next-hop":"next-hop", origin:origin, "0_st":"_r_state", "as-path":"as-path".segment[0].member}}',
+                    "4": '.{RD:"route-distinguisher", RT:"_rt", peer:neighbor, ESI:esi, "next-hop":"next-hop", origin:origin, "0_st":"_r_state", "as-path":"as-path".segment[0].member}}',
+                    "5": '.{RD:"route-distinguisher", RT:"_rt", peer:neighbor, lpref:"local-pref", "IP-Pfx":"ip-prefix",vni:vni, med:med, "next-hop":"next-hop", GW:"gateway-ip",origin:origin, "0_st":"_r_state", "as-path":"as-path".segment[0].member}}',
                 },
             },
             2: {
@@ -308,11 +314,11 @@ class SrLinux:
                 + ROUTE_TYPE_VERSIONS[evpn_route_type_version][route_type]  # type: ignore
                 + '"[]',
                 "RIB_EVPN_JMESPATH_ATTRS": {
-                    "1": '.{RD:"route-distinguisher", peer:neighbor, ESI:esi, Tag:"ethernet-tag-id",vni:vni, "NextHop":"next-hop", RT:"_rt", "esi-lbl":"_esi_lbl", "0_st":"_r_state"}}',
-                    "2": '.{RD:"route-distinguisher", RT:"_rt", peer:neighbor, ESI:esi, "MAC":"mac-address", "IP":"ip-address",vni:vni,"next-hop":"next-hop", "0_st":"_r_state"}}',
-                    "3": '.{RD:"route-distinguisher", RT:"_rt", peer:neighbor, Tag:"ethernet-tag-id", "next-hop":"next-hop", origin:origin, "0_st":"_r_state"}}',
-                    "4": '.{RD:"route-distinguisher", RT:"_rt", peer:neighbor, ESI:esi, "next-hop":"next-hop", origin:origin, "0_st":"_r_state"}}',
-                    "5": '.{RD:"route-distinguisher", RT:"_rt", peer:neighbor, lpref:"local-pref", "IP-Pfx":"ip-prefix",vni:vni, med:med, "next-hop":"next-hop", GW:"gateway-ip",origin:origin, "0_st":"_r_state"}}',
+                    "1": '.{RD:"route-distinguisher", peer:neighbor, ESI:esi, Tag:"ethernet-tag-id",vni:vni, "NextHop":"next-hop", RT:"_rt", "esi-lbl":"_esi_lbl", "0_st":"_r_state", "as-path":"as-path".segment[0].member}}',
+                    "2": '.{RD:"route-distinguisher", RT:"_rt", peer:neighbor, ESI:esi, "MAC":"mac-address", "IP":"ip-address",vni:vni,"next-hop":"next-hop", "0_st":"_r_state", "as-path":"as-path".segment[0].member}}',
+                    "3": '.{RD:"route-distinguisher", RT:"_rt", peer:neighbor, Tag:"ethernet-tag-id", "next-hop":"next-hop", origin:origin, "0_st":"_r_state", "as-path":"as-path".segment[0].member}}',
+                    "4": '.{RD:"route-distinguisher", RT:"_rt", peer:neighbor, ESI:esi, "next-hop":"next-hop", origin:origin, "0_st":"_r_state", "as-path":"as-path".segment[0].member}}',
+                    "5": '.{RD:"route-distinguisher", RT:"_rt", peer:neighbor, lpref:"local-pref", "IP-Pfx":"ip-prefix",vni:vni, med:med, "next-hop":"next-hop", GW:"gateway-ip",origin:origin, "0_st":"_r_state", "as-path":"as-path".segment[0].member}}',
                 },
             },
         }
@@ -392,13 +398,7 @@ class SrLinux:
             ni = augment_routes(ni, attribs[ni["name"]])
 
         res = jmespath.search(path_spec["jmespath"], resp[0])
-        if res:
-            for ni in res:
-                for route in ni.get("Rib", []):
-                    route["as-path"] = (
-                        str(route["as-path"]) + " i" if route.get("as-path") else "i"
-                    )
-        else:
+        if res is None:
             res = []
         return {"bgp_rib": res}
 
