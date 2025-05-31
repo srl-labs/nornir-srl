@@ -6,7 +6,7 @@ import sys
 import tempfile
 
 
-from ruamel.yaml import YAML
+import yaml  # type: ignore
 
 from nornir import InitNornir
 from nornir.core import Nornir
@@ -286,10 +286,9 @@ def cli(
 ) -> None:
     ctx.ensure_object(dict)
     if topo_file:  # CLAB mode, -c ignored, inventory generated from topo file
-        yaml = YAML(typ="safe")
         try:
             with open(topo_file, "r") as f:
-                topo = yaml.load(f)
+                topo = yaml.safe_load(f)
         except Exception as e:
             print(f"Failed to load topology file {topo_file}: {e}")
             sys.exit(1)
@@ -347,10 +346,10 @@ def cli(
 
         try:
             with tempfile.NamedTemporaryFile("w+") as hosts_f:
-                yaml.dump(hosts, hosts_f)
+                yaml.safe_dump(hosts, hosts_f)
                 hosts_f.seek(0)
                 with tempfile.NamedTemporaryFile("w+") as groups_f:
-                    yaml.dump(groups, groups_f)
+                    yaml.safe_dump(groups, groups_f)
                     groups_f.seek(0)
                     conf: Dict[str, Any] = NORNIR_DEFAULT_CONFIG
                     conf.update(
@@ -434,8 +433,7 @@ def bgp_peers(ctx: Context, field_filter: Optional[List] = None):
     if ctx.obj["format"] == "json":
         print_result(result)
     elif ctx.obj["format"] == "yaml":
-        yaml = YAML(typ="safe")
-        yaml.dump(result, sys.stdout)
+        yaml.safe_dump(result, sys.stdout)
     else:
         print_report(
             result=result,
