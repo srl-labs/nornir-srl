@@ -4,6 +4,7 @@ import tempfile
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Callable
 from enum import Enum
+import logging
 
 import typer
 import yaml  # type: ignore
@@ -36,6 +37,7 @@ def _version_callback(value: bool):
 
 
 app = typer.Typer(name="fcli", help="Nornir SRLinux CLI")
+logger = logging.getLogger(__name__)
 
 
 SRL_DEFAULT_USERNAME = "admin"
@@ -53,6 +55,7 @@ NORNIR_DEFAULT_CONFIG: Dict[str, Any] = {
     },
     "runner": {"plugin": "threaded", "options": {"num_workers": 20}},
     "user_defined": {"intent_dir": "intent"},
+    "logging": {"enabled": False},
 }
 
 
@@ -193,6 +196,7 @@ def print_table(
         console.print(table)
     else:
         console.print("[i]No data...[/i]")
+        logger.debug("No data returned for %s: %s", resource, results)
 
 
 def print_report(
@@ -372,6 +376,7 @@ def run_show(
         {k: v for k, v in (f.split("=") for f in field_filter)} if field_filter else {}
     )
     result = ctx.obj["target"].run(task=task_func, name=name, raise_on_error=False)
+    logger.debug("Aggregated result for %s: %s", name, result)
     print_report(
         result=result,
         name=name.replace("_", " ").title(),
