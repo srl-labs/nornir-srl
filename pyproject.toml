@@ -34,7 +34,7 @@ dev = [
 ]
 
 [project.scripts]
-fcli = "nornir_srl.fsc:cli"
+fcli = "nornir_srl.cli:app"
 
 [project.entry-points."nornir.plugins.connections"]
 srlinux = "nornir_srl.connections.srlinux:SrLinux"

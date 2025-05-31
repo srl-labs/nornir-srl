@@ -9,7 +9,7 @@ from typing import Any, Dict, List, Optional
 from jinja2 import Environment, FileSystemLoader, StrictUndefined
 from natsort import natsorted
 from nornir.core.task import Result, Task
-import yaml
+import yaml  # type: ignore
 
 from nornir_srl.connections.srlinux import CONNECTION_NAME
 
