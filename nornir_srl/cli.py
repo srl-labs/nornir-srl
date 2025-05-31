@@ -300,17 +300,24 @@ def main(
             if def_kind
             else None
         )
-        srlinux_def = True if def_image and "srlinux" in def_image else False
+        srlinux_def = False
+        if def_image and "srlinux" in def_image:
+            srlinux_def = True
+        if def_kind in {"srl", "nokia_srlinux"}:
+            srlinux_def = True
+
         srl_kinds = [
             k
             for k, v in topo["topology"].get("kinds", {}).items()
             if "/srlinux" in v.get("image")
         ]
+        for extra in ("srl", "nokia_srlinux"):
+            if extra not in srl_kinds:
+                srl_kinds.append(extra)
         clab_nodes: Dict[str, Dict] = topo["topology"]["nodes"]
         for node, node_spec in clab_nodes.items():
-            if (not "kind" in node_spec and srlinux_def) or node_spec.get(
-                "kind"
-            ) in srl_kinds:
+            node_kind = node_spec.get("kind")
+            if (node_kind is None and srlinux_def) or node_kind in srl_kinds:
                 hosts[f"{prefix}{node}"] = {
                     "hostname": f"{prefix}{node}",
                     "platform": "srlinux",
