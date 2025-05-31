@@ -666,6 +666,7 @@ dependencies = [
     { name = "nornir-scrapli" },
     { name = "nornir-utils" },
     { name = "pygnmi" },
+    { name = "pyyaml" },
     { name = "rich" },
     { name = "setuptools" },
 ]
@@ -694,6 +695,7 @@ requires-dist = [
     { name = "nornir-utils", specifier = ">=0.2.0" },
     { name = "pygnmi", specifier = ">=0.8.9" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=5.2" },
+    { name = "pyyaml", specifier = ">=6.0.2" },
     { name = "rich", specifier = ">=12.6.0" },
     { name = "setuptools", specifier = ">=75.4.0" },
     { name = "types-setuptools", marker = "extra == 'dev'", specifier = ">=67.8.0" },
