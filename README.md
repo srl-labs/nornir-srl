@@ -98,6 +98,23 @@ pip install wheel
 pip install -U nornir-srl
 ```
 
+## Python-based installation with `uv`
+
+[`uv`](https://github.com/astral-sh/uv) is a standalone Python package manager.
+Install `uv` and then install `nornir-srl` directly from GitHub:
+
+```bash
+# On Linux and macOS
+curl -LsSf https://astral.sh/uv/install.sh | sh
+uv tool install git+https://github.com/srl-labs/nornir-srl
+```
+
+After this you can simply run `fcli`:
+
+```bash
+fcli --help
+```
+
 ## Nornir-based inventory mode
 
 In this mode, a Nornir configuration file must be provided with the `-c` option. The Nornir inventory is polulated by the `InventoryPlugin` and associated options as specified in the config file. See below for an example with the included `YAMLInventory` plugin and the associated inventory files. This mode is typically used for real hardware-based fabric.
