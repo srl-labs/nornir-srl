@@ -514,10 +514,10 @@ def bgp_rib(
 
     def _bgp_rib(task: Task) -> Result:
         device = task.host.get_connection(CONNECTION_NAME, task.nornir.config)
-        return Result(
-            host=task.host,
-            result=device.get_bgp_rib(route_fam=route_fam, route_type=route_type),
-        )
+        kwargs = {"route_fam": route_fam}
+        if route_type is not None:
+            kwargs["route_type"] = route_type
+        return Result(host=task.host, result=device.get_bgp_rib(**kwargs))
 
     run_show(ctx, "bgp_rib", _bgp_rib, field_filter)
 

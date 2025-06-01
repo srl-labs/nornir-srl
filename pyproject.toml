@@ -1,19 +1,19 @@
 [project]
 name = "nornir-srl"
-version = "0.2.22"
+version = "0.3.0"
 description = "Nornir connection plugin for SRLinux"
 readme = "README.md"
 requires-python = ">=3.9"
 authors = [{ name = "Walter De Smedt", email = "walter.de.smedt@gmail.com" }]
 dependencies = [
-    "nornir>=3.3.0",
+    "nornir>=3.5.0",
     "nornir-utils>=0.2.0",
-    "pygnmi>=0.8.9",
+    "pygnmi>=0.8.15",
     "nornir-jinja2>=0.2.0",
-    "nornir-scrapli>=2022.1.30",
+    "nornir-scrapli>=2025.1.30",
     "rich>=12.6.0",
-    "natsort>=8.2.0",
-    "jsondiff>=2.0.0",
+    "natsort>=8.4.0",
+    "jsondiff>=2.2.1",
     "click>=8.1.3",
     "jmespath>=1.0.1",
     "setuptools>=75.4.0",
@@ -28,9 +28,9 @@ include = ["nornir_srl*"]
 dev = [
     "pytest>=5.2",
     "blessings>=1.7",
-    "black>=24.3.0",
-    "mypy>=0.991",
-    "types-setuptools>=67.8.0",
+    "black>=25.1.0",
+    "mypy>=1.16.0",
+    "types-setuptools>=80.9.0",
 ]
 
 [project.scripts]
