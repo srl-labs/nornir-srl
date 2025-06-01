@@ -9,12 +9,11 @@ docker:
 
 .PHONY: black
 black:
-       black --check $(DIRS)
+	uv run black --check $(DIRS)
 
 .PHONY: mypy
 mypy:
-       mypy $(DIRS)
+	uv run mypy $(DIRS)
 
 .PHONY: tests
 tests: black mypy
-
