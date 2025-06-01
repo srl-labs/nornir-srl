@@ -422,7 +422,7 @@ class SrLinux:
         ][0]
 
         def augment_resp(resp):
-            for ni in resp[0]["network-instance"]:
+            for ni in resp[0].get("network-instance", []):
                 if ni.get("protocols") and ni["protocols"].get("bgp"):
                     for peer in ni["protocols"]["bgp"]["neighbor"]:
                         peer_data = dict()

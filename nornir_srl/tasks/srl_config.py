@@ -9,7 +9,7 @@ from typing import Any, Dict, List, Optional
 from jinja2 import Environment, FileSystemLoader, StrictUndefined
 from natsort import natsorted
 from nornir.core.task import Result, Task
-from ruamel.yaml import YAML
+import yaml  # type: ignore
 
 from nornir_srl.connections.srlinux import CONNECTION_NAME
 
@@ -222,8 +222,7 @@ def render_template(task: Task, base_path: str, **kwargs: Any) -> Result:
 
 
 def load_yaml(task: Task, doc: str) -> Any:
-    yml = YAML(typ="safe")
-    result = yml.load_all(doc)
+    result = yaml.safe_load_all(doc)
 
     return Result(host=task.host, result=list(result))
 
@@ -239,11 +238,10 @@ def load_vars(task: Task, path: str, **kwargs: Any) -> Result:
 
     p = Path(path)
     for file in natsorted([f for f in p.glob("**/*.y?ml")]):
-        yml = YAML(typ="safe")
         with open(file, "r") as f:
             y_str = f.read()
         y_str = re.sub(r"(__(\S+))", _render, y_str)
-        for data in yml.load_all(y_str):
+        for data in yaml.safe_load_all(y_str):
             if not "metadata" in data:
                 continue
             metadata = data.pop("metadata", {})

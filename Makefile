@@ -1,7 +1,7 @@
 NAME=$(shell basename $(PWD))
 
 DIRS = nornir_srl
-VERSION = $(shell poetry version -s)
+VERSION = $(shell grep '^version = ' pyproject.toml | head -1 | cut -d'"' -f2)
 
 .PHONY: docker
 docker:
@@ -9,12 +9,11 @@ docker:
 
 .PHONY: black
 black:
-	poetry run black --check $(DIRS)
+	uv run black --check $(DIRS)
 
 .PHONY: mypy
 mypy:
-	poetry run mypy $(DIRS)
+	uv run mypy $(DIRS)
 
 .PHONY: tests
 tests: black mypy
-

@@ -12,4 +12,6 @@ runner:
         num_workers: 20
 user_defined:
     intent_dir: "./intent"
+logging:
+    enabled: false
     

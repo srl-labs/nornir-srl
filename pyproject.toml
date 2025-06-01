@@ -1,39 +1,45 @@
-[tool.poetry]
+[project]
 name = "nornir-srl"
 version = "0.2.22"
 description = "Nornir connection plugin for SRLinux"
-authors = ["Walter De Smedt <walter.de.smedt@gmail.com>"]
 readme = "README.md"
-repository = "https://github.com/srl-labs/nornir-srl"
+requires-python = ">=3.9"
+authors = [{ name = "Walter De Smedt", email = "walter.de.smedt@gmail.com" }]
+dependencies = [
+    "nornir>=3.3.0",
+    "nornir-utils>=0.2.0",
+    "pygnmi>=0.8.9",
+    "nornir-jinja2>=0.2.0",
+    "nornir-scrapli>=2022.1.30",
+    "rich>=12.6.0",
+    "natsort>=8.2.0",
+    "jsondiff>=2.0.0",
+    "click>=8.1.3",
+    "jmespath>=1.0.1",
+    "setuptools>=75.4.0",
+    "pyyaml>=6.0.2",
+    "typer>=0.16.0",
+]
 
-[tool.poetry.dependencies]
-python = "^3.9"
-nornir = "^3.3.0"
-nornir-utils = "^0.2.0"
-pygnmi = "^0.8.9"
-nornir-jinja2 = "^0.2.0"
-nornir-scrapli = "^2022.1.30"
-rich = "^12.6.0"
-natsort = "^8.2.0"
-jsondiff = "^2.0.0"
-click = "^8.1.3"
-jmespath = "^1.0.1"
-setuptools = "^75.4.0"
+[tool.setuptools.packages.find]
+include = ["nornir_srl*"]
 
-[tool.poetry.plugins."nornir.plugins.connections"]
-"srlinux" = "nornir_srl.connections.srlinux:SrLinux"
+[project.optional-dependencies]
+dev = [
+    "pytest>=5.2",
+    "blessings>=1.7",
+    "black>=24.3.0",
+    "mypy>=0.991",
+    "types-setuptools>=67.8.0",
+]
 
-[tool.poetry.dev-dependencies]
-pytest = "^5.2"
-blessings = "^1.7"
-black = "^24.3.0"
-mypy = "^0.991"
-types-setuptools = "^67.8.0"
+[project.scripts]
+fcli = "nornir_srl.cli:app"
+
+[project.entry-points."nornir.plugins.connections"]
+srlinux = "nornir_srl.connections.srlinux:SrLinux"
 
 [build-system]
-requires = ["poetry-core>=1.0.0"]
-build-backend = "poetry.core.masonry.api"
-
-[tool.poetry.scripts]
-fcli = 'nornir_srl.fsc:cli'
+requires = ["setuptools>=75.0.0"]
+build-backend = "setuptools.build_meta"
 
