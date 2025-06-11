@@ -1,28 +1,14 @@
-FROM python:3.10-buster AS builder
+FROM python:3.10-slim-buster
 
-ENV POETRY_NO_INTERACTION=1 \
-    POETRY_VIRTUALENVS_IN_PROJECT=1 \
-    POETRY_VIRTUALENVS_CREATE=1 \
-    POETRY_CACHE_DIR=/tmp/poetry_cache \
-    POETRY_VERSION=1.5.0 \
-    PYTHON_PKG="nornir-srl"
-
-RUN pip install "poetry==$POETRY_VERSION"
+# install uv
+RUN curl -LsSf https://astral.sh/uv/install.sh | sh
 
 WORKDIR /app
+COPY . .
 
-COPY poetry.lock pyproject.toml ./
-COPY . ./
-RUN poetry install --no-dev 
+RUN uv pip install .
 
-FROM python:3.10-slim-buster as runtime
+COPY entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
 
-ENV VIRTUAL_ENV=/app/.venv \
-      PATH="/app/.venv/bin:$PATH"
-
-COPY --from=builder ${VIRTUAL_ENV} ${VIRTUAL_ENV}
-COPY ./${PYTHON_PKG} /app/${PYTHON_PKG}
-
-ENTRYPOINT [ "fcli" ]
-
-
+ENTRYPOINT ["/entrypoint.sh"]

@@ -27,8 +27,10 @@ Following versions may focus on configuration management and command execution o
 - latest version of `nornir-srl` container image is [here](https://github.com/srl-labs/nornir-srl/pkgs/container/nornir-srl). Modify the tag accordingly if you want to use a different version
 
 ```
-CLAB_TOPO=topo.yaml && alias fcli="docker run -t --network $(grep '^name:' $CLAB_TOPO | awk '{print $2}') --rm -v /etc/hosts:/etc/hosts:ro -v ${PWD}/${CLAB_TOPO}:/topo.yml ghcr.io/srl-labs/nornir-srl:latest -t /topo.yml"
+CLAB_TOPO=topo.yaml && alias fcli="docker run -it --network $(grep '^name:' $CLAB_TOPO | awk '{print $2}') --rm -v /etc/hosts:/etc/hosts:ro -v ${PWD}/${CLAB_TOPO}:/topo.yml ghcr.io/srl-labs/nornir-srl:latest -t /topo.yml"
 ```
+
+Running `fcli` without additional arguments will start an interactive shell inside the container.
 
 ## Run `fcli`
 
@@ -78,8 +80,10 @@ Alternatively, you can attach the `nornir-srl` container to the containerlab net
 To run `fcli`, create an alias in your shell session. For example, assuming you're using containerlab and  you have a `clab_topo.yml` file in your current directory and lab is up and running:
 
 ```
-CLAB_TOPO=clab_topo.yml && alias fcli="docker run -t --network $(grep '^name:' $CLAB_TOPO | awk '{print $2}') --rm -v /etc/hosts:/etc/hosts:ro -v ${PWD}/${CLAB_TOPO}:/topo.yml ghcr.io/srl-labs/nornir-srl:0.2.1 -t /topo.yml"
+CLAB_TOPO=clab_topo.yml && alias fcli="docker run -it --network $(grep '^name:' $CLAB_TOPO | awk '{print $2}') --rm -v /etc/hosts:/etc/hosts:ro -v ${PWD}/${CLAB_TOPO}:/topo.yml ghcr.io/srl-labs/nornir-srl:0.2.1 -t /topo.yml"
 ```
+
+Running `fcli` without additional arguments will start an interactive shell inside the container.
 
 This command assumes that the containerlab topology file is named `clab_topo.yml` and is in the current directory. If not, change the `CLAB_TOPO` variable accordingly. Also, it assumes that the containerlab topology is using the default containerlab docker-network naming, i.e. name of the lab. If you have overridden the management network with `.mgmt.network` in the topology file, change the `--network` option accordingly.
 
@@ -96,6 +100,23 @@ Following command will install the the `nornir-srl` module and all its dependenc
 ```
 pip install wheel
 pip install -U nornir-srl
+```
+
+## Python-based installation with `uv`
+
+[`uv`](https://github.com/astral-sh/uv) is a standalone Python package manager.
+Install `uv` and then install `nornir-srl` directly from GitHub:
+
+```bash
+# On Linux and macOS
+curl -LsSf https://astral.sh/uv/install.sh | sh
+uv tool install git+https://github.com/srl-labs/nornir-srl
+```
+
+After this you can simply run `fcli`:
+
+```bash
+fcli --help
 ```
 
 ## Nornir-based inventory mode
