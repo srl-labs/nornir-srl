@@ -9,6 +9,8 @@ RUN apt-get update && \
 
 RUN curl -LsSf https://astral.sh/uv/install.sh | sh
 
+ENV PATH="/root/.cargo/bin:/root/.local/bin:$PATH"
+
 WORKDIR /app
 COPY . .
 
