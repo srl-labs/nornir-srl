@@ -14,7 +14,7 @@ ENV PATH="/root/.cargo/bin:/root/.local/bin:$PATH"
 WORKDIR /app
 COPY . .
 
-RUN uv pip install .
+RUN uv pip install --system .
 
 COPY entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
