@@ -1,10 +1,13 @@
 [project]
 name = "nornir-srl"
-version = "0.3.0"
+version = "0.3.1"
 description = "Nornir connection plugin for SRLinux"
 readme = "README.md"
 requires-python = ">=3.9"
-authors = [{ name = "Walter De Smedt", email = "walter.de.smedt@gmail.com" }]
+authors = [
+    { name = "Walter De Smedt", email = "walter.de.smedt@gmail.com" },
+    { name = "Florian Schwarz" }
+]
 dependencies = [
     "nornir>=3.5.0",
     "nornir-utils>=0.2.0",
