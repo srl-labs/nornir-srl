@@ -1,6 +1,12 @@
 FROM python:3.10-slim-buster
 
+RUN apt-get update && \
+    apt-get install -y curl && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/*
+
 # install uv
+
 RUN curl -LsSf https://astral.sh/uv/install.sh | sh
 
 WORKDIR /app
