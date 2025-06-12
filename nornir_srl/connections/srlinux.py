@@ -177,3 +177,33 @@ class SrLinux(
                 diff += "\n"
 
         return diff
+
+    def subscribe(
+        self,
+        paths: List[str],
+        mode: str = "stream",
+        timeout: Optional[int] = None,
+        **kwargs: Any,
+    ) -> Any:
+        """Wrapper around :pymeth:`gNMIclient.subscribe`.
+
+        Parameters
+        ----------
+        paths:
+            List of gNMI paths to subscribe to.
+        mode:
+            Subscription mode (``"stream"``, ``"once"`` or ``"poll"``).
+        timeout:
+            Optional timeout for the subscription in seconds.
+        kwargs:
+            Additional keyword arguments forwarded to :class:`gNMIclient`.
+        """
+
+        if not getattr(self, "_connection", None):
+            raise Exception("no active connection")
+
+        params: Dict[str, Any] = {"path": paths, "mode": mode}
+        if timeout is not None:
+            params["timeout"] = timeout
+        params.update(kwargs)
+        return self._connection.subscribe(**params)
