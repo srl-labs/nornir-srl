@@ -253,7 +253,7 @@ class RoutingMixin:
 
         attribs: Dict[str, Dict[str, Any]] = dict()
 
-        resp = self.get(paths=[PATH_BGP_PATH_ATTRIBS], datatype="state")
+        resp = self.stream_get(paths=[PATH_BGP_PATH_ATTRIBS], mode="once")
         for ni in resp[0].get("network-instance", []):
             if ni["name"] not in attribs:
                 attribs[ni["name"]] = dict()
@@ -262,8 +262,9 @@ class RoutingMixin:
                 attribs[ni["name"]].update({path_copy.pop("index"): path_copy})
 
         path_spec: Dict[str, str] = PATH_SPECS[route_fam]
-        resp = self.get(
-            paths=[str(path_spec.get("path"))], datatype=path_spec["datatype"]
+        resp = self.stream_get(
+            paths=[str(path_spec.get("path"))],
+            mode="once",
         )
         for ni in resp[0].get("network-instance", []):
             ni = augment_routes(ni, attribs[ni["name"]])
