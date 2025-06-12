@@ -141,12 +141,10 @@ class SrLinux(
         if not self._connection:
             raise Exception("no active connection")
 
-        subs = [{"path": p} for p in paths]
+        subs = {"subscription": [{"path": p} for p in paths], "mode": mode, "encoding": "json_ietf"}
         responses: List[Dict[str, Any]] = []
         for msg in self._connection.subscribe(
             subscribe=subs,
-            mode=mode,
-            encoding="json_ietf",
             timeout=timeout,
         ):
             responses.extend(normalize_gnmi_resp(msg))
