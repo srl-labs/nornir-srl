@@ -120,6 +120,41 @@ class SrLinux(
         else:
             return resp
 
+    def stream_get(
+        self,
+        paths: List[str],
+        mode: str = "once",
+        timeout: Optional[int] = None,
+        strip_mod: bool = True,
+    ) -> List[Dict[str, Any]]:
+        """Retrieve gNMI data using the subscribe interface.
+
+        Args:
+            paths: list of gNMI paths
+            mode: subscribe mode ("stream", "once", or "poll")
+            timeout: optional timeout in seconds
+            strip_mod: strip module prefixes from keys
+
+        Returns:
+            List of dictionaries with the response payload
+        """
+        if not self._connection:
+            raise Exception("no active connection")
+
+        subs = [{"path": p} for p in paths]
+        responses: List[Dict[str, Any]] = []
+        for msg in self._connection.subscribe(
+            subscribe=subs,
+            mode=mode,
+            encoding="json_ietf",
+            timeout=timeout,
+        ):
+            responses.extend(normalize_gnmi_resp(msg))
+
+        if strip_mod:
+            return [strip_modules(d) for d in responses]
+        return responses
+
     def set_config(
         self,
         input: List[Dict[str, Any]],
