@@ -399,3 +399,17 @@ Show all EVPN RT=2 routes for MAC address that starts with "1A:DC":
 +--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
 ```
 
+
+### subscribe
+
+The connection object exposes a thin wrapper around `pygnmi.client.gNMIclient.subscribe`. The following example subscribes to interface updates for 30 seconds:
+
+```python
+from nornir_srl.connections.srlinux import SrLinux
+
+device = SrLinux()
+device.open(hostname="10.0.0.1", username="admin", password="admin", port=57400, extras={"insecure": True})
+for msg in device.subscribe(paths=["/interface"], mode="stream", timeout=30):
+    print(msg)
+device.close()
+```
