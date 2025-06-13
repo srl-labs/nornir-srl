@@ -81,7 +81,7 @@ class SrLinux(
         """
         target = (hostname, port)
         _connection = gNMIclient(
-            target=target, username=username, password=password, **extras  # type: ignore
+            target=target, username=username, password=password, skip_verify=True, **extras  # type: ignore
         )
         _connection.connect()
         self._connection = _connection

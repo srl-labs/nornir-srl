@@ -260,7 +260,7 @@ def main(
         None, "--cert-file", exists=True, help="CLAB certificate file"
     ),
     log_level: LogLevel = typer.Option(
-        LogLevel.WARNING, "--log-level", "-l", help="Set logging level"
+        LogLevel.ERROR, "--log-level", "-l", help="Set logging level"
     ),
     log_file: Optional[Path] = typer.Option(
         None, "--log-file", "-f", help="Optional log file"
