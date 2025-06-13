@@ -46,7 +46,7 @@ class NetworkInstanceMixin:
                     ni_itf["_other_ni"] = " ".join(
                         f"{vrf['name']}"
                         for vrf in resp[0].get("network-instance", {})
-                        if ni_itf["name"] in [i["name"] for i in vrf["interface"]]
+                        if ni_itf["name"] in [i["name"] for i in vrf.get("interface", [])]
                         and vrf["name"] != ni["name"]
                     )
 
