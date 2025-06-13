@@ -100,7 +100,7 @@ class RoutingMixin:
                         ]
                     )
                     d["_as_path"] = str(
-                        attribs[d["attr-id"]]
+                        attribs.get(d["attr-id"], {})
                         .get("as-path", {})
                         .get("segment", [{}])[0]
                         .get("member", [])
