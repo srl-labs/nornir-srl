@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Callable
 from enum import Enum
 import logging
+import os
 
 import typer
 import yaml  # type: ignore
@@ -278,7 +279,7 @@ def main(
     if topo_file:
         try:
             with open(topo_file, "r") as f:
-                topo = yaml.safe_load(f)
+                topo = yaml.safe_load(os.path.expandvars(f.read()))
         except Exception as e:
             typer.echo(f"Failed to load topology file {topo_file}: {e}")
             raise typer.Exit(1)
