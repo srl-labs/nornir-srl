@@ -121,9 +121,9 @@ fcli --help
 
 ## Nornir-based inventory mode
 
-In this mode, a Nornir configuration file must be provided with the `-c` option. The Nornir inventory is polulated by the `InventoryPlugin` and associated options as specified in the config file. See below for an example with the included `YAMLInventory` plugin and the associated inventory files. This mode is typically used for real hardware-based fabric.
+In this mode, a Nornir configuration file must be provided with the `-c` option. The Nornir inventory is populated by the `InventoryPlugin` and associated options as specified in the config file. See below for an example with the included `YAMLInventory` plugin and the associated inventory files. This mode is typically used for real hardware-based fabric.
 
-Create the Nornir confguration file, for example:
+Create the Nornir configuration file, for example:
 
 ```yaml
 # nornir_config.yaml
