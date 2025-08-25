@@ -389,7 +389,7 @@ class RoutingMixin:
                     "group":"peer-group", "export-policy":"export-policy", "import-policy":"import-policy",\
                     "AF: IPv4\\nRx/Act/Tx":"_ipv4", "AF: IPv6\\nRx/Act/Tx":"_ipv6", \
                     "AF: EVPN\\nRx/Act/Tx":"_evpn"}}',
-            "datatype": "state",
+            "datatype": "all",
             "key": "index",
         }
         resp = self.get(
@@ -506,7 +506,7 @@ class RoutingMixin:
                         ni["route-table"][afi]["route"] = []
                         ni["_hasrib"] = False
                         continue
-                for route in ni["route-table"][afi]["route"]:
+                for route in ni["route-table"][afi].get("route", []):
                     if route["active"]:
                         route["active"] = "yes"
                     else:

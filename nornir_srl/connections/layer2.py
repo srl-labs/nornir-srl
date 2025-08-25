@@ -51,7 +51,7 @@ class Layer2Mixin:
         path_spec = {
             "path": f"/system/network-instance/protocols/evpn/ethernet-segments",
             "jmespath": '"system/network-instance/protocols/evpn/ethernet-segments"."bgp-instance"[]."ethernet-segment"[].{name:name, esi:esi, "mh-mode":"multi-homing-mode", oper:"oper-state",itf:interface[]."ethernet-interface"|join(\' \',@), "ni-peers":association."network-instance"[]."_ni_peers"|join(\', \',@) }',
-            "datatype": "state",
+            "datatype": "all",
         }
 
         def set_es_peers(resp: List[Dict[str, Any]]) -> None:

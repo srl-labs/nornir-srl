@@ -24,10 +24,10 @@ class NetworkInstanceMixin:
             "jmespath": '"network-instance"[].{NI:name,oper:"oper-state",type:type,"router-id":protocols.bgp."router-id",\
                     itfs: interface[].{Subitf:name,"assoc-ni":"_other_ni","if-oper":"oper-state", "ip-prefix":*.address[]."ip-prefix",\
                         vlan:vlan.encap."single-tagged"."vlan-id", "mtu":"_mtu"}}',
-            "datatype": "state",
+            "datatype": "all",
         }
         subitf: Dict[str, Any] = {}
-        resp = self.get(paths=[SUBITF_PATH], datatype="state")
+        resp = self.get(paths=[SUBITF_PATH], datatype="all")
         for itf in resp[0].get("interface", []):
             for si in itf.get("subinterface", []):
                 subif_name = itf["name"] + "." + str(si.pop("index"))
@@ -60,7 +60,7 @@ class NetworkInstanceMixin:
             "jmespath": '"interface"[].{lag:name, oper:"oper-state",mtu:mtu,"min":lag."min-links",desc:description, type:lag."lag-type", speed:lag."lag-speed","stby-sig":ethernet."standby-signaling",\
                   "lacp-key":lag.lacp."admin-key","lacp-itvl":lag.lacp.interval,"lacp-mode":lag.lacp."lacp-mode","lacp-sysid":lag.lacp."system-id-mac","lacp-prio":lag.lacp."system-priority",\
                     members:lag.member[].{"member-itf":name, "member-oper":"oper-state","act":lacp."activity"}}',
-            "datatype": "state",
+            "datatype": "all",
         }
         resp = self.get(
             paths=[path_spec.get("path", "")], datatype=path_spec["datatype"]
@@ -75,7 +75,7 @@ class NetworkInstanceMixin:
         path_spec = {
             "path": f"/interface[name={interface}]/subinterface",
             "jmespath": 'interface[].{Itf:name, subitfs: subinterface[].{Subitf:name,                      type:type, admin:"admin-state",oper:"oper-state",                       ipv4: ipv4.address[]."ip-prefix", ipv6: ipv6.address[]."ip-prefix", vlan: vlan.encap."single-tagged"."vlan-id"}}',
-            "datatype": "state",
+            "datatype": "all",
             "key": "index",
         }
         resp = self.get(
