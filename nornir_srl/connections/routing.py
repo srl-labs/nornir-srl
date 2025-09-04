@@ -438,22 +438,40 @@ class RoutingMixin:
                     "type": nh.get("type"),
                     "subinterface": nh.get("subinterface"),
                 }
-                if "resolving-tunnel" in nh:
+                nh_failed = nh.get("resource-allocation-failed", False)
+                if "resolving-tunnel" in nh.get("indirect", {}):
                     tmp_map[nh["index"]].update(
                         {
-                            "tunnel": (nh.get("resolving-tunnel")).get("tunnel-type")
-                            + ":"
-                            + (nh.get("resolving-tunnel")).get("ip-prefix")
-                        }
-                    )
-                if "resolving-route" in nh:
-                    tmp_map[nh["index"]].update(
-                        {
-                            "resolving-route": (nh.get("resolving-route")).get(
-                                "ip-prefix"
+                            "tunnel": ("!" if
+                                         nh_failed else ""
+                                        )
+                            + (nh.get("indirect").get("resolving-tunnel")).get(
+                                "tunnel-type"
                             )
+                            + ":"
+                            + (nh.get("indirect").get("resolving-tunnel")).get(
+                                "ip-prefix",""
+                            ).split("/")[0]
+                            + (",vni:" + str(nh.get("vxlan-encapsulation", {}).get("vni", ""))) if nh.get("vxlan-encapsulation") else ""
                         }
                     )
+                else:
+                    if "resolving-tunnel" in nh:
+                        tmp_map[nh["index"]].update(
+                            {
+                                "tunnel": (nh.get("resolving-tunnel")).get("tunnel-type")
+                                + ":"
+                                + (nh.get("resolving-tunnel")).get("ip-prefix")
+                            }
+                        )
+                    if "resolving-route" in nh:
+                        tmp_map[nh["index"]].update(
+                            {
+                                "resolving-route": (nh.get("resolving-route")).get(
+                                    "ip-prefix"
+                                )
+                            }
+                        )
 
             nh_mapping.update({ni["name"]: tmp_map})
         nhgroup_mapping: Dict[str, Dict[str, List[Any]]] = {}
