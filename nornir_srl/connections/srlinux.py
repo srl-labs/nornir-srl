@@ -80,8 +80,16 @@ class SrLinux(
         Open a gNMI connection to a device
         """
         target = (hostname, port)
+        extras = dict(extras) if extras else {}
+        grpc_options = extras.pop("grpc_options", [])
+        grpc_options.append(("grpc.max_receive_message_length", -1))
         _connection = gNMIclient(
-            target=target, username=username, password=password, skip_verify=True, **extras  # type: ignore
+            target=target,
+            username=username,
+            password=password,
+            skip_verify=True,
+            grpc_options=grpc_options,
+            **extras,  # type: ignore
         )
         _connection.connect()
         self._connection = _connection
