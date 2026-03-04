@@ -50,17 +50,28 @@ class Layer2Mixin:
     def get_es(self) -> Dict[str, Any]:
         path_spec = {
             "path": f"/system/network-instance/protocols/evpn/ethernet-segments",
-            "jmespath": '"system/network-instance/protocols/evpn/ethernet-segments"."bgp-instance"[]."ethernet-segment"[].{name:name, esi:esi, "mh-mode":"multi-homing-mode", oper:"oper-state",itf:interface[]."ethernet-interface"|join(\' \',@), "ni-peers":association."network-instance"[]."_ni_peers"|join(\', \',@) }',
+            "jmespath": '"system/network-instance/protocols/evpn/ethernet-segments"."bgp-instance"[]."ethernet-segment"[].{name:name, esi:esi, type:type, "mh-mode":"multi-homing-mode", oper:"oper-state", "itf/nh":"_itf_or_nh", "ni-peers":association."network-instance"[]."_ni_peers"|join(\', \',@) }',
             "datatype": "all",
         }
 
-        def set_es_peers(resp: List[Dict[str, Any]]) -> None:
+        def set_es_fields(resp: List[Dict[str, Any]]) -> None:
             for bgp_inst in (
                 resp[0]
                 .get("system/network-instance/protocols/evpn/ethernet-segments", {})
                 .get("bgp-instance", [])
             ):
                 for es in bgp_inst.get("ethernet-segment", []):
+                    # compute interface or next-hop display field
+                    if "interface" in es:
+                        es["_itf_or_nh"] = " ".join(
+                            i["ethernet-interface"] for i in es["interface"]
+                        )
+                    elif "next-hop" in es:
+                        es["_itf_or_nh"] = " ".join(
+                            nh["l3-next-hop"] for nh in es["next-hop"]
+                        )
+                    else:
+                        es["_itf_or_nh"] = ""
                     if "association" not in es:
                         es["association"] = {}
                     if "network-instance" not in es["association"]:
@@ -91,6 +102,6 @@ class Layer2Mixin:
         resp = self.get(
             paths=[path_spec.get("path", "")], datatype=path_spec["datatype"]
         )
-        set_es_peers(resp)
+        set_es_fields(resp)
         res = jmespath.search(path_spec["jmespath"], resp[0])
         return {"es": res}
