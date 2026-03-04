@@ -125,9 +125,7 @@ class Layer2Mixin:
         }
 
         # build NI-to-interface map
-        ni_itfs = self.get(
-            paths=["/network-instance[name=*]"], datatype="config"
-        )
+        ni_itfs = self.get(paths=["/network-instance[name=*]"], datatype="config")
         ni_itf_map: Dict[str, List[str]] = {}
         for ni in ni_itfs[0].get("network-instance", []):
             for ni_itf in ni.get("interface", []):
@@ -189,19 +187,13 @@ class Layer2Mixin:
             for subitf in itf.get("subinterface", []):
                 subitf_name = f"{itf['name']}.{subitf['index']}"
                 subitf["_subitf"] = subitf_name
-                subitf["_ni"] = ", ".join(
-                    ni_itf_map.get(subitf_name, [])
-                )
+                subitf["_ni"] = ", ".join(ni_itf_map.get(subitf_name, []))
 
                 ipv4 = subitf.get("ipv4", {})
                 ipv6 = subitf.get("ipv6", {})
 
-                subitf["_ipv4_addrs"] = _format_addrs(
-                    ipv4.get("address", [])
-                )
-                subitf["_ipv6_addrs"] = _format_addrs(
-                    ipv6.get("address", [])
-                )
+                subitf["_ipv4_addrs"] = _format_addrs(ipv4.get("address", []))
+                subitf["_ipv6_addrs"] = _format_addrs(ipv6.get("address", []))
 
                 agw = subitf.get("anycast-gw", {})
                 if agw:
@@ -212,22 +204,15 @@ class Layer2Mixin:
                 subitf["_arp_summary"] = _arp_summary(ipv4)
                 subitf["_nd_summary"] = _nd_summary(ipv6)
                 subitf["_arp_evpn"] = _evpn_adv(ipv4.get("arp", {}))
-                subitf["_nd_evpn"] = _evpn_adv(
-                    ipv6.get("neighbor-discovery", {})
-                )
+                subitf["_nd_evpn"] = _evpn_adv(ipv6.get("neighbor-discovery", {}))
 
-                arp_advs = (
-                    ipv4.get("arp", {}).get("evpn", {}).get("advertise", [])
-                )
+                arp_advs = ipv4.get("arp", {}).get("evpn", {}).get("advertise", [])
                 nd_advs = (
                     ipv6.get("neighbor-discovery", {})
                     .get("evpn", {})
                     .get("advertise", [])
                 )
-                has_ilr = any(
-                    "interface-less-routing" in a
-                    for a in arp_advs + nd_advs
-                )
+                has_ilr = any("interface-less-routing" in a for a in arp_advs + nd_advs)
                 subitf["_ilr"] = "Y" if has_ilr else "N"
 
         res = jmespath.search(path_spec["jmespath"], resp[0])
