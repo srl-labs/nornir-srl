@@ -86,11 +86,18 @@ class RoutingMixin:
                     )
                     if "label1" in d:  # from SRL 24.3 onwards for mac/ip routes
                         d["vni"] = d["label1"].get("value", "-")
+                        d["_label1"] = d["label1"].get("value", "-")
                     elif "label" in d:  # for SRL 24.3 onwards
                         d["vni"] = d["label"].get("value", "-")
+                        d["_label1"] = "-"
                     else:
                         d["vni"] = d.get("vni", "-")
-                    d["_rt"] = ",".join(
+                        d["_label1"] = "-"
+                    if "label2" in d:
+                        d["_label2"] = d["label2"].get("value", "-")
+                    else:
+                        d["_label2"] = "-"
+                    d["_rt"] = ", ".join(
                         [
                             x_comm.split("target:")[1]
                             for x_comm in d.get("communities", {}).get(
@@ -167,7 +174,7 @@ class RoutingMixin:
                 + '"[]',
                 "RIB_EVPN_JMESPATH_ATTRS": {
                     "1": '.{RD:"route-distinguisher", peer:neighbor, ESI:esi, Tag:"ethernet-tag-id",vni:vni, "NextHop":"next-hop", RT:"_rt", "esi-lbl":"_esi_lbl", "0_st":"_r_state", "as-path":"as-path".segment[0].member}}',
-                    "2": '.{RD:"route-distinguisher", RT:"_rt", peer:neighbor, ESI:esi, "MAC":"mac-address", "IP":"ip-address",vni:vni,"next-hop":"next-hop", "0_st":"_r_state", "as-path":"as-path".segment[0].member}}',
+                    "2": '.{RD:"route-distinguisher", RT:"_rt", peer:neighbor, ESI:esi, "MAC":"mac-address", "IP":"ip-address",vni:vni,L1:"_label1",L2:"_label2","next-hop":"next-hop", "0_st":"_r_state", "as-path":"as-path".segment[0].member}}',
                     "3": '.{RD:"route-distinguisher", RT:"_rt", peer:neighbor, Tag:"ethernet-tag-id", "next-hop":"next-hop", origin:origin, "0_st":"_r_state", "as-path":"as-path".segment[0].member}}',
                     "4": '.{RD:"route-distinguisher", RT:"_rt", peer:neighbor, ESI:esi, "next-hop":"next-hop", origin:origin, "0_st":"_r_state", "as-path":"as-path".segment[0].member}}',
                     "5": '.{RD:"route-distinguisher", RT:"_rt", peer:neighbor, lpref:"local-pref", "IP-Pfx":"ip-prefix",vni:vni, med:med, "next-hop":"next-hop", GW:"gateway-ip",origin:origin, "0_st":"_r_state", "as-path":"as-path".segment[0].member}}',
@@ -186,7 +193,7 @@ class RoutingMixin:
                 + '"[]',
                 "RIB_EVPN_JMESPATH_ATTRS": {
                     "1": '.{RD:"route-distinguisher", peer:neighbor, ESI:esi, Tag:"ethernet-tag-id",vni:vni, "NextHop":"next-hop", RT:"_rt", "esi-lbl":"_esi_lbl", "0_st":"_r_state", "as-path":"as-path".segment[0].member}}',
-                    "2": '.{RD:"route-distinguisher", RT:"_rt", peer:neighbor, ESI:esi, "MAC":"mac-address", "IP":"ip-address",vni:vni,"next-hop":"next-hop", "0_st":"_r_state", "as-path":"as-path".segment[0].member}}',
+                    "2": '.{RD:"route-distinguisher", RT:"_rt", peer:neighbor, ESI:esi, "MAC":"mac-address", "IP":"ip-address",vni:vni,L1:"_label1",L2:"_label2","next-hop":"next-hop", "0_st":"_r_state", "as-path":"as-path".segment[0].member}}',
                     "3": '.{RD:"route-distinguisher", RT:"_rt", peer:neighbor, Tag:"ethernet-tag-id", "next-hop":"next-hop", origin:origin, "0_st":"_r_state", "as-path":"as-path".segment[0].member}}',
                     "4": '.{RD:"route-distinguisher", RT:"_rt", peer:neighbor, ESI:esi, "next-hop":"next-hop", origin:origin, "0_st":"_r_state", "as-path":"as-path".segment[0].member}}',
                     "5": '.{RD:"route-distinguisher", RT:"_rt", peer:neighbor, lpref:"local-pref", "IP-Pfx":"ip-prefix",vni:vni, med:med, "next-hop":"next-hop", GW:"gateway-ip",origin:origin, "0_st":"_r_state", "as-path":"as-path".segment[0].member}}',

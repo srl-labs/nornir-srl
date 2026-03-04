@@ -566,6 +566,20 @@ def lldp(
 
 
 @app.command()
+def irb(
+    ctx: typer.Context,
+    field_filter: Optional[List[str]] = typer.Option(None, "--field-filter", "-f"),
+) -> None:
+    """Displays IRB sub-interfaces"""
+
+    def _irb(task: Task) -> Result:
+        device = task.host.get_connection(CONNECTION_NAME, task.nornir.config)
+        return Result(host=task.host, result=device.get_irb())
+
+    run_show(ctx, "irb", _irb, field_filter)
+
+
+@app.command()
 def es(
     ctx: typer.Context,
     field_filter: Optional[List[str]] = typer.Option(None, "--field-filter", "-f"),
