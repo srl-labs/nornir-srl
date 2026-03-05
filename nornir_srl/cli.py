@@ -754,6 +754,20 @@ def es_dest(
 
 
 @app.command()
+def vxlan(
+    ctx: typer.Context,
+    field_filter: Optional[List[str]] = typer.Option(None, "--field-filter", "-f"),
+) -> None:
+    """Displays VXLAN tunnel interfaces and unicast destinations"""
+
+    def _vxlan(task: Task) -> Result:
+        device = task.host.get_connection(CONNECTION_NAME, task.nornir.config)
+        return Result(host=task.host, result=device.get_vxlan())
+
+    run_show(ctx, "vxlan", _vxlan, field_filter, title="VXLAN Tunnels")
+
+
+@app.command()
 def arp(
     ctx: typer.Context,
     field_filter: Optional[List[str]] = typer.Option(None, "--field-filter", "-f"),

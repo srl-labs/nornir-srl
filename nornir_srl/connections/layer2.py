@@ -138,6 +138,57 @@ class Layer2Mixin:
         res = jmespath.search(path_spec["jmespath"], resp[0])
         return {"es_dest": res}
 
+    def get_vxlan(self) -> Dict[str, Any]:
+        path_spec = {
+            "path": "/tunnel-interface[name=*]/vxlan-interface/bridge-table/unicast-destinations/destination",
+            "jmespath": '"tunnel-interface"[]."_vxlan_itfs"[].{"vxlan-itf":name, NI:ni, destinations:destinations}',
+            "datatype": "state",
+        }
+
+        def set_vxlan_fields(
+            resp: List[Dict[str, Any]],
+            ni_map: Dict[str, str],
+        ) -> None:
+            for tun in resp[0].get("tunnel-interface", []):
+                tun["_vxlan_itfs"] = []
+                for vxlan in tun.get("vxlan-interface", []):
+                    vxlan_name = f"{tun['name']}.{vxlan['index']}"
+                    dests = (
+                        vxlan.get("bridge-table", {})
+                        .get("unicast-destinations", {})
+                        .get("destination", [])
+                    )
+                    vteps = " ".join(d.get("vtep", "") for d in dests)
+                    tun["_vxlan_itfs"].append(
+                        {
+                            "name": vxlan_name,
+                            "ni": ni_map.get(vxlan_name, ""),
+                            "destinations": vteps,
+                        }
+                    )
+
+        if (
+            "bridged"
+            not in self.get(paths=["/system/features"], datatype="state")[0][
+                "system/features"
+            ]
+        ):
+            return {"vxlan": []}
+
+        # build vxlan-interface to network-instance map
+        ni_resp = self.get(paths=["/network-instance[name=*]"], datatype="config")
+        ni_map: Dict[str, str] = {}
+        for ni in ni_resp[0].get("network-instance", []):
+            for vxlan_itf in ni.get("vxlan-interface", []):
+                ni_map[vxlan_itf["name"]] = ni["name"]
+
+        resp = self.get(
+            paths=[path_spec.get("path", "")], datatype=path_spec["datatype"]
+        )
+        set_vxlan_fields(resp, ni_map)
+        res = jmespath.search(path_spec["jmespath"], resp[0])
+        return {"vxlan": res}
+
     def get_irb(self) -> Dict[str, Any]:
         path_spec = {
             "path": "/interface[name=irb*]/subinterface",
