@@ -106,6 +106,38 @@ class Layer2Mixin:
         res = jmespath.search(path_spec["jmespath"], resp[0])
         return {"es": res}
 
+    def get_es_dest(self) -> Dict[str, Any]:
+        path_spec = {
+            "path": "/tunnel-interface[name=*]/vxlan-interface/bridge-table/unicast-destinations/es-destination",
+            "jmespath": '"tunnel-interface"[].{tunnel:name, "es-dest":"vxlan-interface"[]."bridge-table"."unicast-destinations"."es-destination"[].{esi:esi, vteps:"_vteps"}}',
+            "datatype": "state",
+        }
+
+        def set_vtep_fields(resp: List[Dict[str, Any]]) -> None:
+            for tun in resp[0].get("tunnel-interface", []):
+                for vxlan in tun.get("vxlan-interface", []):
+                    bt = vxlan.get("bridge-table", {})
+                    ucast = bt.get("unicast-destinations", {})
+                    for es_dest in ucast.get("es-destination", []):
+                        vteps = es_dest.get("vtep", [])
+                        es_dest["_vteps"] = " ".join(
+                            v.get("address", "") for v in vteps
+                        )
+
+        if (
+            "bridged"
+            not in self.get(paths=["/system/features"], datatype="state")[0][
+                "system/features"
+            ]
+        ):
+            return {"es_dest": []}
+        resp = self.get(
+            paths=[path_spec.get("path", "")], datatype=path_spec["datatype"]
+        )
+        set_vtep_fields(resp)
+        res = jmespath.search(path_spec["jmespath"], resp[0])
+        return {"es_dest": res}
+
     def get_irb(self) -> Dict[str, Any]:
         path_spec = {
             "path": "/interface[name=irb*]/subinterface",

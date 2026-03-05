@@ -522,15 +522,17 @@ def run_show(
     name: str,
     task_func: Callable[[Task], Result],
     field_filter: Optional[List[str]],
+    title: Optional[str] = None,
 ) -> None:
     f_filter = (
         {k: v for k, v in (f.split("=") for f in field_filter)} if field_filter else {}
     )
     result = ctx.obj["target"].run(task=task_func, name=name, raise_on_error=False)
     logger.debug("Aggregated result for %s: %s", name, result)
+    display_name = title if title else name.replace("_", " ").title()
     print_report(
         result=result,
-        name=name.replace("_", " ").title(),
+        name=display_name,
         failed_hosts=result.failed_hosts,
         box_type=ctx.obj["box_type"],
         f_filter=f_filter,
@@ -735,6 +737,20 @@ def es(
         return Result(host=task.host, result=device.get_es())
 
     run_show(ctx, "es", _es, field_filter)
+
+
+@app.command()
+def es_dest(
+    ctx: typer.Context,
+    field_filter: Optional[List[str]] = typer.Option(None, "--field-filter", "-f"),
+) -> None:
+    """Displays ES Destinations on the bridge table"""
+
+    def _es_dest(task: Task) -> Result:
+        device = task.host.get_connection(CONNECTION_NAME, task.nornir.config)
+        return Result(host=task.host, result=device.get_es_dest())
+
+    run_show(ctx, "es_dest", _es_dest, field_filter, title="L2-ES Destinations")
 
 
 @app.command()
