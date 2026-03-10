@@ -1,4 +1,7 @@
+import csv
 import fnmatch
+import io
+import json
 import sys
 import tempfile
 from pathlib import Path
@@ -31,6 +34,13 @@ class LogLevel(str, Enum):
     CRITICAL = "CRITICAL"
 
 
+class OutputFormat(str, Enum):
+    TABLE = "table"
+    JSON = "json"
+    YAML = "yaml"
+    CSV = "csv"
+
+
 def _version_callback(value: bool):
     if value:
         typer.echo(__version__)
@@ -61,6 +71,122 @@ NORNIR_DEFAULT_CONFIG: Dict[str, Any] = {
 
 
 # ------------------------- helpers -------------------------
+
+
+def _get_fields(b, depth=0):
+    fields: List[str] = []
+    if isinstance(b, list) and len(b) > 0:
+        fields.extend(_get_fields(b[0], depth=depth + 1))
+    elif isinstance(b, dict):
+        for k, v in b.items():
+            if isinstance(v, list) and len(v) > 0 and isinstance(v[0], dict):
+                fields.extend(_get_fields(v[0], depth=depth + 1))
+            elif isinstance(v, dict):
+                fields.extend(_get_fields(v, depth=depth + 1))
+            else:
+                fields.append(k)
+        if depth > 0:
+            fields = sorted(fields)
+    return fields
+
+
+def _pass_filter(row, filter):
+    if filter is None:
+        return True
+    filter = {str(k).lower(): v for k, v in filter.items()}
+    if len(
+        {
+            k: v
+            for k, v in row.items()
+            if filter.get(str(k).lower())
+            and fnmatch.fnmatch(str(row[k]), str(filter[str(k).lower()]))
+        }
+    ) < len(filter):
+        return False
+    else:
+        return True
+
+
+def _extract_data(
+    resource: str,
+    results: AggregatedResult,
+    filter: Optional[Dict],
+) -> tuple:
+    """Extract flat row data from AggregatedResult.
+
+    Returns (col_names, all_rows) where each row is a dict with a 'Node' key.
+    """
+    col_names: List[str] = []
+    all_rows: List[Dict[str, Any]] = []
+
+    for host, host_result in results.items():
+        r: Result = host_result[0]
+        node: Host = r.host if r.host else Host("unknown")
+        if r.failed:
+            typer.echo(f"Failed to get {resource} for {host}. Exception: {r.exception}")
+            continue
+        if r.result and r.result.get(resource) is not None:
+            for l in r.result.get(resource):
+                if len(col_names) == 0:
+                    col_names = _get_fields(l)
+                common = {
+                    x: y
+                    for x, y in l.items()
+                    if isinstance(y, (str, int, float))
+                    or (
+                        isinstance(y, list)
+                        and len(y) > 0
+                        and not isinstance(y[0], dict)
+                    )
+                }
+                node_name = node.hostname if node.hostname else node.name
+                if len([v for v in l.values() if isinstance(v, list)]) == 0:
+                    if _pass_filter(common, filter):
+                        all_rows.append({"Node": node_name, **common})
+                else:
+                    for key, v in l.items():
+                        if isinstance(v, list):
+                            for item in v:
+                                row = {
+                                    k: y
+                                    for k, y in item.items()
+                                    if isinstance(y, (str, int, float))
+                                    or (
+                                        isinstance(y, list)
+                                        and len(y) > 0
+                                        and not isinstance(y[0], dict)
+                                    )
+                                }
+                                if _pass_filter({**common, **row}, filter):
+                                    all_rows.append(
+                                        {"Node": node_name, **common, **row}
+                                    )
+    return col_names, all_rows
+
+
+def print_structured(
+    col_names: List[str],
+    rows: List[Dict[str, Any]],
+    output_format: OutputFormat,
+) -> None:
+    """Print data in JSON, YAML, or CSV format."""
+    if not rows:
+        typer.echo("No data...")
+        return
+
+    all_cols = ["Node"] + col_names
+
+    if output_format == OutputFormat.JSON:
+        typer.echo(json.dumps(rows, indent=2, default=str))
+    elif output_format == OutputFormat.YAML:
+        typer.echo(yaml.safe_dump(rows, default_flow_style=False).rstrip())
+    elif output_format == OutputFormat.CSV:
+        buf = io.StringIO()
+        writer = csv.DictWriter(buf, fieldnames=all_cols, extrasaction="ignore")
+        writer.writeheader()
+        for row in rows:
+            writer.writerow({k: str(v) for k, v in row.items()})
+        typer.echo(buf.getvalue().rstrip())
 
 
 def print_table(
@@ -207,21 +333,30 @@ def print_report(
     box_type: Optional[str] = None,
     f_filter: Optional[Dict] = None,
     i_filter: Optional[Dict] = None,
+    output: OutputFormat = OutputFormat.TABLE,
 ) -> None:
-    title = "[bold]" + name + "[/bold]"
-    if f_filter:
-        title += "\nFields filter:" + str(f_filter)
-    if i_filter:
-        title += "\nInventory filter:" + str(i_filter)
-    if len(failed_hosts) > 0:
-        title += "\n[red]Failed hosts:" + str(failed_hosts)
-    print_table(
-        title=title,
-        resource=result.name,
-        results=result,
-        filter=f_filter,
-        box_type=box_type,
-    )
+    if output == OutputFormat.TABLE:
+        title = "[bold]" + name + "[/bold]"
+        if f_filter:
+            title += "\nFields filter:" + str(f_filter)
+        if i_filter:
+            title += "\nInventory filter:" + str(i_filter)
+        if len(failed_hosts) > 0:
+            title += "\n[red]Failed hosts:" + str(failed_hosts)
+        print_table(
+            title=title,
+            resource=result.name,
+            results=result,
+            filter=f_filter,
+            box_type=box_type,
+        )
+    else:
+        col_names, rows = _extract_data(
+            resource=result.name,
+            results=result,
+            filter=f_filter,
+        )
+        print_structured(col_names, rows, output)
 
 
 # ------------------------- root callback -------------------------
@@ -265,6 +400,13 @@ def main(
     ),
     log_file: Optional[Path] = typer.Option(
         None, "--log-file", "-f", help="Optional log file"
+    ),
+    output: OutputFormat = typer.Option(
+        OutputFormat.TABLE,
+        "--output",
+        "-o",
+        help="Output format: table, json, yaml, csv",
+        case_sensitive=False,
     ),
     version: Optional[bool] = typer.Option(
         None,
@@ -369,6 +511,7 @@ def main(
     ctx.obj["target"] = target
     ctx.obj["i_filter"] = i_filter
     ctx.obj["box_type"] = box_type.upper() if box_type else None
+    ctx.obj["output"] = output
 
 
 # ------------------------- command helpers -------------------------
@@ -379,19 +522,22 @@ def run_show(
     name: str,
     task_func: Callable[[Task], Result],
     field_filter: Optional[List[str]],
+    title: Optional[str] = None,
 ) -> None:
     f_filter = (
         {k: v for k, v in (f.split("=") for f in field_filter)} if field_filter else {}
     )
     result = ctx.obj["target"].run(task=task_func, name=name, raise_on_error=False)
     logger.debug("Aggregated result for %s: %s", name, result)
+    display_name = title if title else name.replace("_", " ").title()
     print_report(
         result=result,
-        name=name.replace("_", " ").title(),
+        name=display_name,
         failed_hosts=result.failed_hosts,
         box_type=ctx.obj["box_type"],
         f_filter=f_filter,
         i_filter=ctx.obj["i_filter"],
+        output=ctx.obj["output"],
     )
 
 
@@ -591,6 +737,34 @@ def es(
         return Result(host=task.host, result=device.get_es())
 
     run_show(ctx, "es", _es, field_filter)
+
+
+@app.command()
+def es_dest(
+    ctx: typer.Context,
+    field_filter: Optional[List[str]] = typer.Option(None, "--field-filter", "-f"),
+) -> None:
+    """Displays ES Destinations on the bridge table"""
+
+    def _es_dest(task: Task) -> Result:
+        device = task.host.get_connection(CONNECTION_NAME, task.nornir.config)
+        return Result(host=task.host, result=device.get_es_dest())
+
+    run_show(ctx, "es_dest", _es_dest, field_filter, title="L2-ES Destinations")
+
+
+@app.command()
+def vxlan(
+    ctx: typer.Context,
+    field_filter: Optional[List[str]] = typer.Option(None, "--field-filter", "-f"),
+) -> None:
+    """Displays VXLAN tunnel interfaces and unicast destinations"""
+
+    def _vxlan(task: Task) -> Result:
+        device = task.host.get_connection(CONNECTION_NAME, task.nornir.config)
+        return Result(host=task.host, result=device.get_vxlan())
+
+    run_show(ctx, "vxlan", _vxlan, field_filter, title="VXLAN Tunnels")
 
 
 @app.command()
