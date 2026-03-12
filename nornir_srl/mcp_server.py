@@ -6,9 +6,11 @@ SRLinux network resources via the Model Context Protocol.
 Usage:
     fcli-mcp --cfg nornir_config.yaml
     fcli-mcp --topo-file lab.clab.yml
+    fcli-mcp --topo-file lab.clab.yml --transport sse --port 8080
 
 The server runs over stdio by default (the standard MCP transport for
-local tool-use).
+local tool-use).  When using ``sse`` or ``streamable-http`` transport
+the server listens on ``--host`` / ``--port`` (default 127.0.0.1:8000).
 """
 
 import json
@@ -180,7 +182,11 @@ def _parse_filter(raw: Optional[str]) -> Optional[Dict[str, str]]:
 # ---------------------------------------------------------------------------
 
 
-def _build_server(nr: Nornir) -> FastMCP:
+def _build_server(
+    nr: Nornir,
+    host: str = "127.0.0.1",
+    port: int = 8000,
+) -> FastMCP:
     """Create the FastMCP server instance with all fcli tools registered."""
 
     mcp = FastMCP(
@@ -190,6 +196,8 @@ def _build_server(nr: Nornir) -> FastMCP:
             "Use the tools below to query different network resources "
             "across the fabric managed by Nornir/gNMI."
         ),
+        host=host,
+        port=port,
     )
 
     # -- tool definitions ------------------------------------------------
@@ -583,8 +591,20 @@ def main() -> None:
     parser.add_argument(
         "--transport",
         default="stdio",
-        choices=["stdio", "sse"],
+        choices=["stdio", "sse", "streamable-http"],
         help="MCP transport (default: stdio)",
+    )
+    parser.add_argument(
+        "--host",
+        default="127.0.0.1",
+        help="Host address to bind to when using sse or streamable-http transport (default: 127.0.0.1)",
+    )
+    parser.add_argument(
+        "--port",
+        "-p",
+        type=int,
+        default=8000,
+        help="Port to listen on when using sse or streamable-http transport (default: 8000)",
     )
     args = parser.parse_args()
 
@@ -595,7 +615,16 @@ def main() -> None:
     else:
         nr = _init_nornir_from_topo(args.topo_file, args.cert_file)
 
-    server = _build_server(nr)
+    server = _build_server(nr, host=args.host, port=args.port)
+
+    if args.transport in ("sse", "streamable-http"):
+        logger.info(
+            "Starting MCP server on %s:%d (transport=%s)",
+            args.host,
+            args.port,
+            args.transport,
+        )
+
     server.run(transport=args.transport)
 
 

@@ -85,6 +85,16 @@ class TestBuildServer:
     def test_tool_count(self, server):
         assert len(server._tool_manager._tools) == 16
 
+    def test_default_host_port(self, server):
+        assert server.settings.host == "127.0.0.1"
+        assert server.settings.port == 8000
+
+    def test_custom_host_port(self):
+        nr = MagicMock()
+        server = _build_server(nr, host="0.0.0.0", port=9090)
+        assert server.settings.host == "0.0.0.0"
+        assert server.settings.port == 9090
+
 
 # ---------------------------------------------------------------------------
 # _run_task_json tests
