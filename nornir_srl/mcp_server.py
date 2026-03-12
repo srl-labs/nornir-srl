@@ -11,6 +11,19 @@ Usage:
 The server runs over stdio by default (the standard MCP transport for
 local tool-use).  When using ``sse`` or ``streamable-http`` transport
 the server listens on ``--host`` / ``--port`` (default 127.0.0.1:8000).
+
+Authentication:
+    Bearer-token authentication can be enabled for network transports
+    (``sse`` and ``streamable-http``) via ``--auth-token`` or the
+    ``FCLI_MCP_AUTH_TOKEN`` environment variable::
+
+        fcli-mcp --topo-file lab.clab.yml --transport sse --auth-token secret123
+        FCLI_MCP_AUTH_TOKEN=secret123 fcli-mcp --topo-file lab.clab.yml --transport sse
+
+    When enabled, clients must include the token in the ``Authorization``
+    header::
+
+        Authorization: Bearer secret123
 """
 
 import json
@@ -22,6 +35,8 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import yaml  # type: ignore
+from mcp.server.auth.provider import AccessToken, TokenVerifier
+from mcp.server.auth.settings import AuthSettings
 from mcp.server.fastmcp import FastMCP
 from nornir import InitNornir
 from nornir.core import Nornir
@@ -39,6 +54,35 @@ from .connections.srlinux import CONNECTION_NAME
 from .utils.logging_config import setup_logging
 
 logger = logging.getLogger(__name__)
+
+AUTH_TOKEN_ENV_VAR = "FCLI_MCP_AUTH_TOKEN"
+
+
+# ---------------------------------------------------------------------------
+# Bearer-token authentication
+# ---------------------------------------------------------------------------
+
+
+class BearerTokenVerifier:
+    """Verify bearer tokens against a pre-shared secret.
+
+    Implements the ``TokenVerifier`` protocol expected by FastMCP so that
+    network transports (SSE / streamable-HTTP) can require authentication.
+    """
+
+    def __init__(self, token: str) -> None:
+        self._token = token
+
+    async def verify_token(self, token: str) -> Optional[AccessToken]:
+        """Return an ``AccessToken`` when *token* matches, else ``None``."""
+        if token != self._token:
+            return None
+        return AccessToken(
+            token=token,
+            client_id="fcli-client",
+            scopes=[],
+            expires_at=None,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -186,8 +230,17 @@ def _build_server(
     nr: Nornir,
     host: str = "127.0.0.1",
     port: int = 8000,
+    token_verifier: Optional[BearerTokenVerifier] = None,
 ) -> FastMCP:
     """Create the FastMCP server instance with all fcli tools registered."""
+
+    auth: Optional[AuthSettings] = None
+    if token_verifier is not None:
+        server_url = f"http://{host}:{port}"
+        auth = AuthSettings(
+            issuer_url=server_url,
+            resource_server_url=server_url,
+        )
 
     mcp = FastMCP(
         name="fcli",
@@ -198,6 +251,8 @@ def _build_server(
         ),
         host=host,
         port=port,
+        auth=auth,
+        token_verifier=token_verifier,
     )
 
     # -- tool definitions ------------------------------------------------
@@ -606,6 +661,15 @@ def main() -> None:
         default=8000,
         help="Port to listen on when using sse or streamable-http transport (default: 8000)",
     )
+    parser.add_argument(
+        "--auth-token",
+        default=None,
+        help=(
+            "Bearer token for authenticating MCP clients on network "
+            "transports (sse/streamable-http). Can also be set via the "
+            f"{AUTH_TOKEN_ENV_VAR} environment variable."
+        ),
+    )
     args = parser.parse_args()
 
     setup_logging(args.log_level)
@@ -615,7 +679,21 @@ def main() -> None:
     else:
         nr = _init_nornir_from_topo(args.topo_file, args.cert_file)
 
-    server = _build_server(nr, host=args.host, port=args.port)
+    # Resolve auth token: CLI flag takes precedence over env var.
+    auth_token = args.auth_token or os.environ.get(AUTH_TOKEN_ENV_VAR)
+    verifier: Optional[BearerTokenVerifier] = None
+    if auth_token:
+        if args.transport == "stdio":
+            logger.warning(
+                "--auth-token is ignored when using stdio transport"
+            )
+        else:
+            verifier = BearerTokenVerifier(auth_token)
+            logger.info("Bearer-token authentication enabled")
+
+    server = _build_server(
+        nr, host=args.host, port=args.port, token_verifier=verifier
+    )
 
     if args.transport in ("sse", "streamable-http"):
         logger.info(

@@ -6,6 +6,8 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from nornir_srl.mcp_server import (
+    AUTH_TOKEN_ENV_VAR,
+    BearerTokenVerifier,
     _build_server,
     _parse_filter,
     _run_task_json,
@@ -193,3 +195,49 @@ class TestRunTaskJson:
         output = _run_task_json(nr, "arp", dummy_task)
         parsed = json.loads(output)
         assert parsed == []
+
+
+# ---------------------------------------------------------------------------
+# BearerTokenVerifier tests
+# ---------------------------------------------------------------------------
+
+
+class TestBearerTokenVerifier:
+    """Verify bearer-token authentication logic."""
+
+    @pytest.fixture()
+    def verifier(self):
+        return BearerTokenVerifier("test-secret")
+
+    @pytest.mark.asyncio
+    async def test_valid_token(self, verifier):
+        result = await verifier.verify_token("test-secret")
+        assert result is not None
+        assert result.token == "test-secret"
+        assert result.client_id == "fcli-client"
+        assert result.scopes == []
+
+    @pytest.mark.asyncio
+    async def test_invalid_token(self, verifier):
+        result = await verifier.verify_token("wrong-token")
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_empty_token(self, verifier):
+        result = await verifier.verify_token("")
+        assert result is None
+
+
+class TestBuildServerAuth:
+    """Verify that _build_server passes token_verifier to FastMCP."""
+
+    def test_no_auth_by_default(self):
+        nr = MagicMock()
+        server = _build_server(nr)
+        assert server._token_verifier is None
+
+    def test_with_token_verifier(self):
+        nr = MagicMock()
+        verifier = BearerTokenVerifier("secret")
+        server = _build_server(nr, token_verifier=verifier)
+        assert server._token_verifier is verifier
