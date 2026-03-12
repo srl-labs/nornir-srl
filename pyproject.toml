@@ -3,7 +3,7 @@ name = "nornir-srl"
 version = "0.3.9"
 description = "Nornir connection plugin for SRLinux"
 readme = "README.md"
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 authors = [
     { name = "Walter De Smedt", email = "walter.de.smedt@gmail.com" },
     { name = "Florian Schwarz" }
