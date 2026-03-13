@@ -445,20 +445,25 @@ class RoutingMixin:
                     "type": nh.get("type"),
                     "subinterface": nh.get("subinterface"),
                 }
-                if "resolving-tunnel" in nh:
+                indirect = nh.get("indirect", {})
+                resolving_tunnel = indirect.get(
+                    "resolving-tunnel", nh.get("resolving-tunnel")
+                )
+                resolving_route = indirect.get(
+                    "resolving-route", nh.get("resolving-route")
+                )
+                if resolving_tunnel:
                     tmp_map[nh["index"]].update(
                         {
-                            "tunnel": (nh.get("resolving-tunnel")).get("tunnel-type")
+                            "tunnel": resolving_tunnel.get("tunnel-type")
                             + ":"
-                            + (nh.get("resolving-tunnel")).get("ip-prefix")
+                            + resolving_tunnel.get("ip-prefix")
                         }
                     )
-                if "resolving-route" in nh:
+                if resolving_route:
                     tmp_map[nh["index"]].update(
                         {
-                            "resolving-route": (nh.get("resolving-route")).get(
-                                "ip-prefix"
-                            )
+                            "resolving-route": resolving_route.get("ip-prefix")
                         }
                     )
 
@@ -528,7 +533,10 @@ class RoutingMixin:
                         else:
                             nh_ni = ni["name"]
                         route["_next-hop"] = [
-                            nh.get("ip-address")
+                            nh.get("resolving-route") + " (indirect)"
+                            if nh.get("type") == "indirect"
+                            and nh.get("resolving-route")
+                            else nh.get("ip-address")
                             for nh in nhgroup_mapping[nh_ni].get(
                                 route["next-hop-group"], {}
                             )
@@ -554,8 +562,8 @@ class RoutingMixin:
                                 if nh.get("tunnel")
                             ]
                         if len(route["_nh_itf"]) == 0:
-                            resolving_routes = [
-                                nh.get("resolving-route", {})
+                            route["_nh_itf"] = [
+                                nh.get("resolving-route")
                                 for nh in nhgroup_mapping[nh_ni].get(
                                     route["next-hop-group"], {}
                                 )
