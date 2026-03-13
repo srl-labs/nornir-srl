@@ -399,3 +399,109 @@ Show all EVPN RT=2 routes for MAC address that starts with "1A:DC":
 +--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
 ```
 
+# MCP Server
+
+`nornir-srl` includes an MCP (Model Context Protocol) server that exposes all `fcli` commands as tools, enabling LLM clients like Claude to query SRLinux network resources directly.
+
+## Starting the MCP server
+
+The MCP server is available via the `fcli-mcp` command. It requires either a Nornir config file (`--cfg`) or a containerlab topology file (`--topo-file`):
+
+```bash
+# Using a containerlab topology file (stdio transport - default)
+fcli-mcp --topo-file lab.clab.yml
+
+# Using a Nornir config file
+fcli-mcp --cfg nornir_config.yaml
+
+# Using SSE transport on a custom port
+fcli-mcp --topo-file lab.clab.yml --transport sse --port 8080
+```
+
+### CLI options
+
+| Option | Description | Default |
+|--------|-------------|---------|
+| `--cfg`, `-c` | Nornir YAML config file | _(required, mutually exclusive with `--topo-file`)_ |
+| `--topo-file`, `-t` | Containerlab topology file | _(required, mutually exclusive with `--cfg`)_ |
+| `--cert-file` | TLS certificate file (used with `--topo-file`) | `None` |
+| `--transport` | MCP transport: `stdio`, `sse`, or `streamable-http` | `stdio` |
+| `--host` | Bind address for network transports | `127.0.0.1` |
+| `--port`, `-p` | Listen port for network transports | `8000` |
+| `--auth-token` | Bearer token for client authentication | `None` |
+| `--log-level`, `-l` | Logging level | `ERROR` |
+
+### Authentication
+
+Bearer-token authentication can be enabled for network transports (`sse` and `streamable-http`) via `--auth-token` or the `FCLI_MCP_AUTH_TOKEN` environment variable:
+
+```bash
+# Via CLI flag
+fcli-mcp --topo-file lab.clab.yml --transport sse --auth-token my-secret-token
+
+# Via environment variable
+FCLI_MCP_AUTH_TOKEN=my-secret-token fcli-mcp --topo-file lab.clab.yml --transport sse
+```
+
+When enabled, clients must include the token in the `Authorization` header:
+
+```
+Authorization: Bearer my-secret-token
+```
+
+> **Note:** Authentication is only applicable to network transports (`sse` and `streamable-http`). It is ignored when using `stdio` transport.
+
+## Adding to Claude
+
+### Claude Code (claude mcp add)
+
+To add the MCP server to [Claude Code](https://docs.anthropic.com/en/docs/claude-code), use the `claude mcp add` command with the `stdio` transport (default):
+
+```bash
+# With a containerlab topology file
+claude mcp add fcli -- fcli-mcp --topo-file /path/to/lab.clab.yml
+
+# With a Nornir config file
+claude mcp add fcli -- fcli-mcp --cfg /path/to/nornir_config.yaml
+```
+
+### Claude Desktop
+
+To add the MCP server to [Claude Desktop](https://claude.ai/download), add the following to your Claude Desktop configuration file (`claude_desktop_config.json`):
+
+```json
+{
+  "mcpServers": {
+    "fcli": {
+      "command": "fcli-mcp",
+      "args": ["--topo-file", "/path/to/lab.clab.yml"]
+    }
+  }
+}
+```
+
+## Available MCP tools
+
+The MCP server exposes the following 16 tools:
+
+| Tool | Description |
+|------|-------------|
+| `bgp_peers` | BGP peers and their status |
+| `sys_info` | System information |
+| `subinterfaces` | Sub-interfaces |
+| `lag` | LAG interfaces |
+| `ipv4_rib` | IPv4 RIB entries |
+| `ipv6_rib` | IPv6 RIB entries |
+| `bgp_rib` | BGP RIB |
+| `mac_table` | MAC table |
+| `network_instances` | Network instances and interfaces |
+| `lldp_neighbors` | LLDP neighbors |
+| `irb_interfaces` | IRB interfaces |
+| `ethernet_segments` | Ethernet segments |
+| `es_destinations` | ES destinations |
+| `vxlan_tunnels` | VXLAN tunnels |
+| `arp_table` | ARP table |
+| `ipv6_neighbors` | IPv6 neighbor discovery table |
+
+All tools accept optional `inv_filter` and `field_filter` parameters as comma-separated `key=value` pairs (e.g. `"site=dc1,role=leaf"`).
+
