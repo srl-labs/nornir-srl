@@ -782,6 +782,21 @@ def arp(
 
 
 @app.command()
+def ifstats(
+    ctx: typer.Context,
+    interval: int = typer.Option(5, "--interval", "-s", help="Seconds between samples"),
+    field_filter: Optional[List[str]] = typer.Option(None, "--field-filter", "-f"),
+) -> None:
+    """Displays per-interface in/out bps from two consecutive samples"""
+
+    def _ifstats(task: Task) -> Result:
+        device = task.host.get_connection(CONNECTION_NAME, task.nornir.config)
+        return Result(host=task.host, result=device.get_ifstats(interval=interval))
+
+    run_show(ctx, "ifstats", _ifstats, field_filter, title="Interface Stats (bps)")
+
+
+@app.command()
 def nd(
     ctx: typer.Context,
     field_filter: Optional[List[str]] = typer.Option(None, "--field-filter", "-f"),
