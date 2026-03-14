@@ -47,6 +47,10 @@ class InterfaceStatsMixin:
                 result[name] = {
                     "in-octets": int(stats.get("in-octets", 0)),
                     "out-octets": int(stats.get("out-octets", 0)),
+                    "in-errors": int(stats.get("in-error-packets", 0)),
+                    "out-errors": int(stats.get("out-error-packets", 0)),
+                    "in-discards": int(stats.get("in-discarded-packets", 0)),
+                    "out-discards": int(stats.get("out-discarded-packets", 0)),
                 }
             return result
 
@@ -61,12 +65,20 @@ class InterfaceStatsMixin:
             d_out = s2[name]["out-octets"] - s1[name]["out-octets"]
             in_bps = round(d_in * 8 / dt)
             out_bps = round(d_out * 8 / dt)
+            in_err = s2[name]["in-errors"] - s1[name]["in-errors"]
+            out_err = s2[name]["out-errors"] - s1[name]["out-errors"]
+            in_disc = s2[name]["in-discards"] - s1[name]["in-discards"]
+            out_disc = s2[name]["out-discards"] - s1[name]["out-discards"]
             if in_bps or out_bps:
                 rows.append(
                     {
                         "interface": name,
                         "in-Kbps": round(in_bps / 1000, 1),
                         "out-Kbps": round(out_bps / 1000, 1),
+                        "in-err": in_err,
+                        "out-err": out_err,
+                        "in-disc": in_disc,
+                        "out-disc": out_disc,
                     }
                 )
 

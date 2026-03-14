@@ -793,7 +793,7 @@ def ifstats(
         device = task.host.get_connection(CONNECTION_NAME, task.nornir.config)
         return Result(host=task.host, result=device.get_ifstats(interval=interval))
 
-    run_show(ctx, "ifstats", _ifstats, field_filter, title="Interface Stats (bps)")
+    run_show(ctx, "ifstats", _ifstats, field_filter, title=f"Interface Stats ({interval}s interval)")
 
 
 @app.command()
