@@ -116,3 +116,5 @@ intent
 .dockerignore
 **/*.bak
 **/*.sav
+.gemini
+.mcp*

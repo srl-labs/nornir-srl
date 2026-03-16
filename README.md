@@ -113,11 +113,14 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 uv tool install git+https://github.com/srl-labs/nornir-srl
 ```
 
-After this you can simply run `fcli`:
+After this you can simply run `fcli` or `fcli-mcp`:
 
 ```bash
 fcli --help
+fcli-mcp --help
 ```
+
+> **Note:** Ensure your shell's `PATH` includes the directory where `uv` or `pip` installs binaries (typically `~/.local/bin` on Linux/macOS).
 
 ## Nornir-based inventory mode
 
@@ -395,7 +398,66 @@ Show all EVPN RT=2 routes for MAC address that starts with "1A:DC":
 |              |         | *>   | 01:24:24:24:24:24:24:00:00:01 | 10.200.1.10 | 1A:DC:0E:FF:00:41 | 192.168.255.2:202 | i       | 192.168.255.2 | igp    | 192.168.255.2   | 202 |
 |--------------+---------+------+-------------------------------+-------------+-------------------+-------------------+---------+---------------+--------+-----------------+-----|
 | clab-4l2s-s2 | default | *>   | 01:24:24:24:24:24:24:00:00:01 | 0.0.0.0     | 1A:DC:0E:FF:00:41 | 192.168.255.2:202 | i       | 192.168.255.2 | igp    | 192.168.255.2   | 202 |
-|              |         | *>   | 01:24:24:24:24:24:24:00:00:01 | 10.200.1.10 | 1A:DC:0E:FF:00:41 | 192.168.255.2:202 | i       | 192.168.255.2 | igp    | 192.168.255.2   | 202 |
+| clab-4l2s-s2 | default | *>   | 01:24:24:24:24:24:24:00:00:01 | 10.200.1.10 | 1A:DC:0E:FF:00:41 | 192.168.255.2:202 | i       | 192.168.255.2 | igp    | 192.168.255.2   | 202 |
 +--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
 ```
+
+# MCP Server for AI Agents
+
+`nornir-srl` includes a Model Context Protocol (MCP) server that exposes `fcli` reports as tools for AI agents (like Claude Desktop or Gemini CLI). This allows AI agents to directly query the operational state of your SR Linux fabric.
+
+## Usage
+
+The MCP server is provided by the `fcli-mcp` command. It supports both `stdio` (default) and `http` (SSE) transports.
+
+```bash
+# Start with a specific containerlab topology
+fcli-mcp --topo-file topo.clab.yml
+
+# Start with a Nornir config file
+fcli-mcp --config-file nornir_config.yaml
+
+# Start as an HTTP server
+fcli-mcp --transport http --port 8080
+```
+
+### Runtime Topology Management
+
+The MCP server can start without an initial topology, allowing you to load or switch topologies at runtime using the following MCP tools:
+
+- `list_topologies`: Discovers available `*.clab.yml` and `nornir_config.yaml` files in a directory.
+- `load_topology`: Initializes or switches the active fabric from a containerlab file.
+- `load_config`: Initializes or switches the active fabric from a Nornir config file.
+- `show_topology`: Displays information about the currently loaded fabric.
+
+## Configuration Examples
+
+### Claude Desktop
+
+Add the following to your `claude_desktop_config.json`:
+
+```json
+{
+  "mcpServers": {
+    "fcli": {
+      "command": "fcli-mcp"
+    }
+  }
+}
+```
+
+### Gemini CLI
+
+Add the following to your `.gemini/settings.json`:
+
+```json
+{
+  "mcpServers": {
+    "fcli": {
+      "command": "fcli-mcp"
+    }
+  }
+}
+```
+
 
