@@ -140,8 +140,8 @@ class Layer2Mixin:
 
     def get_vxlan(self) -> Dict[str, Any]:
         path_spec = {
-            "path": "/tunnel-interface[name=*]/vxlan-interface/bridge-table/unicast-destinations/destination",
-            "jmespath": '"tunnel-interface"[]."_vxlan_itfs"[].{"vxlan-itf":name, NI:ni, destinations:destinations}',
+            "path": "/tunnel-interface[name=*]/vxlan-interface",
+            "jmespath": '"tunnel-interface"[]."_vxlan_itfs"[].{"vxlan-itf":name, NI:ni, "ing-vni":"ing-vni", destinations:destinations}',
             "datatype": "state",
         }
 
@@ -158,12 +158,15 @@ class Layer2Mixin:
                         .get("unicast-destinations", {})
                         .get("destination", [])
                     )
-                    vteps = " ".join(d.get("vtep", "") for d in dests)
+                    vteps = ", ".join(
+                        f"({d.get('vtep', '')}, {d.get('vni', '')})" for d in dests
+                    )
                     tun["_vxlan_itfs"].append(
                         {
                             "name": vxlan_name,
                             "ni": ni_map.get(vxlan_name, ""),
-                            "destinations": vteps,
+                            "ing-vni": vxlan.get("ingress", {}).get("vni", "-"),
+                            "destinations": vteps if vteps else "-",
                         }
                     )
 

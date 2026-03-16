@@ -515,7 +515,7 @@ def network_instances(
     """Get network instances and their interfaces.
 
     Returns NI name, operational state, type (ip-vrf/mac-vrf/default), router-id,
-    and associated interfaces with IP addresses, VLANs, and MTU.
+    vxlan-interface, import/export RTs, and associated interfaces with IP addresses, VLANs, and MTU.
 
     Args:
         inv_filter: Inventory filter as comma-separated key=value pairs. Supports wildcards.
@@ -703,7 +703,8 @@ def vxlan_tunnels(
 ) -> str:
     """Get VXLAN tunnel interfaces and unicast destinations.
 
-    Returns VXLAN interface name, associated network instance, and VTEP destination addresses.
+    Returns VXLAN interface name, associated network instance, ingress-vni,
+    and unicast destinations (vtep-address, vni).
 
     Args:
         inv_filter: Inventory filter as comma-separated key=value pairs. Supports wildcards.

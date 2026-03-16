@@ -22,6 +22,8 @@ class NetworkInstanceMixin:
         path_spec = {
             "path": f"/network-instance[name={nw_instance}]",
             "jmespath": '"network-instance"[].{NI:name,oper:"oper-state",type:type,"router-id":protocols.bgp."router-id",\
+                    "vxlan-itf":"vxlan-interface"[].name || `[]` | join(\', \',@), \
+                    "In-RT":"In-RT", "Out-RT":"Out-RT",\
                     itfs: interface[].{Subitf:name,"assoc-ni":"_other_ni","if-oper":"oper-state", "ip-prefix":*.address[]."ip-prefix",\
                         vlan:vlan.encap."single-tagged"."vlan-id", "mtu":"_mtu"}}',
             "datatype": "all",
@@ -39,13 +41,41 @@ class NetworkInstanceMixin:
         resp = self.get(
             paths=[path_spec.get("path", "")], datatype=path_spec["datatype"]
         )
-        for ni in resp[0].get("network-instance", {}):
+        ni_list = resp[0].get("network-instance", [])
+        for ni in ni_list:
+            bgp_vpn = ni.get("protocols", {}).get("bgp-vpn", {})
+            in_rts = []
+            out_rts = []
+            bgp_instances = bgp_vpn.get("bgp-instance", [])
+            if isinstance(bgp_instances, dict):
+                bgp_instances = [bgp_instances]
+            
+            for inst in bgp_instances:
+                rt_cfg = inst.get("route-target", {})
+                import_rt = rt_cfg.get("import-rt", [])
+                if isinstance(import_rt, (str, dict)):
+                    import_rt = [import_rt]
+                for rt in import_rt:
+                    target = rt.get("target") if isinstance(rt, dict) else rt
+                    if target:
+                        in_rts.append(target.replace("target:", ""))
+                
+                export_rt = rt_cfg.get("export-rt", [])
+                if isinstance(export_rt, (str, dict)):
+                    export_rt = [export_rt]
+                for rt in export_rt:
+                    target = rt.get("target") if isinstance(rt, dict) else rt
+                    if target:
+                        out_rts.append(target.replace("target:", ""))
+            ni["In-RT"] = ", ".join(sorted(list(set(in_rts))))
+            ni["Out-RT"] = ", ".join(sorted(list(set(out_rts))))
+
             for ni_itf in ni.get("interface", []):
                 ni_itf.update(subitf.get(ni_itf["name"], {}))
                 if ni_itf["name"].startswith("irb"):
                     ni_itf["_other_ni"] = " ".join(
                         f"{vrf['name']}"
-                        for vrf in resp[0].get("network-instance", {})
+                        for vrf in ni_list
                         if ni_itf["name"]
                         in [i["name"] for i in vrf.get("interface", [])]
                         and vrf["name"] != ni["name"]
