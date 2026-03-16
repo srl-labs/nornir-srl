@@ -3,7 +3,7 @@ name = "nornir-srl"
 version = "0.3.9"
 description = "Nornir connection plugin for SRLinux"
 readme = "README.md"
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 authors = [
     { name = "Walter De Smedt", email = "walter.de.smedt@gmail.com" },
     { name = "Florian Schwarz" }
@@ -22,6 +22,7 @@ dependencies = [
     "setuptools>=75.4.0",
     "pyyaml>=6.0.2",
     "typer>=0.16.0",
+    "mcp[cli]>=1.9.0",
 ]
 
 [tool.setuptools.packages.find]
@@ -39,6 +40,7 @@ dev = [
 
 [project.scripts]
 fcli = "nornir_srl.cli:app"
+fcli-mcp = "nornir_srl.mcp_server:main"
 
 [project.entry-points."nornir.plugins.connections"]
 srlinux = "nornir_srl.connections.srlinux:SrLinux"

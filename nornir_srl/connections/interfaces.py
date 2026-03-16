@@ -74,12 +74,65 @@ class NetworkInstanceMixin:
     def get_sum_subitf(self, interface: str = "*") -> Dict[str, Any]:
         path_spec = {
             "path": f"/interface[name={interface}]/subinterface",
-            "jmespath": 'interface[].{Itf:name, subitfs: subinterface[].{Subitf:name,                      type:type, admin:"admin-state",oper:"oper-state",                       ipv4: ipv4.address[]."ip-prefix", ipv6: ipv6.address[]."ip-prefix", vlan: vlan.encap."single-tagged"."vlan-id"}}',
             "datatype": "all",
-            "key": "index",
         }
         resp = self.get(
             paths=[path_spec.get("path", "")], datatype=path_spec["datatype"]
         )
-        res = jmespath.search(path_spec["jmespath"], resp[0])
-        return {"subinterface": res}
+        
+        # resp[0] is usually a dict like {'interface[name=...]': {...}} or {'interface': [...]}
+        itf_list = []
+        if resp and isinstance(resp[0], dict):
+            for k, v in resp[0].items():
+                if k.startswith("interface"):
+                    if isinstance(v, list):
+                        itf_list.extend(v)
+                    elif isinstance(v, dict):
+                        # For specific interface name, v is {'subinterface': [...]}
+                        # and we might need to add back the name if it's missing from the dict
+                        if "name" not in v:
+                            if "[" in k and "]" in k:
+                                v["name"] = k.split("[name=")[1].split("]")[0]
+                        itf_list.append(v)
+
+        results = []
+        for itf in itf_list:
+            itf_name = itf.get("name", "")
+            subitfs = []
+            for si in itf.get("subinterface", []):
+                # Construct proper subinterface name
+                index = si.get("index", "")
+                si_name = si.get("name", "")
+                if not si_name:
+                    si_name = f"{itf_name}.{index}"
+                elif str(si_name).isdigit():
+                    si_name = f"{itf_name}.{si_name}"
+                
+                # Extract interesting fields
+                sub_data = {
+                    "Subitf": si_name,
+                    "type": si.get("type"),
+                    "admin": si.get("admin-state"),
+                    "oper": si.get("oper-state"),
+                    "ip-mtu": si.get("ip-mtu"),
+                    "vlan": jmespath.search('vlan.encap."single-tagged"."vlan-id"', si)
+                }
+                
+                # IPv4 details
+                ipv4 = si.get("ipv4")
+                if ipv4:
+                    sub_data["ipv4"] = [addr.get("ip-prefix") for addr in ipv4.get("address", [])]
+                
+                # IPv6 details
+                ipv6 = si.get("ipv6")
+                if ipv6:
+                    sub_data["ipv6"] = [addr.get("ip-prefix") for addr in ipv6.get("address", [])]
+                
+                subitfs.append(sub_data)
+            
+            results.append({
+                "Itf": itf_name,
+                "subitfs": subitfs
+            })
+
+        return {"subinterface": results}

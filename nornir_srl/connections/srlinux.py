@@ -15,6 +15,7 @@ from .routing import RoutingMixin
 from .layer2 import Layer2Mixin
 from .neighbor_discovery import NeighborDiscoveryMixin
 from .system import SystemMixin
+from .ifstats import InterfaceStatsMixin
 
 CONNECTION_NAME = "srlinux"
 
@@ -64,7 +65,8 @@ class GnmiPath:
 
 
 class SrLinux(
-    NetworkInstanceMixin, RoutingMixin, Layer2Mixin, NeighborDiscoveryMixin, SystemMixin
+    NetworkInstanceMixin, RoutingMixin, Layer2Mixin, NeighborDiscoveryMixin, SystemMixin,
+    InterfaceStatsMixin,
 ):
     def open(
         self,
