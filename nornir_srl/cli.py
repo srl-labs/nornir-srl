@@ -365,13 +365,11 @@ def print_report(
 @app.callback()
 def main(
     ctx: typer.Context,
-    cfg: Path = typer.Option(
-        Path("nornir_config.yaml"),
+    cfg: Optional[Path] = typer.Option(
+        None,
         "--cfg",
         "-c",
-        exists=True,
-        readable=True,
-        help="Nornir config file. Mutually exclusive with -t",
+        help="Nornir config file. Mutually exclusive with -t. Defaults to nornir_config.yaml",
     ),
     inv_filter: Optional[List[str]] = typer.Option(
         None,
@@ -502,6 +500,11 @@ def main(
                 )
                 fabric = InitNornir(**conf)
     else:
+        if cfg is None:
+            cfg = Path("nornir_config.yaml")
+        if not cfg.exists():
+            typer.echo(f"Config file '{cfg}' does not exist. Provide -c/--cfg or -t/--topo-file.")
+            raise typer.Exit(1)
         fabric = InitNornir(config_file=str(cfg))
 
     i_filter = (
