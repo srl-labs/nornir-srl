@@ -21,11 +21,13 @@ Usage:
 """
 
 import argparse
+import atexit
+import glob
 import json
 import logging
 import os
 import tempfile
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Literal
 
 import yaml
 from mcp.server.fastmcp import FastMCP
@@ -61,6 +63,17 @@ NORNIR_DEFAULT_CONFIG: Dict[str, Any] = {
 # These hold the initialized nornir instance and persistent temp files
 _nornir_instance: Optional[Nornir] = None
 _temp_files: List[Any] = []  # prevent GC of NamedTemporaryFile objects
+
+def _cleanup_temp_files() -> None:
+    """Clean up any temporary files created during initialization."""
+    for f in _temp_files:
+        try:
+            if os.path.exists(f.name):
+                os.unlink(f.name)
+        except Exception as e:
+            logger.debug("Failed to clean up temp file %s: %s", f.name, e)
+
+atexit.register(_cleanup_temp_files)
 
 
 def _init_nornir_from_topo(topo_file: str, cert_file: Optional[str] = None) -> Nornir:
@@ -158,7 +171,8 @@ def get_nornir() -> Nornir:
     global _nornir_instance
     if _nornir_instance is None:
         raise RuntimeError(
-            "Nornir not initialized. Server must be started with --topo-file or --config-file."
+            "Nornir not initialized. Use 'load_topology' or 'load_config' tools to "
+            "initialize a fabric, or check if available topologies exist with 'list_topologies'."
         )
     return _nornir_instance
 
@@ -276,9 +290,89 @@ mcp = FastMCP(
         "MCP server for Nokia SR Linux fabric analysis via fcli/nornir-srl. "
         "Provides tools to query operational state of SR Linux devices in a containerlab or production fabric. "
         "All tools return structured JSON data. Use inv_filter to target specific devices (e.g. 'role=leaf') "
-        "and field_filter to filter output rows (e.g. 'state=established'). Filters support wildcards (*, ?)."
+        "and field_filter to filter output rows (e.g. 'state=established'). Filters support wildcards (*, ?). "
+        "Topologies can be loaded at runtime using 'load_topology' or 'load_config'."
     ),
 )
+
+
+@mcp.tool()
+def list_topologies(directory: str = ".") -> str:
+    """List available containerlab topology files and nornir configs in a directory.
+
+    Args:
+        directory: Directory to search (default: current directory).
+    """
+    clab_files = glob.glob(os.path.join(directory, "*.clab.yml"))
+    clab_files.extend(glob.glob(os.path.join(directory, "clab-*.yml")))
+    nornir_files = glob.glob(os.path.join(directory, "nornir_config.yaml"))
+    nornir_files.extend(glob.glob(os.path.join(directory, "nornir_config*.yaml")))
+
+    results = {
+        "containerlab_topologies": [os.path.abspath(f) for f in clab_files],
+        "nornir_configs": [os.path.abspath(f) for f in nornir_files],
+    }
+    return json.dumps(results, indent=2)
+
+
+@mcp.tool()
+def load_topology(
+    topo_file: str,
+    cert_file: Optional[str] = None,
+    inv_filter: Optional[str] = None,
+) -> str:
+    """Initialize or switch the active fabric from a containerlab topology file.
+
+    Args:
+        topo_file: Path to the containerlab .yml file.
+        cert_file: Optional path to the TLS certificate file.
+        inv_filter: Optional inventory filter as comma-separated key=value pairs (e.g. 'role=leaf').
+    """
+    global _nornir_instance
+    _nornir_instance = _init_nornir_from_topo(topo_file, cert_file)
+
+    if inv_filter:
+        i_filt, _ = _parse_filters(inv_filter=inv_filter)
+        if i_filt:
+            _nornir_instance = _nornir_instance.filter(**i_filt)
+
+    return f"Fabric initialized from {topo_file}. {len(_nornir_instance.inventory.hosts)} nodes matched filter."
+
+
+@mcp.tool()
+def load_config(
+    config_file: str,
+    inv_filter: Optional[str] = None,
+) -> str:
+    """Initialize or switch the active fabric from a Nornir config file.
+
+    Args:
+        config_file: Path to the nornir_config.yaml file.
+        inv_filter: Optional inventory filter as comma-separated key=value pairs.
+    """
+    global _nornir_instance
+    _nornir_instance = _init_nornir_from_config(config_file)
+
+    if inv_filter:
+        i_filt, _ = _parse_filters(inv_filter=inv_filter)
+        if i_filt:
+            _nornir_instance = _nornir_instance.filter(**i_filt)
+
+    return f"Fabric initialized from {config_file}. {len(_nornir_instance.inventory.hosts)} nodes matched filter."
+
+
+@mcp.tool()
+def show_topology() -> str:
+    """Show information about the currently loaded fabric."""
+    nornir = get_nornir()
+    hosts = list(nornir.inventory.hosts.keys())
+    return json.dumps(
+        {
+            "node_count": len(hosts),
+            "nodes": hosts,
+        },
+        indent=2,
+    )
 
 
 @mcp.tool()
@@ -330,8 +424,8 @@ def bgp_peers(
 
 @mcp.tool()
 def bgp_rib(
-    route_fam: str,
-    route_type: Optional[str] = None,
+    route_fam: Literal["evpn", "ipv4", "ipv6"],
+    route_type: Optional[Literal["1", "2", "3", "4", "5"]] = None,
     inv_filter: Optional[str] = None,
     field_filter: Optional[str] = None,
 ) -> str:
@@ -755,22 +849,18 @@ def main() -> None:
 
     # Initialize Nornir
     global _nornir_instance
-    if args.topo_file:
-        _nornir_instance = _init_nornir_from_topo(args.topo_file, args.cert_file)
-    elif args.config_file:
-        _nornir_instance = _init_nornir_from_config(args.config_file)
-    else:
-        # Try default nornir_config.yaml
-        if os.path.exists("nornir_config.yaml"):
+    try:
+        if args.topo_file:
+            _nornir_instance = _init_nornir_from_topo(args.topo_file, args.cert_file)
+        elif args.config_file:
+            _nornir_instance = _init_nornir_from_config(args.config_file)
+        elif os.path.exists("nornir_config.yaml"):
             _nornir_instance = _init_nornir_from_config("nornir_config.yaml")
-        else:
-            parser.error(
-                "No topology or config file specified and no nornir_config.yaml found. "
-                "Use --topo-file or --config-file."
-            )
+    except Exception as e:
+        logger.error("Failed to initialize Nornir: %s", e)
 
     # Apply global inventory filter if provided
-    if args.inv_filter:
+    if _nornir_instance and args.inv_filter:
         i_filter = {}
         for f in args.inv_filter:
             if "=" in f:
