@@ -508,6 +508,29 @@ def ipv6_rib(
 
 
 @mcp.tool()
+def static_routes(
+    inv_filter: Optional[str] = None,
+    field_filter: Optional[str] = None,
+) -> str:
+    """Get static routes from /network-instance[name=*]/static-routes.
+
+    Returns route, admin-state, installed, metric, pref, and nhops.
+
+    Args:
+        inv_filter: Inventory filter as comma-separated key=value pairs. Supports wildcards.
+        field_filter: Field filter as comma-separated key=value pairs. Supports wildcards.
+    """
+    i_filt, f_filt = _parse_filters(inv_filter, field_filter)
+
+    def _task(task: Task) -> Result:
+        device = task.host.get_connection(CONNECTION_NAME, task.nornir.config)
+        return Result(host=task.host, result=device.get_static_routes())
+
+    data = _run_report("static_routes", _task, i_filt, f_filt)
+    return json.dumps(data, indent=2, default=str)
+
+
+@mcp.tool()
 def network_instances(
     inv_filter: Optional[str] = None,
     field_filter: Optional[str] = None,

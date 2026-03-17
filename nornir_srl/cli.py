@@ -140,12 +140,12 @@ def _extract_data(
                     )
                 }
                 node_name = node.hostname if node.hostname else node.name
-                if len([v for v in l.values() if isinstance(v, list)]) == 0:
+                if len([v for v in l.values() if isinstance(v, list) and len(v) > 0 and isinstance(v[0], dict)]) == 0:
                     if _pass_filter(common, filter):
                         all_rows.append({"Node": node_name, **common})
                 else:
                     for key, v in l.items():
-                        if isinstance(v, list):
+                        if isinstance(v, list) and len(v) > 0 and isinstance(v[0], dict):
                             for item in v:
                                 row = {
                                     k: y
@@ -283,12 +283,12 @@ def print_table(
                         and not isinstance(y[0], dict)
                     )
                 }
-                if len([v for v in l.values() if isinstance(v, list)]) == 0:
+                if len([v for v in l.values() if isinstance(v, list) and len(v) > 0 and isinstance(v[0], dict)]) == 0:
                     if pass_filter(common, filter):
                         rows.append(common)
                 else:
                     for key, v in l.items():
-                        if isinstance(v, list):
+                        if isinstance(v, list) and len(v) > 0 and isinstance(v[0], dict):
                             first_row = True
                             for item in v:
                                 row = {
@@ -647,6 +647,20 @@ def ipv6_rib(
         )
 
     run_show(ctx, "ip_rib", _ipv6, field_filter)
+
+
+@app.command()
+def static_routes(
+    ctx: typer.Context,
+    field_filter: Optional[List[str]] = typer.Option(None, "--field-filter", "-f"),
+) -> None:
+    """Displays static routes"""
+
+    def _static(task: Task) -> Result:
+        device = task.host.get_connection(CONNECTION_NAME, task.nornir.config)
+        return Result(host=task.host, result=device.get_static_routes())
+
+    run_show(ctx, "static_routes", _static, field_filter)
 
 
 @app.command()
