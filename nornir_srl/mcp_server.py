@@ -317,14 +317,32 @@ def list_topologies(directory: str = ".") -> str:
     Args:
         directory: Directory to search (default: current directory).
     """
-    clab_files = glob.glob(os.path.join(directory, "*.clab.yml"))
-    clab_files.extend(glob.glob(os.path.join(directory, "clab-*.yml")))
-    nornir_files = glob.glob(os.path.join(directory, "nornir_config.yaml"))
-    nornir_files.extend(glob.glob(os.path.join(directory, "nornir_config*.yaml")))
+    clab_patterns = [
+        os.path.join(directory, "**/*.clab.yml"),
+        os.path.join(directory, "**/*.clab.yaml"),
+        os.path.join(directory, "**/clab-*.yml"),
+        os.path.join(directory, "**/clab-*.yaml"),
+    ]
+    nornir_patterns = [
+        os.path.join(directory, "**/nornir_config.yaml"),
+        os.path.join(directory, "**/nornir_config*.yaml"),
+    ]
+
+    clab_files = set()
+    for p in clab_patterns:
+        for f in glob.glob(p, recursive=True):
+            if os.path.isfile(f):
+                clab_files.add(os.path.abspath(f))
+
+    nornir_files = set()
+    for p in nornir_patterns:
+        for f in glob.glob(p, recursive=True):
+            if os.path.isfile(f):
+                nornir_files.add(os.path.abspath(f))
 
     results = {
-        "containerlab_topologies": [os.path.abspath(f) for f in clab_files],
-        "nornir_configs": [os.path.abspath(f) for f in nornir_files],
+        "containerlab_topologies": sorted(list(clab_files)),
+        "nornir_configs": sorted(list(nornir_files)),
     }
     return json.dumps(results, indent=2)
 
