@@ -462,9 +462,7 @@ class RoutingMixin:
                     )
                 if resolving_route:
                     tmp_map[nh["index"]].update(
-                        {
-                            "resolving-route": resolving_route.get("ip-prefix")
-                        }
+                        {"resolving-route": resolving_route.get("ip-prefix")}
                     )
 
             nh_mapping.update({ni["name"]: tmp_map})
@@ -533,10 +531,12 @@ class RoutingMixin:
                         else:
                             nh_ni = ni["name"]
                         route["_next-hop"] = [
-                            nh.get("resolving-route") + " (indirect)"
-                            if nh.get("type") == "indirect"
-                            and nh.get("resolving-route")
-                            else nh.get("ip-address")
+                            (
+                                nh.get("resolving-route") + " (indirect)"
+                                if nh.get("type") == "indirect"
+                                and nh.get("resolving-route")
+                                else nh.get("ip-address")
+                            )
                             for nh in nhgroup_mapping[nh_ni].get(
                                 route["next-hop-group"], {}
                             )
@@ -572,3 +572,68 @@ class RoutingMixin:
 
         res = jmespath.search(path_spec["jmespath"], resp[0])
         return {"ip_rib": res}
+
+    def get_static_routes(self, network_instance: str = "*") -> Dict[str, Any]:
+        """
+        Get static routes from /network-instance/static-routes.
+        """
+        paths = [
+            f"/network-instance[name={network_instance}]/static-routes",
+            f"/network-instance[name={network_instance}]/next-hop-groups",
+        ]
+        resp = self.get(paths=paths, datatype="state")
+
+        # Map next-hop groups
+        # nh_mapping[ni_name][group_name] = [ip1, ip2(R), ...]
+        nh_mapping: Dict[str, Dict[str, List[str]]] = {}
+        # static_routes_data[ni_name] = [route1, route2, ...]
+        static_routes_data: Dict[str, List[Dict[str, Any]]] = {}
+
+        for item in resp:
+            if "network-instance" in item:
+                for ni in item["network-instance"]:
+                    ni_name = ni["name"]
+                    if "next-hop-groups" in ni:
+                        if ni_name not in nh_mapping:
+                            nh_mapping[ni_name] = {}
+                        for group in ni["next-hop-groups"].get("group", []):
+                            group_name = group["name"]
+                            nh_list = []
+                            for nh in group.get("nexthop", []):
+                                ip = nh.get("ip-address")
+                                if ip:
+                                    if nh.get("resolve", False):
+                                        ip = f"{ip}(R)"
+                                    nh_list.append(ip)
+                            nh_mapping[ni_name][group_name] = nh_list
+
+                    if "static-routes" in ni:
+                        if ni_name not in static_routes_data:
+                            static_routes_data[ni_name] = []
+                        static_routes_data[ni_name].extend(
+                            ni["static-routes"].get("route", [])
+                        )
+
+        processed_routes = []
+        for ni_name, routes in static_routes_data.items():
+            for route in routes:
+                nh_group_name = route.get("next-hop-group")
+                nhops = (
+                    nh_mapping.get(ni_name, {}).get(nh_group_name, [])
+                    if nh_group_name
+                    else []
+                )
+
+                processed_routes.append(
+                    {
+                        "NI": ni_name,
+                        "route": route.get("prefix"),
+                        "admin-state": route.get("admin-state"),
+                        "installed": route.get("installed"),
+                        "metric": route.get("metric"),
+                        "pref": route.get("preference"),
+                        "nhops": nhops,
+                    }
+                )
+
+        return {"static_routes": processed_routes}

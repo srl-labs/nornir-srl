@@ -29,7 +29,7 @@ import os
 import tempfile
 from typing import Any, Dict, List, Optional, Literal
 
-import yaml
+import yaml  # type: ignore[import-untyped]
 from mcp.server.fastmcp import FastMCP
 from nornir import InitNornir
 from nornir.core import Nornir
@@ -64,6 +64,7 @@ NORNIR_DEFAULT_CONFIG: Dict[str, Any] = {
 _nornir_instance: Optional[Nornir] = None
 _temp_files: List[Any] = []  # prevent GC of NamedTemporaryFile objects
 
+
 def _cleanup_temp_files() -> None:
     """Clean up any temporary files created during initialization."""
     for f in _temp_files:
@@ -72,6 +73,7 @@ def _cleanup_temp_files() -> None:
                 os.unlink(f.name)
         except Exception as e:
             logger.debug("Failed to clean up temp file %s: %s", f.name, e)
+
 
 atexit.register(_cleanup_temp_files)
 
@@ -139,7 +141,9 @@ def _init_nornir_from_topo(topo_file: str, cert_file: Optional[str] = None) -> N
         }
     }
     if cert_file:
-        groups["srl"]["connection_options"]["srlinux"]["extras"]["path_cert"] = cert_file
+        groups["srl"]["connection_options"]["srlinux"]["extras"][
+            "path_cert"
+        ] = cert_file
 
     hosts_f = tempfile.NamedTemporaryFile("w+", suffix=".yml", delete=False)
     yaml.safe_dump(hosts, hosts_f)
@@ -219,11 +223,17 @@ def _extract_report_data(
                     k: v
                     for k, v in item.items()
                     if isinstance(v, (str, int, float))
-                    or (isinstance(v, list) and len(v) > 0 and not isinstance(v[0], dict))
+                    or (
+                        isinstance(v, list)
+                        and len(v) > 0
+                        and not isinstance(v[0], dict)
+                    )
                 }
                 node_name = node.hostname if node and node.hostname else host
                 nested_lists = [
-                    (k, v) for k, v in item.items() if isinstance(v, list) and v and isinstance(v[0], dict)
+                    (k, v)
+                    for k, v in item.items()
+                    if isinstance(v, list) and v and isinstance(v[0], dict)
                 ]
                 if not nested_lists:
                     if _pass_filter(common, field_filter):
@@ -235,7 +245,11 @@ def _extract_report_data(
                                 k: v
                                 for k, v in sub_item.items()
                                 if isinstance(v, (str, int, float))
-                                or (isinstance(v, list) and len(v) > 0 and not isinstance(v[0], dict))
+                                or (
+                                    isinstance(v, list)
+                                    and len(v) > 0
+                                    and not isinstance(v[0], dict)
+                                )
                             }
                             merged = {**common, **sub_row}
                             if _pass_filter(merged, field_filter):
@@ -508,6 +522,29 @@ def ipv6_rib(
 
 
 @mcp.tool()
+def static_routes(
+    inv_filter: Optional[str] = None,
+    field_filter: Optional[str] = None,
+) -> str:
+    """Get static routes from /network-instance[name=*]/static-routes.
+
+    Returns route, admin-state, installed, metric, pref, and nhops.
+
+    Args:
+        inv_filter: Inventory filter as comma-separated key=value pairs. Supports wildcards.
+        field_filter: Field filter as comma-separated key=value pairs. Supports wildcards.
+    """
+    i_filt, f_filt = _parse_filters(inv_filter, field_filter)
+
+    def _task(task: Task) -> Result:
+        device = task.host.get_connection(CONNECTION_NAME, task.nornir.config)
+        return Result(host=task.host, result=device.get_static_routes())
+
+    data = _run_report("static_routes", _task, i_filt, f_filt)
+    return json.dumps(data, indent=2, default=str)
+
+
+@mcp.tool()
 def network_instances(
     inv_filter: Optional[str] = None,
     field_filter: Optional[str] = None,
@@ -515,7 +552,7 @@ def network_instances(
     """Get network instances and their interfaces.
 
     Returns NI name, operational state, type (ip-vrf/mac-vrf/default), router-id,
-    and associated interfaces with IP addresses, VLANs, and MTU.
+    vxlan-interface, import/export RTs, and associated interfaces with IP addresses, VLANs, and MTU.
 
     Args:
         inv_filter: Inventory filter as comma-separated key=value pairs. Supports wildcards.
@@ -703,7 +740,8 @@ def vxlan_tunnels(
 ) -> str:
     """Get VXLAN tunnel interfaces and unicast destinations.
 
-    Returns VXLAN interface name, associated network instance, and VTEP destination addresses.
+    Returns VXLAN interface name, associated network instance, ingress-vni,
+    and unicast destinations (vtep-address, vni).
 
     Args:
         inv_filter: Inventory filter as comma-separated key=value pairs. Supports wildcards.
@@ -808,11 +846,13 @@ def main() -> None:
         ),
     )
     parser.add_argument(
-        "--topo-file", "-t",
+        "--topo-file",
+        "-t",
         help="Containerlab topology file (mutually exclusive with --config-file)",
     )
     parser.add_argument(
-        "--config-file", "-c",
+        "--config-file",
+        "-c",
         help="Nornir config file (mutually exclusive with --topo-file)",
     )
     parser.add_argument(
@@ -820,7 +860,8 @@ def main() -> None:
         help="TLS certificate file for containerlab",
     )
     parser.add_argument(
-        "--inv-filter", "-i",
+        "--inv-filter",
+        "-i",
         action="append",
         help="Inventory filter in key=value format (can be repeated)",
     )
@@ -871,7 +912,9 @@ def main() -> None:
 
     # Run server
     if args.transport == "http":
-        mcp.run(transport="streamable-http", host=args.host, port=args.port)
+        mcp.settings.host = args.host
+        mcp.settings.port = args.port
+        mcp.run(transport="streamable-http")
     else:
         mcp.run(transport="stdio")
 

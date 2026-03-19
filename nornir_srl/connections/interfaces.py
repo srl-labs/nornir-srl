@@ -22,6 +22,8 @@ class NetworkInstanceMixin:
         path_spec = {
             "path": f"/network-instance[name={nw_instance}]",
             "jmespath": '"network-instance"[].{NI:name,oper:"oper-state",type:type,"router-id":protocols.bgp."router-id",\
+                    "vxlan-itf":"vxlan-interface"[].name || `[]` | join(\', \',@), \
+                    "In-RT":"In-RT", "Out-RT":"Out-RT",\
                     itfs: interface[].{Subitf:name,"assoc-ni":"_other_ni","if-oper":"oper-state", "ip-prefix":*.address[]."ip-prefix",\
                         vlan:vlan.encap."single-tagged"."vlan-id", "mtu":"_mtu"}}',
             "datatype": "all",
@@ -39,13 +41,41 @@ class NetworkInstanceMixin:
         resp = self.get(
             paths=[path_spec.get("path", "")], datatype=path_spec["datatype"]
         )
-        for ni in resp[0].get("network-instance", {}):
+        ni_list = resp[0].get("network-instance", [])
+        for ni in ni_list:
+            bgp_vpn = ni.get("protocols", {}).get("bgp-vpn", {})
+            in_rts = []
+            out_rts = []
+            bgp_instances = bgp_vpn.get("bgp-instance", [])
+            if isinstance(bgp_instances, dict):
+                bgp_instances = [bgp_instances]
+
+            for inst in bgp_instances:
+                rt_cfg = inst.get("route-target", {})
+                import_rt = rt_cfg.get("import-rt", [])
+                if isinstance(import_rt, (str, dict)):
+                    import_rt = [import_rt]
+                for rt in import_rt:
+                    target = rt.get("target") if isinstance(rt, dict) else rt
+                    if target:
+                        in_rts.append(target.replace("target:", ""))
+
+                export_rt = rt_cfg.get("export-rt", [])
+                if isinstance(export_rt, (str, dict)):
+                    export_rt = [export_rt]
+                for rt in export_rt:
+                    target = rt.get("target") if isinstance(rt, dict) else rt
+                    if target:
+                        out_rts.append(target.replace("target:", ""))
+            ni["In-RT"] = ", ".join(sorted(list(set(in_rts))))
+            ni["Out-RT"] = ", ".join(sorted(list(set(out_rts))))
+
             for ni_itf in ni.get("interface", []):
                 ni_itf.update(subitf.get(ni_itf["name"], {}))
                 if ni_itf["name"].startswith("irb"):
                     ni_itf["_other_ni"] = " ".join(
                         f"{vrf['name']}"
-                        for vrf in resp[0].get("network-instance", {})
+                        for vrf in ni_list
                         if ni_itf["name"]
                         in [i["name"] for i in vrf.get("interface", [])]
                         and vrf["name"] != ni["name"]
@@ -79,7 +109,7 @@ class NetworkInstanceMixin:
         resp = self.get(
             paths=[path_spec.get("path", "")], datatype=path_spec["datatype"]
         )
-        
+
         # resp[0] is usually a dict like {'interface[name=...]': {...}} or {'interface': [...]}
         itf_list = []
         if resp and isinstance(resp[0], dict):
@@ -107,7 +137,7 @@ class NetworkInstanceMixin:
                     si_name = f"{itf_name}.{index}"
                 elif str(si_name).isdigit():
                     si_name = f"{itf_name}.{si_name}"
-                
+
                 # Extract interesting fields
                 sub_data = {
                     "Subitf": si_name,
@@ -115,24 +145,25 @@ class NetworkInstanceMixin:
                     "admin": si.get("admin-state"),
                     "oper": si.get("oper-state"),
                     "ip-mtu": si.get("ip-mtu"),
-                    "vlan": jmespath.search('vlan.encap."single-tagged"."vlan-id"', si)
+                    "vlan": jmespath.search('vlan.encap."single-tagged"."vlan-id"', si),
                 }
-                
+
                 # IPv4 details
                 ipv4 = si.get("ipv4")
                 if ipv4:
-                    sub_data["ipv4"] = [addr.get("ip-prefix") for addr in ipv4.get("address", [])]
-                
+                    sub_data["ipv4"] = [
+                        addr.get("ip-prefix") for addr in ipv4.get("address", [])
+                    ]
+
                 # IPv6 details
                 ipv6 = si.get("ipv6")
                 if ipv6:
-                    sub_data["ipv6"] = [addr.get("ip-prefix") for addr in ipv6.get("address", [])]
-                
+                    sub_data["ipv6"] = [
+                        addr.get("ip-prefix") for addr in ipv6.get("address", [])
+                    ]
+
                 subitfs.append(sub_data)
-            
-            results.append({
-                "Itf": itf_name,
-                "subitfs": subitfs
-            })
+
+            results.append({"Itf": itf_name, "subitfs": subitfs})
 
         return {"subinterface": results}
