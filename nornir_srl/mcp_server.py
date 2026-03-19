@@ -29,7 +29,7 @@ import os
 import tempfile
 from typing import Any, Dict, List, Optional, Literal
 
-import yaml
+import yaml  # type: ignore[import-untyped]
 from mcp.server.fastmcp import FastMCP
 from nornir import InitNornir
 from nornir.core import Nornir
@@ -64,6 +64,7 @@ NORNIR_DEFAULT_CONFIG: Dict[str, Any] = {
 _nornir_instance: Optional[Nornir] = None
 _temp_files: List[Any] = []  # prevent GC of NamedTemporaryFile objects
 
+
 def _cleanup_temp_files() -> None:
     """Clean up any temporary files created during initialization."""
     for f in _temp_files:
@@ -72,6 +73,7 @@ def _cleanup_temp_files() -> None:
                 os.unlink(f.name)
         except Exception as e:
             logger.debug("Failed to clean up temp file %s: %s", f.name, e)
+
 
 atexit.register(_cleanup_temp_files)
 
@@ -139,7 +141,9 @@ def _init_nornir_from_topo(topo_file: str, cert_file: Optional[str] = None) -> N
         }
     }
     if cert_file:
-        groups["srl"]["connection_options"]["srlinux"]["extras"]["path_cert"] = cert_file
+        groups["srl"]["connection_options"]["srlinux"]["extras"][
+            "path_cert"
+        ] = cert_file
 
     hosts_f = tempfile.NamedTemporaryFile("w+", suffix=".yml", delete=False)
     yaml.safe_dump(hosts, hosts_f)
@@ -219,11 +223,17 @@ def _extract_report_data(
                     k: v
                     for k, v in item.items()
                     if isinstance(v, (str, int, float))
-                    or (isinstance(v, list) and len(v) > 0 and not isinstance(v[0], dict))
+                    or (
+                        isinstance(v, list)
+                        and len(v) > 0
+                        and not isinstance(v[0], dict)
+                    )
                 }
                 node_name = node.hostname if node and node.hostname else host
                 nested_lists = [
-                    (k, v) for k, v in item.items() if isinstance(v, list) and v and isinstance(v[0], dict)
+                    (k, v)
+                    for k, v in item.items()
+                    if isinstance(v, list) and v and isinstance(v[0], dict)
                 ]
                 if not nested_lists:
                     if _pass_filter(common, field_filter):
@@ -235,7 +245,11 @@ def _extract_report_data(
                                 k: v
                                 for k, v in sub_item.items()
                                 if isinstance(v, (str, int, float))
-                                or (isinstance(v, list) and len(v) > 0 and not isinstance(v[0], dict))
+                                or (
+                                    isinstance(v, list)
+                                    and len(v) > 0
+                                    and not isinstance(v[0], dict)
+                                )
                             }
                             merged = {**common, **sub_row}
                             if _pass_filter(merged, field_filter):
@@ -832,11 +846,13 @@ def main() -> None:
         ),
     )
     parser.add_argument(
-        "--topo-file", "-t",
+        "--topo-file",
+        "-t",
         help="Containerlab topology file (mutually exclusive with --config-file)",
     )
     parser.add_argument(
-        "--config-file", "-c",
+        "--config-file",
+        "-c",
         help="Nornir config file (mutually exclusive with --topo-file)",
     )
     parser.add_argument(
@@ -844,7 +860,8 @@ def main() -> None:
         help="TLS certificate file for containerlab",
     )
     parser.add_argument(
-        "--inv-filter", "-i",
+        "--inv-filter",
+        "-i",
         action="append",
         help="Inventory filter in key=value format (can be repeated)",
     )
@@ -895,7 +912,9 @@ def main() -> None:
 
     # Run server
     if args.transport == "http":
-        mcp.run(transport="streamable-http", host=args.host, port=args.port)
+        mcp.settings.host = args.host
+        mcp.settings.port = args.port
+        mcp.run(transport="streamable-http")
     else:
         mcp.run(transport="stdio")
 

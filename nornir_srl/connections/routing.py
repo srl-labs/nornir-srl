@@ -462,9 +462,7 @@ class RoutingMixin:
                     )
                 if resolving_route:
                     tmp_map[nh["index"]].update(
-                        {
-                            "resolving-route": resolving_route.get("ip-prefix")
-                        }
+                        {"resolving-route": resolving_route.get("ip-prefix")}
                     )
 
             nh_mapping.update({ni["name"]: tmp_map})
@@ -533,10 +531,12 @@ class RoutingMixin:
                         else:
                             nh_ni = ni["name"]
                         route["_next-hop"] = [
-                            nh.get("resolving-route") + " (indirect)"
-                            if nh.get("type") == "indirect"
-                            and nh.get("resolving-route")
-                            else nh.get("ip-address")
+                            (
+                                nh.get("resolving-route") + " (indirect)"
+                                if nh.get("type") == "indirect"
+                                and nh.get("resolving-route")
+                                else nh.get("ip-address")
+                            )
                             for nh in nhgroup_mapping[nh_ni].get(
                                 route["next-hop-group"], {}
                             )
@@ -618,7 +618,11 @@ class RoutingMixin:
         for ni_name, routes in static_routes_data.items():
             for route in routes:
                 nh_group_name = route.get("next-hop-group")
-                nhops = nh_mapping.get(ni_name, {}).get(nh_group_name, [])
+                nhops = (
+                    nh_mapping.get(ni_name, {}).get(nh_group_name, [])
+                    if nh_group_name
+                    else []
+                )
 
                 processed_routes.append(
                     {

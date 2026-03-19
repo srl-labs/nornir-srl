@@ -65,7 +65,11 @@ class GnmiPath:
 
 
 class SrLinux(
-    NetworkInstanceMixin, RoutingMixin, Layer2Mixin, NeighborDiscoveryMixin, SystemMixin,
+    NetworkInstanceMixin,
+    RoutingMixin,
+    Layer2Mixin,
+    NeighborDiscoveryMixin,
+    SystemMixin,
     InterfaceStatsMixin,
 ):
     def open(
