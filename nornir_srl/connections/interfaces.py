@@ -52,21 +52,34 @@ class NetworkInstanceMixin:
 
             for inst in bgp_instances:
                 rt_cfg = inst.get("route-target", {})
-                import_rt = rt_cfg.get("import-rt", [])
-                if isinstance(import_rt, (str, dict)):
-                    import_rt = [import_rt]
-                for rt in import_rt:
-                    target = rt.get("target") if isinstance(rt, dict) else rt
-                    if target:
-                        in_rts.append(target.replace("target:", ""))
+                
+                if inst.get("import-policy"):
+                    imp_pol = inst.get("import-policy")
+                    if isinstance(imp_pol, str):
+                        imp_pol = [imp_pol]
+                    in_rts.extend(imp_pol)
+                else:
+                    import_rt = rt_cfg.get("import-rt", [])
+                    if isinstance(import_rt, (str, dict)):
+                        import_rt = [import_rt]
+                    for rt in import_rt:
+                        target = rt.get("target") if isinstance(rt, dict) else rt
+                        if target:
+                            in_rts.append(target.replace("target:", ""))
 
-                export_rt = rt_cfg.get("export-rt", [])
-                if isinstance(export_rt, (str, dict)):
-                    export_rt = [export_rt]
-                for rt in export_rt:
-                    target = rt.get("target") if isinstance(rt, dict) else rt
-                    if target:
-                        out_rts.append(target.replace("target:", ""))
+                if inst.get("export-policy"):
+                    exp_pol = inst.get("export-policy")
+                    if isinstance(exp_pol, str):
+                        exp_pol = [exp_pol]
+                    out_rts.extend(exp_pol)
+                else:
+                    export_rt = rt_cfg.get("export-rt", [])
+                    if isinstance(export_rt, (str, dict)):
+                        export_rt = [export_rt]
+                    for rt in export_rt:
+                        target = rt.get("target") if isinstance(rt, dict) else rt
+                        if target:
+                            out_rts.append(target.replace("target:", ""))
             ni["In-RT"] = ", ".join(sorted(list(set(in_rts))))
             ni["Out-RT"] = ", ".join(sorted(list(set(out_rts))))
 
