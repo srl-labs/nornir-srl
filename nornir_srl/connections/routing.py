@@ -573,6 +573,20 @@ class RoutingMixin:
         res = jmespath.search(path_spec["jmespath"], resp[0])
         return {"ip_rib": res}
 
+    def get_routing_policies(self) -> Dict[str, Any]:
+        """
+        Get routing policies from /routing-policy
+        """
+        paths = ["/routing-policy"]
+        resp = self.get(paths=paths, datatype="config")
+        
+        policies = []
+        for item in resp:
+            if "routing-policy" in item:
+                policies.append(item["routing-policy"])
+        
+        return {"routing_pol": policies}
+
     def get_static_routes(self, network_instance: str = "*") -> Dict[str, Any]:
         """
         Get static routes from /network-instance/static-routes.
