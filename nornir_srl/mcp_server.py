@@ -434,7 +434,9 @@ def show_topology() -> str:
     return json.dumps(
         {
             "node_count": len(nodes),
-            "available_inv_filter_keys": sorted(all_label_keys) if all_label_keys else [],
+            "available_inv_filter_keys": (
+                sorted(all_label_keys) if all_label_keys else []
+            ),
             "hint": (
                 "Use these keys in inv_filter (e.g. 'role=leaf'). "
                 "If available_inv_filter_keys is empty, no labels are defined and inv_filter will match nothing."
@@ -905,6 +907,42 @@ def ipv6_neighbors(
 
     data = _run_report("nd", _task, i_filt, f_filt)
     return json.dumps(data, indent=2, default=str)
+
+
+@mcp.tool()
+def routing_policies(
+    inv_filter: Optional[str] = None,
+) -> str:
+    """Get routing policies configured on the node.
+
+    Returns the structured JSON response from /routing-policy.
+
+    Args:
+        inv_filter: Inventory filter as comma-separated key=value pairs. Supports wildcards.
+            Matches against node labels from the topology file. Omit if no labels are defined.
+    """
+    i_filt, _ = _parse_filters(inv_filter, None)
+
+    def _task(task: Task) -> Result:
+        device = task.host.get_connection(CONNECTION_NAME, task.nornir.config)
+        return Result(host=task.host, result=device.get_routing_policies())
+
+    nornir = get_nornir()
+    target = nornir.filter(**i_filt) if i_filt else nornir
+    result = target.run(task=_task, name="routing_pol", raise_on_error=False)
+
+    all_data = []
+    for host, host_result in result.items():
+        r = host_result[0]
+        node_name = r.host.hostname if r.host and r.host.hostname else host
+        if r.failed:
+            all_data.append({"Node": node_name, "_error": str(r.exception)})
+            continue
+        if r.result and r.result.get("routing_pol"):
+            for pol in r.result["routing_pol"]:
+                all_data.append({"Node": node_name, "routing-policy": pol})
+
+    return json.dumps(all_data, indent=2, default=str)
 
 
 # ---- CLI entry point ----
