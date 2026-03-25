@@ -858,22 +858,30 @@ def routing_pol(
     """Displays Routing Policies"""
 
     if ctx.obj["output"] == OutputFormat.TABLE:
-        typer.echo("Warning: routing-pol report only supports json or yaml output. Table format is not supported.", err=True)
+        typer.echo(
+            "Warning: routing-pol report only supports json or yaml output. Table format is not supported.",
+            err=True,
+        )
         raise typer.Exit(1)
 
     def _routing_pol(task: Task) -> Result:
         device = task.host.get_connection(CONNECTION_NAME, task.nornir.config)
         return Result(host=task.host, result=device.get_routing_policies())
 
-    result = ctx.obj["target"].run(task=_routing_pol, name="routing_pol", raise_on_error=False)
-    
+    result = ctx.obj["target"].run(
+        task=_routing_pol, name="routing_pol", raise_on_error=False
+    )
+
     # Extract raw data to print
     all_data = []
     for host, host_result in result.items():
         r: Result = host_result[0]
         node_name = r.host.hostname if r.host and r.host.hostname else host
         if r.failed:
-            typer.echo(f"Failed to get routing_pol for {host}. Exception: {r.exception}", err=True)
+            typer.echo(
+                f"Failed to get routing_pol for {host}. Exception: {r.exception}",
+                err=True,
+            )
             continue
         if r.result and r.result.get("routing_pol"):
             for pol in r.result["routing_pol"]:
@@ -888,7 +896,9 @@ def routing_pol(
     elif ctx.obj["output"] == OutputFormat.YAML:
         typer.echo(yaml.safe_dump(all_data, default_flow_style=False).rstrip())
     else:
-        typer.echo("Warning: routing-pol report only supports json or yaml output.", err=True)
+        typer.echo(
+            "Warning: routing-pol report only supports json or yaml output.", err=True
+        )
         raise typer.Exit(1)
 
 

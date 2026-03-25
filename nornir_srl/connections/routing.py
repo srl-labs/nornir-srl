@@ -579,12 +579,12 @@ class RoutingMixin:
         """
         paths = ["/routing-policy"]
         resp = self.get(paths=paths, datatype="config")
-        
+
         policies = []
         for item in resp:
             if "routing-policy" in item:
                 policies.append(item["routing-policy"])
-        
+
         return {"routing_pol": policies}
 
     def get_static_routes(self, network_instance: str = "*") -> Dict[str, Any]:

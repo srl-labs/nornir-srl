@@ -434,7 +434,9 @@ def show_topology() -> str:
     return json.dumps(
         {
             "node_count": len(nodes),
-            "available_inv_filter_keys": sorted(all_label_keys) if all_label_keys else [],
+            "available_inv_filter_keys": (
+                sorted(all_label_keys) if all_label_keys else []
+            ),
             "hint": (
                 "Use these keys in inv_filter (e.g. 'role=leaf'). "
                 "If available_inv_filter_keys is empty, no labels are defined and inv_filter will match nothing."
@@ -928,7 +930,7 @@ def routing_policies(
     nornir = get_nornir()
     target = nornir.filter(**i_filt) if i_filt else nornir
     result = target.run(task=_task, name="routing_pol", raise_on_error=False)
-    
+
     all_data = []
     for host, host_result in result.items():
         r = host_result[0]

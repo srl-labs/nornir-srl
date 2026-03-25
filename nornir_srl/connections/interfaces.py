@@ -52,7 +52,7 @@ class NetworkInstanceMixin:
 
             for inst in bgp_instances:
                 rt_cfg = inst.get("route-target", {})
-                
+
                 if inst.get("import-policy"):
                     imp_pol = inst.get("import-policy")
                     if isinstance(imp_pol, str):
