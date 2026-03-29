@@ -258,9 +258,9 @@ Usage: fcli bgp-rib [OPTIONS]
   Displays BGP RIB
 
 Options:
-  -f, --field-filter TEXT       filter fields with <field-name>=<glob-
+  -f, --field-filter TEXT       filter fields with <field-name>=<regex-
                                 pattern>, e.g. -f state=up -f
-                                admin_state="ena*". Fieldnames correspond to
+                                admin_state="ena.*". Fieldnames correspond to
                                 column names of a report
   -r, --route-fam [evpn|ipv4]   Route family for BGP RIB  [required]
   -t, --route-type [1|2|3|4|5]  Route type for EVPN routes
@@ -272,7 +272,7 @@ Options:
 Optionally, you can specify filters to control the output. There are 2 types of filters:
 
 - inventory filters, specified with the global `-i` option, filter on the inventory, e.g. `-i hostname=clab-4l2s-l1`  or `-i role=leaf` based on inventory data
-- field filters, specified with the report-specific `-f` option. This filters based on the fields shown in the report and a glob pattern, e.g. `-f state="esta*"`. Multiple field filters can be specified by repeated `-f` options
+- field filters, specified with the report-specific `-f` option. This filters based on the fields shown in the report and a regex pattern, e.g. `-f state="esta.*"`. Multiple field filters can be specified by repeated `-f` options
 - report-specific options are options specific to a report, if applicable. Currently, the only report that needs extra arguments is 'bgp-rib', i.e. `route_fam=evpn|ipv4|ipv6` and `route_type=1|2|3|4|5`. The latter relates to EVPN route-trypes and is optional. Defaults to '2' (mac-ip-routes). 
 
 ## Examples

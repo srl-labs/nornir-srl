@@ -1,5 +1,5 @@
 import csv
-import fnmatch
+import re
 import io
 import json
 import sys
@@ -99,7 +99,7 @@ def _pass_filter(row, filter):
             k: v
             for k, v in row.items()
             if filter.get(str(k).lower())
-            and fnmatch.fnmatch(str(row[k]), str(filter[str(k).lower()]))
+            and re.search(str(filter[str(k).lower()]), str(row[k]), re.IGNORECASE)
         }
     ) < len(filter):
         return False
@@ -267,7 +267,7 @@ def print_table(
                 k: v
                 for k, v in row.items()
                 if filter.get(str(k).lower())
-                and fnmatch.fnmatch(str(row[k]), str(filter[str(k).lower()]))
+                and re.search(str(filter[str(k).lower()]), str(row[k]), re.IGNORECASE)
             }
         ) < len(filter):
             return False

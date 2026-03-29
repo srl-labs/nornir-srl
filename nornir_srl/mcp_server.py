@@ -194,7 +194,7 @@ def _extract_report_data(
     field_filter: Optional[Dict[str, str]] = None,
 ) -> List[Dict[str, Any]]:
     """Extract structured data from AggregatedResult, returning list of row dicts."""
-    import fnmatch
+    import re
 
     rows: List[Dict[str, Any]] = []
 
@@ -206,7 +206,7 @@ def _extract_report_data(
             1
             for k, v in row.items()
             if filt_lower.get(str(k).lower())
-            and fnmatch.fnmatch(str(v), str(filt_lower[str(k).lower()]))
+            and re.search(str(filt_lower[str(k).lower()]), str(v), re.IGNORECASE)
         )
         return matched >= len(filt_lower)
 
@@ -315,7 +315,8 @@ mcp = FastMCP(
         "Use 'show_topology' first to see available nodes and their filterable label keys before applying inv_filter. "
         "If no labels are available, omit inv_filter to target all nodes. "
         "FIELD FILTERS (field_filter): use field_filter to filter output rows (e.g. 'session-state=established'). "
-        "Both filters support wildcards (*, ?) and accept comma-separated key=value pairs. "
+        "field_filter values are regex patterns matched case-insensitively against field values. "
+        "inv_filter supports wildcards (*, ?). Both accept comma-separated key=value pairs. "
         "Topologies can be loaded at runtime using 'load_topology' or 'load_config'."
     ),
 )
@@ -466,7 +467,7 @@ def sys_info(
         inv_filter: Inventory filter as comma-separated key=value pairs (e.g. 'role=leaf,site=dc1'). Supports wildcards.
             Matches against node labels from the topology file. Use 'show_topology' to see available keys.
             If no labels exist, omit this to target all nodes.
-        field_filter: Field filter as comma-separated key=value pairs to filter output rows. Supports wildcards.
+        field_filter: Field filter as comma-separated key=value pairs to filter output rows. Supports regex.
     """
     i_filt, f_filt = _parse_filters(inv_filter, field_filter)
 
@@ -492,7 +493,7 @@ def bgp_peers(
         inv_filter: Inventory filter as comma-separated key=value pairs (e.g. 'role=spine'). Supports wildcards.
             Matches against node labels from the topology file. Use 'show_topology' to see available keys.
             If no labels exist, omit this to target all nodes.
-        field_filter: Field filter as comma-separated key=value pairs (e.g. 'session-state=established'). Supports wildcards.
+        field_filter: Field filter as comma-separated key=value pairs (e.g. 'session-state=established'). Supports regex.
     """
     i_filt, f_filt = _parse_filters(inv_filter, field_filter)
 
@@ -519,7 +520,7 @@ def bgp_rib(
             1=Ethernet Auto-Discovery, 2=MAC/IP, 3=Inclusive Multicast, 4=ES, 5=IP Prefix.
         inv_filter: Inventory filter as comma-separated key=value pairs. Supports wildcards.
             Matches against node labels from the topology file. Omit if no labels are defined.
-        field_filter: Field filter as comma-separated key=value pairs. Supports wildcards.
+        field_filter: Field filter as comma-separated key=value pairs. Supports regex.
     """
     i_filt, f_filt = _parse_filters(inv_filter, field_filter)
 
@@ -548,7 +549,7 @@ def ipv4_rib(
         address: Optional IP address for longest-prefix-match (LPM) lookup (e.g. '10.0.0.1').
         inv_filter: Inventory filter as comma-separated key=value pairs. Supports wildcards.
             Matches against node labels from the topology file. Omit if no labels are defined.
-        field_filter: Field filter as comma-separated key=value pairs. Supports wildcards.
+        field_filter: Field filter as comma-separated key=value pairs. Supports regex.
     """
     i_filt, f_filt = _parse_filters(inv_filter, field_filter)
 
@@ -577,7 +578,7 @@ def ipv6_rib(
         address: Optional IPv6 address for longest-prefix-match (LPM) lookup.
         inv_filter: Inventory filter as comma-separated key=value pairs. Supports wildcards.
             Matches against node labels from the topology file. Omit if no labels are defined.
-        field_filter: Field filter as comma-separated key=value pairs. Supports wildcards.
+        field_filter: Field filter as comma-separated key=value pairs. Supports regex.
     """
     i_filt, f_filt = _parse_filters(inv_filter, field_filter)
 
@@ -604,7 +605,7 @@ def static_routes(
     Args:
         inv_filter: Inventory filter as comma-separated key=value pairs. Supports wildcards.
             Matches against node labels from the topology file. Omit if no labels are defined.
-        field_filter: Field filter as comma-separated key=value pairs. Supports wildcards.
+        field_filter: Field filter as comma-separated key=value pairs. Supports regex.
     """
     i_filt, f_filt = _parse_filters(inv_filter, field_filter)
 
@@ -629,7 +630,7 @@ def network_instances(
     Args:
         inv_filter: Inventory filter as comma-separated key=value pairs. Supports wildcards.
             Matches against node labels from the topology file. Omit if no labels are defined.
-        field_filter: Field filter as comma-separated key=value pairs. Supports wildcards.
+        field_filter: Field filter as comma-separated key=value pairs. Supports regex.
     """
     i_filt, f_filt = _parse_filters(inv_filter, field_filter)
 
@@ -654,7 +655,7 @@ def subinterfaces(
     Args:
         inv_filter: Inventory filter as comma-separated key=value pairs. Supports wildcards.
             Matches against node labels from the topology file. Omit if no labels are defined.
-        field_filter: Field filter as comma-separated key=value pairs. Supports wildcards.
+        field_filter: Field filter as comma-separated key=value pairs. Supports regex.
     """
     i_filt, f_filt = _parse_filters(inv_filter, field_filter)
 
@@ -678,7 +679,7 @@ def lag(
     Args:
         inv_filter: Inventory filter as comma-separated key=value pairs. Supports wildcards.
             Matches against node labels from the topology file. Omit if no labels are defined.
-        field_filter: Field filter as comma-separated key=value pairs. Supports wildcards.
+        field_filter: Field filter as comma-separated key=value pairs. Supports regex.
     """
     i_filt, f_filt = _parse_filters(inv_filter, field_filter)
 
@@ -703,7 +704,7 @@ def lldp_neighbors(
     Args:
         inv_filter: Inventory filter as comma-separated key=value pairs. Supports wildcards.
             Matches against node labels from the topology file. Omit if no labels are defined.
-        field_filter: Field filter as comma-separated key=value pairs. Supports wildcards.
+        field_filter: Field filter as comma-separated key=value pairs. Supports regex.
     """
     i_filt, f_filt = _parse_filters(inv_filter, field_filter)
 
@@ -727,7 +728,7 @@ def mac_table(
     Args:
         inv_filter: Inventory filter as comma-separated key=value pairs. Supports wildcards.
             Matches against node labels from the topology file. Omit if no labels are defined.
-        field_filter: Field filter as comma-separated key=value pairs. Supports wildcards.
+        field_filter: Field filter as comma-separated key=value pairs. Supports regex.
     """
     i_filt, f_filt = _parse_filters(inv_filter, field_filter)
 
@@ -752,7 +753,7 @@ def irb_interfaces(
     Args:
         inv_filter: Inventory filter as comma-separated key=value pairs. Supports wildcards.
             Matches against node labels from the topology file. Omit if no labels are defined.
-        field_filter: Field filter as comma-separated key=value pairs. Supports wildcards.
+        field_filter: Field filter as comma-separated key=value pairs. Supports regex.
     """
     i_filt, f_filt = _parse_filters(inv_filter, field_filter)
 
@@ -777,7 +778,7 @@ def ethernet_segments(
     Args:
         inv_filter: Inventory filter as comma-separated key=value pairs. Supports wildcards.
             Matches against node labels from the topology file. Omit if no labels are defined.
-        field_filter: Field filter as comma-separated key=value pairs. Supports wildcards.
+        field_filter: Field filter as comma-separated key=value pairs. Supports regex.
     """
     i_filt, f_filt = _parse_filters(inv_filter, field_filter)
 
@@ -801,7 +802,7 @@ def es_destinations(
     Args:
         inv_filter: Inventory filter as comma-separated key=value pairs. Supports wildcards.
             Matches against node labels from the topology file. Omit if no labels are defined.
-        field_filter: Field filter as comma-separated key=value pairs. Supports wildcards.
+        field_filter: Field filter as comma-separated key=value pairs. Supports regex.
     """
     i_filt, f_filt = _parse_filters(inv_filter, field_filter)
 
@@ -826,7 +827,7 @@ def vxlan_tunnels(
     Args:
         inv_filter: Inventory filter as comma-separated key=value pairs. Supports wildcards.
             Matches against node labels from the topology file. Omit if no labels are defined.
-        field_filter: Field filter as comma-separated key=value pairs. Supports wildcards.
+        field_filter: Field filter as comma-separated key=value pairs. Supports regex.
     """
     i_filt, f_filt = _parse_filters(inv_filter, field_filter)
 
@@ -850,7 +851,7 @@ def arp_table(
     Args:
         inv_filter: Inventory filter as comma-separated key=value pairs. Supports wildcards.
             Matches against node labels from the topology file. Omit if no labels are defined.
-        field_filter: Field filter as comma-separated key=value pairs. Supports wildcards.
+        field_filter: Field filter as comma-separated key=value pairs. Supports regex.
     """
     i_filt, f_filt = _parse_filters(inv_filter, field_filter)
 
@@ -879,7 +880,7 @@ def ifstats(
         interval: Seconds between the two samples (default 5).
         inv_filter: Inventory filter as comma-separated key=value pairs. Supports wildcards.
             Matches against node labels from the topology file. Omit if no labels are defined.
-        field_filter: Field filter as comma-separated key=value pairs. Supports wildcards.
+        field_filter: Field filter as comma-separated key=value pairs. Supports regex.
     """
     i_filt, f_filt = _parse_filters(inv_filter, field_filter)
 
@@ -903,7 +904,7 @@ def ipv6_neighbors(
     Args:
         inv_filter: Inventory filter as comma-separated key=value pairs. Supports wildcards.
             Matches against node labels from the topology file. Omit if no labels are defined.
-        field_filter: Field filter as comma-separated key=value pairs. Supports wildcards.
+        field_filter: Field filter as comma-separated key=value pairs. Supports regex.
     """
     i_filt, f_filt = _parse_filters(inv_filter, field_filter)
 
