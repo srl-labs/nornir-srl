@@ -423,6 +423,12 @@ def main(
     cert_file: Optional[Path] = typer.Option(
         None, "--cert-file", exists=True, help="CLAB certificate file"
     ),
+    gnmi_port: int = typer.Option(
+        SRL_DEFAULT_GNMI_PORT,
+        "--gnmi-port",
+        "-p",
+        help="gNMI port for SR Linux nodes (default: 57400)",
+    ),
     log_level: LogLevel = typer.Option(
         LogLevel.ERROR, "--log-level", "-l", help="Set logging level"
     ),
@@ -501,7 +507,7 @@ def main(
                     "srlinux": {
                         "username": SRL_DEFAULT_USERNAME,
                         "password": SRL_DEFAULT_PASSWORD,
-                        "port": SRL_DEFAULT_GNMI_PORT,
+                        "port": gnmi_port,
                         "extras": {},
                     }
                 }

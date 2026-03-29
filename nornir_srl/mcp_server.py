@@ -78,7 +78,11 @@ def _cleanup_temp_files() -> None:
 atexit.register(_cleanup_temp_files)
 
 
-def _init_nornir_from_topo(topo_file: str, cert_file: Optional[str] = None) -> Nornir:
+def _init_nornir_from_topo(
+    topo_file: str,
+    cert_file: Optional[str] = None,
+    gnmi_port: int = SRL_DEFAULT_GNMI_PORT,
+) -> Nornir:
     """Initialize Nornir from a containerlab topology file."""
     with open(topo_file, "r") as f:
         topo = yaml.safe_load(os.path.expandvars(f.read()))
@@ -134,7 +138,7 @@ def _init_nornir_from_topo(topo_file: str, cert_file: Optional[str] = None) -> N
                 "srlinux": {
                     "username": SRL_DEFAULT_USERNAME,
                     "password": SRL_DEFAULT_PASSWORD,
-                    "port": SRL_DEFAULT_GNMI_PORT,
+                    "port": gnmi_port,
                     "extras": {},
                 }
             }
@@ -359,6 +363,7 @@ def load_topology(
     topo_file: str,
     cert_file: Optional[str] = None,
     inv_filter: Optional[str] = None,
+    gnmi_port: int = SRL_DEFAULT_GNMI_PORT,
 ) -> str:
     """Initialize or switch the active fabric from a containerlab topology file.
 
@@ -368,9 +373,10 @@ def load_topology(
         inv_filter: Optional inventory filter as comma-separated key=value pairs (e.g. 'role=leaf').
             Only keys defined in node 'labels:' in the topology file can be used.
             If labels are not defined on nodes, omit this parameter.
+        gnmi_port: gNMI port for SR Linux nodes (default: 57400). EDA-deployed labs typically use 57410.
     """
     global _nornir_instance
-    _nornir_instance = _init_nornir_from_topo(topo_file, cert_file)
+    _nornir_instance = _init_nornir_from_topo(topo_file, cert_file, gnmi_port)
 
     all_label_keys: set = set()
     for host in _nornir_instance.inventory.hosts.values():
