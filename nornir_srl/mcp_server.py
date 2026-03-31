@@ -824,6 +824,10 @@ def vxlan_tunnels(
     Returns VXLAN interface name, associated network instance, ingress-vni,
     and unicast destinations (vtep-address, vni).
 
+    Note: unicast destinations are populated by receipt of EVPN type-2 (MAC/IP) routes,
+    which typically requires actual traffic. If no destinations are shown, it means no
+    type-2 routes have been received for that VNI yet.
+
     Args:
         inv_filter: Inventory filter as comma-separated key=value pairs. Supports wildcards.
             Matches against node labels from the topology file. Omit if no labels are defined.
