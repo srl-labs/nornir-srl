@@ -595,7 +595,7 @@ class RoutingMixin:
             f"/network-instance[name={network_instance}]/static-routes",
             f"/network-instance[name={network_instance}]/next-hop-groups",
         ]
-        resp = self.get(paths=paths, datatype="state")
+        resp = self.get(paths=paths, datatype="all")
 
         # Map next-hop groups
         # nh_mapping[ni_name][group_name] = [ip1, ip2(R), ...]
