@@ -94,6 +94,25 @@ def diff_obj(a: Dict, a_name: str, b: Dict, b_name: str) -> Tuple[bool, str]:
         return (False, "")
 
 
+_ORDER_PREFIX_RE = re.compile(r"^\d+_")
+
+
+def clean_structured_key(key: Any) -> Any:
+    """Normalize a column/field name for structured (JSON/YAML/CSV) output.
+
+    Table reports prefix some field names with ``<n>_`` (e.g. ``0_st``,
+    ``1_peer``) purely to control column ordering, and embed newlines in
+    multi-line headers (e.g. ``"AF: EVPN\\nRx/Act/Tx"``). Neither is relevant
+    for machine-readable output, so strip the ordering prefix and collapse
+    whitespace/newlines for non-table formats.
+    """
+    if not isinstance(key, str):
+        return key
+    cleaned = _ORDER_PREFIX_RE.sub("", key)
+    cleaned = re.sub(r"\s+", " ", cleaned.replace("\n", " ")).strip()
+    return cleaned
+
+
 def filter_fields(d: Dict, *fields: str) -> Dict:
     return {k: v for k, v in d.items() if k in [f.replace("_", "-") for f in fields]}
 

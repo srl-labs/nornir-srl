@@ -22,6 +22,7 @@ from nornir.core.task import Result, Task, AggregatedResult
 from nornir.core.inventory import Host
 
 from .connections.srlinux import CONNECTION_NAME
+from .connections.helpers import clean_structured_key
 from .utils.logging_config import setup_logging
 from . import __version__
 
@@ -188,6 +189,9 @@ def print_structured(
     if not rows:
         typer.echo("No data...")
         return
+
+    col_names = [clean_structured_key(c) for c in col_names]
+    rows = [{clean_structured_key(k): v for k, v in row.items()} for row in rows]
 
     all_cols = ["Node"] + col_names
 
@@ -702,6 +706,20 @@ def static_routes(
 
 
 @app.command()
+def tunnel_table(
+    ctx: typer.Context,
+    field_filter: Optional[List[str]] = typer.Option(None, "--field-filter", "-f"),
+) -> None:
+    """Displays the IP tunnel-table (LDP, SR-ISIS, RSVP, VXLAN, ...)"""
+
+    def _tunnel(task: Task) -> Result:
+        device = task.host.get_connection(CONNECTION_NAME, task.nornir.config)
+        return Result(host=task.host, result=device.get_tunnel_table())
+
+    run_show(ctx, "tunnel_table", _tunnel, field_filter, title="Tunnel Table")
+
+
+@app.command()
 def bgp_rib(
     ctx: typer.Context,
     route_fam: str = typer.Option(
@@ -710,13 +728,22 @@ def bgp_rib(
     route_type: Optional[str] = typer.Option(
         None, "--route-type", "-t", help="Route type for EVPN"
     ),
+    detail: bool = typer.Option(
+        False,
+        "--detail",
+        "-d",
+        help="Include all path attributes (communities, SoO, D-PATH, tunnel-encap, "
+        "status). Automatically enabled for non-table output (json/yaml/csv).",
+    ),
     field_filter: Optional[List[str]] = typer.Option(None, "--field-filter", "-f"),
 ) -> None:
     """Displays BGP RIB"""
 
+    want_detail = detail or ctx.obj["output"] != OutputFormat.TABLE
+
     def _bgp_rib(task: Task) -> Result:
         device = task.host.get_connection(CONNECTION_NAME, task.nornir.config)
-        kwargs = {"route_fam": route_fam}
+        kwargs: Dict[str, Any] = {"route_fam": route_fam, "detail": want_detail}
         if route_type is not None:
             kwargs["route_type"] = route_type
         return Result(host=task.host, result=device.get_bgp_rib(**kwargs))

@@ -26,6 +26,7 @@ class RoutingMixin:
         route_fam: str,
         route_type: Optional[str] = "2",
         network_instance: str = "*",
+        detail: bool = False,
     ) -> Dict[str, Any]:
         BGP_RIB_MOD = "bgp-rib"
         BGP_RIB_MOD2 = "urn:nokia.com:srlinux:bgp:rib-bgp"
@@ -123,6 +124,46 @@ class RoutingMixin:
                             if "esi-label:" in x_comm
                         ]
                     )
+                    ext_comms = d.get("communities", {}).get("ext-community", [])
+                    # Site-of-Origin (SoO) carried as origin: ext-community
+                    d["_soo"] = ", ".join(
+                        [c.split("origin:")[1] for c in ext_comms if "origin:" in c]
+                    )
+                    # BGP tunnel-encap ext-community (e.g. VXLAN / MPLS)
+                    d["_tunnel_encap"] = ", ".join(
+                        [
+                            c.split("bgp-tunnel-encap:")[1]
+                            for c in ext_comms
+                            if "bgp-tunnel-encap:" in c
+                        ]
+                    )
+                    # Standard + large communities (RT/SoO/encap live in ext-comm)
+                    std_comms = d.get("communities", {}).get("community", []) or []
+                    large_comms = (
+                        d.get("communities", {}).get("large-community", []) or []
+                    )
+                    d["_communities"] = ", ".join(
+                        [str(c) for c in list(std_comms) + list(large_comms)]
+                    )
+                    # D-PATH (BGP domain-path) - collect all domain-ids in order
+                    dpath_ids: List[str] = []
+
+                    def _collect_domain_ids(obj: Any) -> None:
+                        if isinstance(obj, dict):
+                            for k, v in obj.items():
+                                if k == "domain-id":
+                                    if isinstance(v, list):
+                                        dpath_ids.extend(str(x) for x in v)
+                                    else:
+                                        dpath_ids.append(str(v))
+                                else:
+                                    _collect_domain_ids(v)
+                        elif isinstance(obj, list):
+                            for item in obj:
+                                _collect_domain_ids(item)
+
+                    _collect_domain_ids(d.get("domain-path", {}))
+                    d["_dpath"] = " ".join(dpath_ids)
                     return d
                 else:
                     return {k: augment_routes(v, attribs) for k, v in d.items()}
@@ -235,25 +276,57 @@ class RoutingMixin:
             },
         }
 
+        # Extra path-attribute fields appended to the per-route projection when
+        # detail=True. These are only added to structured (json/yaml) output so
+        # the table report stays lean. Keys are unique vs. the lean projections.
+        EXTRA_ATTRS_EVPN = (
+            'communities:"_communities", soo:"_soo", '
+            '"tunnel-encap":"_tunnel_encap", dpath:"_dpath", '
+            'valid:"valid-route", best:"best-route", used:"used-route", '
+            '"tie-break":"tie-break-reason", "internal-tags":"internal-tags", '
+            '"neighbor-as":"neighbor-as"'
+        )
+        EXTRA_ATTRS_IP = (
+            'soo:"_soo", "tunnel-encap":"_tunnel_encap", dpath:"_dpath", '
+            'valid:"valid-route", best:"best-route", used:"used-route", '
+            '"tie-break":"tie-break-reason", "internal-tags":"internal-tags", '
+            '"neighbor-as":"neighbor-as"'
+        )
+
+        def _with_detail(attrs: str, extra: str) -> str:
+            # The per-route projection ends with '}}' (closing the route dict and
+            # the enclosing NI dict). Inject extra fields into the route dict.
+            if detail and attrs.endswith("}}"):
+                return attrs[:-2] + ", " + extra + "}}"
+            return attrs
+
+        evpn_attrs = _with_detail(
+            RIB_EVPN_PATH_VERSIONS[evpn_path_version]["RIB_EVPN_JMESPATH_ATTRS"][
+                route_type
+            ],
+            EXTRA_ATTRS_EVPN,
+        )
+        ip_jmespath = _with_detail(
+            RIB_IP_PATH_VERSIONS[ip_path_version]["RIB_IP_JMESPATH"], EXTRA_ATTRS_IP
+        )
+
         PATH_SPECS = {
             "evpn": {
                 "path": RIB_EVPN_PATH_VERSIONS[evpn_path_version]["RIB_EVPN_PATH"],
                 "jmespath": RIB_EVPN_PATH_VERSIONS[evpn_path_version][
                     "RIB_EVPN_JMESPATH_COMMON"
                 ]
-                + RIB_EVPN_PATH_VERSIONS[evpn_path_version]["RIB_EVPN_JMESPATH_ATTRS"][
-                    route_type
-                ],
+                + evpn_attrs,
                 "datatype": "state",
             },
             "ipv4": {
                 "path": RIB_IP_PATH_VERSIONS[ip_path_version]["RIB_IP_PATH"],
-                "jmespath": RIB_IP_PATH_VERSIONS[ip_path_version]["RIB_IP_JMESPATH"],
+                "jmespath": ip_jmespath,
                 "datatype": "state",
             },
             "ipv6": {
                 "path": RIB_IP_PATH_VERSIONS[ip_path_version]["RIB_IP_PATH"],
-                "jmespath": RIB_IP_PATH_VERSIONS[ip_path_version]["RIB_IP_JMESPATH"],
+                "jmespath": ip_jmespath,
                 "datatype": "state",
             },
         }
@@ -572,6 +645,95 @@ class RoutingMixin:
 
         res = jmespath.search(path_spec["jmespath"], resp[0])
         return {"ip_rib": res}
+
+    def get_tunnel_table(self, network_instance: str = "*") -> Dict[str, Any]:
+        """Get the IP tunnel-table (LDP, SR-ISIS, RSVP, VXLAN, ...).
+
+        Resolves each tunnel's next-hop-group to the egress subinterface,
+        next-hop IP and pushed MPLS label-stack, mirroring the next-hop
+        resolution used by :meth:`get_rib`. Returns flat rows with the fields
+        required to verify transport/forwarding paths in tests.
+        """
+        # Build next-hop and next-hop-group lookups (per network-instance).
+        nhs = self.get(
+            paths=[
+                f"/network-instance[name={network_instance}]/route-table/next-hop[index=*]"
+            ],
+            datatype="state",
+        )
+        nhgroups = self.get(
+            paths=[
+                f"/network-instance[name={network_instance}]/route-table/next-hop-group[index=*]"
+            ],
+            datatype="state",
+        )
+
+        nh_mapping: Dict[str, Dict[str, Dict[str, Any]]] = {}
+        for ni in nhs[0].get("network-instance", []):
+            tmp_map: Dict[str, Dict[str, Any]] = {}
+            for nh in ni.get("route-table", {}).get("next-hop", []):
+                label_stack = nh.get("mpls-encapsulation", {}).get(
+                    "pushed-mpls-label-stack"
+                ) or nh.get("mpls", {}).get("pushed-mpls-label-stack")
+                tmp_map[nh["index"]] = {
+                    "ip-address": nh.get("ip-address"),
+                    "subinterface": nh.get("subinterface"),
+                    "type": nh.get("type"),
+                    "labels": label_stack,
+                }
+            nh_mapping[ni["name"]] = tmp_map
+
+        nhgroup_mapping: Dict[str, Dict[str, List[Dict[str, Any]]]] = {}
+        for ni in nhgroups[0].get("network-instance", []):
+            ni_name = ni["name"]
+            nh_map: Dict[str, List[Dict[str, Any]]] = {}
+            for nhgroup in ni.get("route-table", {}).get("next-hop-group", []):
+                nh_map[nhgroup["index"]] = [
+                    nh_mapping.get(ni_name, {}).get(nh.get("next-hop"), {})
+                    for nh in nhgroup.get("next-hop", [])
+                ]
+            nhgroup_mapping[ni_name] = nh_map
+
+        resp = self.get(
+            paths=[f"/network-instance[name={network_instance}]/tunnel-table"],
+            datatype="state",
+        )
+
+        rows: List[Dict[str, Any]] = []
+        for ni in resp[0].get("network-instance", []):
+            ni_name = ni["name"]
+            tunnel_table = ni.get("tunnel-table", {})
+            for afi in ("ipv4", "ipv6"):
+                prefix_key = "ipv4-prefix" if afi == "ipv4" else "ipv6-prefix"
+                for tunnel in tunnel_table.get(afi, {}).get("tunnel", []):
+                    nhg_index = tunnel.get("next-hop-group")
+                    resolved = nhgroup_mapping.get(ni_name, {}).get(nhg_index, [])
+                    next_hops = [
+                        nh.get("ip-address") for nh in resolved if nh.get("ip-address")
+                    ]
+                    egress_itfs = [
+                        nh.get("subinterface")
+                        for nh in resolved
+                        if nh.get("subinterface")
+                    ]
+                    labels = [
+                        str(lbl) for nh in resolved for lbl in (nh.get("labels") or [])
+                    ]
+                    rows.append(
+                        {
+                            "NI": ni_name,
+                            "Prefix": tunnel.get(prefix_key),
+                            "type": tunnel.get("type"),
+                            "owner": tunnel.get("owner"),
+                            "pref": tunnel.get("preference"),
+                            "metric": tunnel.get("metric"),
+                            "next-hop": next_hops,
+                            "egress-itf": egress_itfs,
+                            "label": labels,
+                        }
+                    )
+
+        return {"tunnel_table": rows}
 
     def get_routing_policies(self) -> Dict[str, Any]:
         """
