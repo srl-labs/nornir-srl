@@ -36,6 +36,7 @@ from nornir.core import Nornir
 from nornir.core.task import Result, Task
 
 from .connections.srlinux import CONNECTION_NAME
+from .connections.helpers import clean_structured_key
 
 logger = logging.getLogger(__name__)
 
@@ -258,7 +259,7 @@ def _extract_report_data(
                             merged = {**common, **sub_row}
                             if _pass_filter(merged, field_filter):
                                 rows.append({"Node": node_name, **merged})
-    return rows
+    return [{clean_structured_key(k): v for k, v in row.items()} for row in rows]
 
 
 def _run_report(
@@ -514,6 +515,12 @@ def bgp_rib(
 ) -> str:
     """Get BGP RIB (Routing Information Base) entries.
 
+    Returns the full set of path attributes for each route, including standard
+    communities, Site-of-Origin (soo), BGP domain-path (dpath), tunnel-encap
+    extended-community, route-target (RT), as-path, next-hop, and route status
+    (valid/best/used, tie-break reason, internal-tags). Useful for diagnosing
+    EVPN/IP-VPN loop-prevention and route-leaking issues.
+
     Args:
         route_fam: Route family - one of 'evpn', 'ipv4', 'ipv6'.
         route_type: Route type for EVPN (1-5). Only applicable when route_fam='evpn'.
@@ -526,7 +533,7 @@ def bgp_rib(
 
     def _task(task: Task) -> Result:
         device = task.host.get_connection(CONNECTION_NAME, task.nornir.config)
-        kwargs: Dict[str, Any] = {"route_fam": route_fam}
+        kwargs: Dict[str, Any] = {"route_fam": route_fam, "detail": True}
         if route_type is not None:
             kwargs["route_type"] = route_type
         return Result(host=task.host, result=device.get_bgp_rib(**kwargs))
@@ -614,6 +621,33 @@ def static_routes(
         return Result(host=task.host, result=device.get_static_routes())
 
     data = _run_report("static_routes", _task, i_filt, f_filt)
+    return json.dumps(data, indent=2, default=str)
+
+
+@mcp.tool()
+def tunnel_table(
+    inv_filter: Optional[str] = None,
+    field_filter: Optional[str] = None,
+) -> str:
+    """Get the IP tunnel-table from /network-instance[name=*]/tunnel-table.
+
+    Returns transport tunnels (LDP, SR-ISIS, RSVP, VXLAN, ...) with the
+    resolved egress interface, next-hop IP, pushed MPLS label-stack, tunnel
+    type, owner, metric and preference. Useful for verifying which transport
+    a remote endpoint (e.g. a loopback) is reached over, and on which port.
+
+    Args:
+        inv_filter: Inventory filter as comma-separated key=value pairs. Supports wildcards.
+            Matches against node labels from the topology file. Omit if no labels are defined.
+        field_filter: Field filter as comma-separated key=value pairs (e.g. 'type=ldp'). Supports regex.
+    """
+    i_filt, f_filt = _parse_filters(inv_filter, field_filter)
+
+    def _task(task: Task) -> Result:
+        device = task.host.get_connection(CONNECTION_NAME, task.nornir.config)
+        return Result(host=task.host, result=device.get_tunnel_table())
+
+    data = _run_report("tunnel_table", _task, i_filt, f_filt)
     return json.dumps(data, indent=2, default=str)
 
 
@@ -876,9 +910,12 @@ def ifstats(
     """Get per-interface traffic rates (in/out bps) computed from two consecutive gNMI samples.
 
     Queries interface statistics twice with a configurable interval, then calculates
-    the delta to derive bits-per-second rates for each interface.
+    the delta to derive rates for each interface.
 
-    Returns interface name, in-bps, out-bps, in-Kbps, out-Kbps, in-Mbps, out-Mbps.
+    Returns per interface: in-Kbps/out-Kbps (rate over the interval), in-err/out-err
+    and in-disc/out-disc (deltas), plus cumulative counters in-pkts/out-pkts and
+    in-octets/out-octets. Idle interfaces are included so raw counters are always
+    available.
 
     Args:
         interval: Seconds between the two samples (default 5).

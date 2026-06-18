@@ -53,14 +53,15 @@ Options:
   --help                 Show this message and exit.
 
 Commands:
-  bgp-peers  Displays BGP Peers and their status
-  bgp-rib    Displays BGP RIB
-  ipv4-rib   Displays IPv4 RIB entries, LPM lookup
-  lldp       Displays LLDP Neighbors
-  mac        Displays MAC Table
-  ni         Displays Network Instances and interfaces
-  subif      Displays Sub-Interfaces of nodes
-  sys-info   Displays System Info of nodes
+  bgp-peers     Displays BGP Peers and their status
+  bgp-rib       Displays BGP RIB
+  ipv4-rib      Displays IPv4 RIB entries, LPM lookup
+  lldp          Displays LLDP Neighbors
+  mac           Displays MAC Table
+  ni            Displays Network Instances and interfaces
+  subif         Displays Sub-Interfaces of nodes
+  sys-info      Displays System Info of nodes
+  tunnel-table  Displays the IP tunnel-table (LDP, SR-ISIS, VXLAN, ...)
 ```
 
 # Installation
@@ -212,14 +213,15 @@ Options:
   --help                 Show this message and exit.
 
 Commands:
-  bgp-peers  Displays BGP Peers and their status
-  bgp-rib    Displays BGP RIB
-  ipv4-rib   Displays IPv4 RIB entries, LPM lookup
-  lldp       Displays LLDP Neighbors
-  mac        Displays MAC Table
-  ni         Displays Network Instances and interfaces
-  subif      Displays Sub-Interfaces of nodes
-  sys-info   Displays System Info of nodes
+  bgp-peers     Displays BGP Peers and their status
+  bgp-rib       Displays BGP RIB
+  ipv4-rib      Displays IPv4 RIB entries, LPM lookup
+  lldp          Displays LLDP Neighbors
+  mac           Displays MAC Table
+  ni            Displays Network Instances and interfaces
+  subif         Displays Sub-Interfaces of nodes
+  sys-info      Displays System Info of nodes
+  tunnel-table  Displays the IP tunnel-table (LDP, SR-ISIS, VXLAN, ...)
 ```
 
 To run a specific report, use the corresponding command, e.g. `fcli mac` to display the MAC table of all nodes in the inventory. The output is a table with columns relevant to the report.
@@ -400,6 +402,38 @@ Show all EVPN RT=2 routes for MAC address that starts with "1A:DC":
 | clab-4l2s-s2 | default | *>   | 01:24:24:24:24:24:24:00:00:01 | 0.0.0.0     | 1A:DC:0E:FF:00:41 | 192.168.255.2:202 | i       | 192.168.255.2 | igp    | 192.168.255.2   | 202 |
 | clab-4l2s-s2 | default | *>   | 01:24:24:24:24:24:24:00:00:01 | 10.200.1.10 | 1A:DC:0E:FF:00:41 | 192.168.255.2:202 | i       | 192.168.255.2 | igp    | 192.168.255.2   | 202 |
 +--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+```
+
+#### bgp-rib path attributes
+
+The `bgp-rib` table shows a curated set of priority fields so it stays readable.
+Non-table output (`-o json`, `-o yaml`, `-o csv`) and the MCP tool automatically
+include the full set of path attributes for each route: standard `communities`,
+Site-of-Origin (`soo`), BGP domain-path (`dpath`), `tunnel-encap` extended-community,
+route-target (`RT`), `as-path`, route status (`valid`/`best`/`used`), `tie-break`
+reason and `internal-tags`. Use `--detail`/`-d` to also include these columns in the
+table output.
+
+```
+fcli -o json bgp-rib -r evpn -t 5            # full attributes (json)
+fcli -d bgp-rib -r evpn -t 5                 # full attributes in the table too
+```
+
+### tunnel-table
+
+Show the IP tunnel-table with the resolved egress interface, next-hop and pushed
+MPLS label-stack. Useful to verify which transport (LDP, SR-ISIS, RSVP, VXLAN, ...)
+a remote endpoint is reached over, and on which port.
+
+`fcli tunnel-table -f type=ldp`
+
+```
+                                     Tunnel Table
++-----------------------------------------------------------------------------------------+
+| Node  | NI      | Prefix          | type | owner   | pref | metric | next-hop     | egress-itf        | label   |
+|-------+---------+-----------------+------+---------+------+--------+--------------+-------------------+---------|
+| dcgw1 | default | 192.0.2.152/32  | ldp  | ldp_mgr | 9    | 10     | ['10.255.0.1'] | ['ethernet-1/5.0'] | ['20000'] |
++-----------------------------------------------------------------------------------------+
 ```
 
 # MCP Server for AI Agents

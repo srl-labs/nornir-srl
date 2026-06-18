@@ -38,13 +38,15 @@ class InterfaceStatsMixin:
 
         dt = t2 - t1
 
-        # Build lookup: interface-name -> {in-octets, out-octets} for each sample
+        # Build lookup: interface-name -> counters for each sample
         def _parse(resp: List[Dict[str, Any]]) -> Dict[str, Dict[str, int]]:
             result: Dict[str, Dict[str, int]] = {}
             for itf in resp[0].get("interface", []):
                 name = itf.get("name", "")
                 stats = itf.get("statistics", {})
                 result[name] = {
+                    "in-packets": int(stats.get("in-packets", 0)),
+                    "out-packets": int(stats.get("out-packets", 0)),
                     "in-octets": int(stats.get("in-octets", 0)),
                     "out-octets": int(stats.get("out-octets", 0)),
                     "in-errors": int(stats.get("in-error-packets", 0)),
@@ -69,17 +71,22 @@ class InterfaceStatsMixin:
             out_err = s2[name]["out-errors"] - s1[name]["out-errors"]
             in_disc = s2[name]["in-discards"] - s1[name]["in-discards"]
             out_disc = s2[name]["out-discards"] - s1[name]["out-discards"]
-            if in_bps or out_bps:
-                rows.append(
-                    {
-                        "interface": name,
-                        "in-Kbps": round(in_bps / 1000, 1),
-                        "out-Kbps": round(out_bps / 1000, 1),
-                        "in-err": in_err,
-                        "out-err": out_err,
-                        "in-disc": in_disc,
-                        "out-disc": out_disc,
-                    }
-                )
+            # Cumulative counters are always reported (even for idle interfaces)
+            # so tests and agents can read raw packet/octet totals.
+            rows.append(
+                {
+                    "interface": name,
+                    "in-Kbps": round(in_bps / 1000, 1),
+                    "out-Kbps": round(out_bps / 1000, 1),
+                    "in-err": in_err,
+                    "out-err": out_err,
+                    "in-disc": in_disc,
+                    "out-disc": out_disc,
+                    "in-pkts": s2[name]["in-packets"],
+                    "out-pkts": s2[name]["out-packets"],
+                    "in-octets": s2[name]["in-octets"],
+                    "out-octets": s2[name]["out-octets"],
+                }
+            )
 
         return {"ifstats": rows}
