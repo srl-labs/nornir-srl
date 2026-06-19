@@ -22,6 +22,7 @@ from nornir.core.task import Result, Task, AggregatedResult
 from nornir.core.inventory import Host
 
 from .connections.srlinux import CONNECTION_NAME
+from .connections.routing import BGP_RIB_ROUTE_FAM_ALIASES
 from .connections.helpers import clean_structured_key
 from .utils.logging_config import setup_logging
 from . import __version__
@@ -723,7 +724,12 @@ def tunnel_table(
 def bgp_rib(
     ctx: typer.Context,
     route_fam: str = typer.Option(
-        ..., "--route-fam", "-r", help="Route family", case_sensitive=False
+        ...,
+        "--route-fam",
+        "-r",
+        help="evpn | ipv4 | ipv6 | l3vpn-v4 | l3vpn-v6 (IP-VPN unicast; full names "
+        "l3vpn-ipv4-unicast / l3vpn-ipv6-unicast also accepted)",
+        case_sensitive=False,
     ),
     route_type: Optional[str] = typer.Option(
         None, "--route-type", "-t", help="Route type for EVPN"
@@ -748,7 +754,8 @@ def bgp_rib(
             kwargs["route_type"] = route_type
         return Result(host=task.host, result=device.get_bgp_rib(**kwargs))
 
-    run_show(ctx, "bgp_rib", _bgp_rib, field_filter)
+    rib_title = "BGP RIB (" + BGP_RIB_ROUTE_FAM_ALIASES.get(route_fam.lower(), route_fam) + ")"
+    run_show(ctx, "bgp_rib", _bgp_rib, field_filter, title=rib_title)
 
 
 @app.command()

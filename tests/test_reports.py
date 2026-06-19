@@ -22,6 +22,7 @@ def test_clean_structured_key_strips_order_prefix():
 
 def test_clean_structured_key_collapses_newlines():
     assert clean_structured_key("AF: EVPN\nRx/Act/Tx") == "AF: EVPN Rx/Act/Tx"
+    assert clean_structured_key("U4 R/A/T") == "U4 R/A/T"
 
 
 def test_clean_structured_key_leaves_plain_keys():
@@ -212,6 +213,74 @@ def test_get_bgp_rib_evpn_lean_has_no_extra_attrs():
     assert "soo" not in route
     assert "dpath" not in route
     assert "communities" not in route
+
+
+def test_get_bgp_rib_l3vpn_ipv4_alias_and_columns():
+    """L3VPN IPv4 RIB uses RD + Pfx; ``l3vpn-v4`` is an accepted alias."""
+    attr_sets = [
+        {
+            "network-instance": [
+                {
+                    "name": "default",
+                    "bgp-rib": {
+                        "attr-sets": {
+                            "attr-set": [
+                                {
+                                    "index": 1,
+                                    "as-path": {"segment": [{"member": [65002, "i"]}]},
+                                }
+                            ]
+                        }
+                    },
+                }
+            ]
+        }
+    ]
+    routes = [
+        {
+            "network-instance": [
+                {
+                    "name": "default",
+                    "bgp-rib": {
+                        "afi-safi": [
+                            {
+                                "afi-safi-name": "l3vpn-ipv4-unicast",
+                                "l3vpn-ipv4-unicast": {
+                                    "local-rib": {
+                                        "route": [
+                                            {
+                                                "attr-id": 1,
+                                                "used-route": True,
+                                                "valid-route": True,
+                                                "best-route": True,
+                                                "neighbor": "10.0.0.6",
+                                                "route-distinguisher": "65000:1",
+                                                "ipv4-prefix": "172.16.1.0/24",
+                                                "next-hop": "10.0.0.6",
+                                                "local-pref": 100,
+                                                "med": 0,
+                                                "communities": {
+                                                    "community": [],
+                                                    "large-community": [],
+                                                },
+                                            }
+                                        ]
+                                    }
+                                },
+                            }
+                        ]
+                    },
+                }
+            ]
+        }
+    ]
+    dev = _FakeRouting({"attr-sets/attr-set": attr_sets, "local-rib/route": routes})
+    out = dev.get_bgp_rib(route_fam="l3vpn-v4", detail=False)
+    route = out["bgp_rib"][0]["Rib"][0]
+    assert route["RD"] == "65000:1"
+    assert route["Pfx"] == "172.16.1.0/24"
+    assert route["neighbor"] == "10.0.0.6"
+    assert route["0_st"] == "u*>"
 
 
 # --------------------------------------------------------------------------- #

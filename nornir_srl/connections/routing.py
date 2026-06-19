@@ -6,6 +6,16 @@ import copy
 import jmespath
 from .helpers import lpm
 
+# CLI / API aliases (e.g. ``-r l3vpn-v4``) → YANG ``afi-safi-name`` used in paths.
+BGP_RIB_ROUTE_FAM_ALIASES: Dict[str, str] = {
+    "l3vpn-v4": "l3vpn-ipv4-unicast",
+    "l3vpn-ipv4": "l3vpn-ipv4-unicast",
+    "l3vpn-ipv4-unicast": "l3vpn-ipv4-unicast",
+    "l3vpn-v6": "l3vpn-ipv6-unicast",
+    "l3vpn-ipv6": "l3vpn-ipv6-unicast",
+    "l3vpn-ipv6-unicast": "l3vpn-ipv6-unicast",
+}
+
 
 class RoutingMixin:
     """Mixin providing routing and BGP related getters."""
@@ -39,6 +49,8 @@ class RoutingMixin:
         else:
             raise Exception("Cannot get gNMI capabilities")
 
+        route_fam = BGP_RIB_ROUTE_FAM_ALIASES.get(route_fam.lower(), route_fam)
+
         BGP_EVPN_VERSION_MAP = {
             1: ("2021-", "2022-", "2023-", "2024-03", "2024-07"),
             2: ("20"),
@@ -56,6 +68,8 @@ class RoutingMixin:
             "evpn": "evpn",
             "ipv4": "ipv4-unicast",
             "ipv6": "ipv6-unicast",
+            "l3vpn-ipv4-unicast": "l3vpn-ipv4-unicast",
+            "l3vpn-ipv6-unicast": "l3vpn-ipv6-unicast",
         }
         ROUTE_TYPE_VERSIONS = {
             1: {
@@ -241,6 +255,50 @@ class RoutingMixin:
                 },
             },
         }
+        if route_fam in ("l3vpn-ipv4-unicast", "l3vpn-ipv6-unicast"):
+            # Hyphenated YANG leaf names must be JMESPath quoted identifiers, not bare tokens.
+            _pfx_q = (
+                "ipv4-prefix"
+                if route_fam == "l3vpn-ipv4-unicast"
+                else "ipv6-prefix"
+            )
+            ip_rib_jmespath_tail = {
+                1: (
+                    f'.{{neighbor:neighbor, "0_st":"_r_state", "RD":"route-distinguisher", '
+                    f'"Pfx":"{_pfx_q}", "lpref":"local-pref", med:med, "next-hop":"next-hop",'
+                    f'"as-path":"as-path".segment[0].member}}'
+                ),
+                2: (
+                    f'.{{neighbor:neighbor, "0_st":"_r_state", "RD":"route-distinguisher", '
+                    f'"Pfx":"{_pfx_q}", "lpref":"local-pref", med:med, "next-hop":"next-hop",'
+                    f'"as-path":"as-path".segment[0].member,'
+                    '"communities":[communities.community, communities."large-community"][]|join(\', \',@)}}'
+                ),
+                3: (
+                    f'.{{neighbor:neighbor, "0_st":"_r_state", "RD":"route-distinguisher", '
+                    f'"Pfx":"{_pfx_q}", "lpref":"local-pref", med:med, "next-hop":"next-hop",'
+                    f'"as-path":"as-path".segment[0].member,'
+                    '"communities":[communities.community, communities."large-community"][]|join(\',\',@)}}'
+                ),
+            }
+        else:
+            ip_rib_jmespath_tail = {
+                1: (
+                    '.{neighbor:neighbor, "0_st":"_r_state", "Prefix":prefix, "lpref":"local-pref", med:med, '
+                    '"next-hop":"next-hop","as-path":"as-path".segment[0].member}}'
+                ),
+                2: (
+                    '.{neighbor:neighbor, "0_st":"_r_state", "Prefix":prefix, "lpref":"local-pref", med:med, '
+                    '"next-hop":"next-hop","as-path":"as-path".segment[0].member,'
+                    '"communities":[communities.community, communities."large-community"][]|join(\', \',@)}}'
+                ),
+                3: (
+                    '.{neighbor:neighbor, "0_st":"_r_state", "Prefix":prefix, "lpref":"local-pref", med:med, '
+                    '"next-hop":"next-hop","as-path":"as-path".segment[0].member,'
+                    '"communities":[communities.community, communities."large-community"][]|join(\',\',@)}}'
+                ),
+            }
+
         RIB_IP_PATH_VERSIONS = {
             1: {
                 "RIB_IP_PATH": (
@@ -250,7 +308,7 @@ class RoutingMixin:
                 "RIB_IP_JMESPATH": '"network-instance"[].{NI:name, Rib:"bgp-rib"."'
                 + ROUTE_FAMILY[route_fam]
                 + '"."local-rib"."routes"[]'
-                + '.{neighbor:neighbor, "0_st":"_r_state", "Prefix":prefix, "lpref":"local-pref", med:med, "next-hop":"next-hop","as-path":"as-path".segment[0].member}}',
+                + ip_rib_jmespath_tail[1],
             },
             2: {
                 "RIB_IP_PATH": (
@@ -260,8 +318,7 @@ class RoutingMixin:
                 "RIB_IP_JMESPATH": '"network-instance"[].{NI:name, Rib:"bgp-rib"."afi-safi"[]."'
                 + ROUTE_FAMILY[route_fam]
                 + '"."local-rib"."routes"[]'
-                + '.{neighbor:neighbor, "0_st":"_r_state", "Prefix":prefix, "lpref":"local-pref", med:med, "next-hop":"next-hop","as-path":"as-path".segment[0].member,\
-                      "communities":[communities.community, communities."large-community"][]|join(\', \',@)}}',
+                + ip_rib_jmespath_tail[2],
             },
             3: {
                 "RIB_IP_PATH": (
@@ -271,8 +328,7 @@ class RoutingMixin:
                 "RIB_IP_JMESPATH": '"network-instance"[].{NI:name, Rib:"bgp-rib"."afi-safi"[]."'
                 + ROUTE_FAMILY[route_fam]
                 + '"."local-rib"."route"[]'
-                + '.{neighbor:neighbor, "0_st":"_r_state", "Prefix":prefix, "lpref":"local-pref", med:med, "next-hop":"next-hop","as-path":"as-path".segment[0].member,\
-                      "communities":[communities.community, communities."large-community"][]|join(\',\',@)}}',
+                + ip_rib_jmespath_tail[3],
             },
         }
 
@@ -325,6 +381,16 @@ class RoutingMixin:
                 "datatype": "state",
             },
             "ipv6": {
+                "path": RIB_IP_PATH_VERSIONS[ip_path_version]["RIB_IP_PATH"],
+                "jmespath": ip_jmespath,
+                "datatype": "state",
+            },
+            "l3vpn-ipv4-unicast": {
+                "path": RIB_IP_PATH_VERSIONS[ip_path_version]["RIB_IP_PATH"],
+                "jmespath": ip_jmespath,
+                "datatype": "state",
+            },
+            "l3vpn-ipv6-unicast": {
                 "path": RIB_IP_PATH_VERSIONS[ip_path_version]["RIB_IP_PATH"],
                 "jmespath": ip_jmespath,
                 "datatype": "state",
@@ -394,6 +460,10 @@ class RoutingMixin:
                                     peer_data["ipv4-unicast"] = afi
                                 elif afi["afi-safi-name"] == "ipv6-unicast":
                                     peer_data["ipv6-unicast"] = afi
+                                elif afi["afi-safi-name"] == "l3vpn-ipv4-unicast":
+                                    peer_data["l3vpn-ipv4-unicast"] = afi
+                                elif afi["afi-safi-name"] == "l3vpn-ipv6-unicast":
+                                    peer_data["l3vpn-ipv6-unicast"] = afi
                         peer["_local-asn"] = peer_data["local-as"]
                         peer["_flags"] = ""
                         peer["_flags"] += (
@@ -461,14 +531,70 @@ class RoutingMixin:
                                 peer["_ipv6"] = "disabled"
                         else:
                             peer["_ipv6"] = "-"
+                        if peer_data.get("l3vpn-ipv4-unicast"):
+                            if peer_data["l3vpn-ipv4-unicast"]["admin-state"] == "enable":
+                                peer["_l3vpn4"] = (
+                                    str(
+                                        peer_data["l3vpn-ipv4-unicast"][
+                                            "received-routes"
+                                        ]
+                                    )
+                                    + "/"
+                                    + str(
+                                        peer_data["l3vpn-ipv4-unicast"][
+                                            "active-routes"
+                                        ]
+                                    )
+                                    + "/"
+                                    + str(
+                                        peer_data["l3vpn-ipv4-unicast"]["sent-routes"]
+                                    )
+                                )
+                                if (
+                                    peer_data["l3vpn-ipv4-unicast"].get("oper-state")
+                                    == "down"
+                                ):
+                                    peer["_l3vpn4"] = "down"
+                            else:
+                                peer["_l3vpn4"] = "disabled"
+                        else:
+                            peer["_l3vpn4"] = "-"
+                        if peer_data.get("l3vpn-ipv6-unicast"):
+                            if peer_data["l3vpn-ipv6-unicast"]["admin-state"] == "enable":
+                                peer["_l3vpn6"] = (
+                                    str(
+                                        peer_data["l3vpn-ipv6-unicast"][
+                                            "received-routes"
+                                        ]
+                                    )
+                                    + "/"
+                                    + str(
+                                        peer_data["l3vpn-ipv6-unicast"][
+                                            "active-routes"
+                                        ]
+                                    )
+                                    + "/"
+                                    + str(
+                                        peer_data["l3vpn-ipv6-unicast"]["sent-routes"]
+                                    )
+                                )
+                                if (
+                                    peer_data["l3vpn-ipv6-unicast"].get("oper-state")
+                                    == "down"
+                                ):
+                                    peer["_l3vpn6"] = "down"
+                            else:
+                                peer["_l3vpn6"] = "disabled"
+                        else:
+                            peer["_l3vpn6"] = "-"
 
         path_spec = {
             "path": f"/network-instance[name={network_instance}]/protocols/bgp/neighbor",
             "jmespath": '"network-instance"[].{NI:name, Neighbors: protocols.bgp.neighbor[].{"1_peer":"peer-address",\
                     "peer-as":"peer-as", state:"session-state","local-as":"_local-asn",flags:"_flags",\
                     "group":"peer-group", "export-policy":"export-policy", "import-policy":"import-policy",\
-                    "AF: IPv4\\nRx/Act/Tx":"_ipv4", "AF: IPv6\\nRx/Act/Tx":"_ipv6", \
-                    "AF: EVPN\\nRx/Act/Tx":"_evpn"}}',
+                    "U4 R/A/T":"_ipv4", "U6 R/A/T":"_ipv6", "EV R/A/T":"_evpn", \
+                    "V4 R/A/T":"_l3vpn4", "V6 R/A/T":"_l3vpn6"}}',
             "datatype": "all",
             "key": "index",
         }

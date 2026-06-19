@@ -264,7 +264,9 @@ Options:
                                 pattern>, e.g. -f state=up -f
                                 admin_state="ena.*". Fieldnames correspond to
                                 column names of a report
-  -r, --route-fam [evpn|ipv4]   Route family for BGP RIB  [required]
+  -r, --route-fam TEXT          evpn | ipv4 | ipv6 | l3vpn-v4 | l3vpn-v6 (IP-VPN
+                                unicast; full names l3vpn-ipv4-unicast /
+                                l3vpn-ipv6-unicast also accepted)  [required]
   -t, --route-type [1|2|3|4|5]  Route type for EVPN routes
   --help                        Show this message and exit.
 ```
@@ -275,7 +277,7 @@ Optionally, you can specify filters to control the output. There are 2 types of 
 
 - inventory filters, specified with the global `-i` option, filter on the inventory, e.g. `-i hostname=clab-4l2s-l1`  or `-i role=leaf` based on inventory data
 - field filters, specified with the report-specific `-f` option. This filters based on the fields shown in the report and a regex pattern, e.g. `-f state="esta.*"`. Multiple field filters can be specified by repeated `-f` options
-- report-specific options are options specific to a report, if applicable. Currently, the only report that needs extra arguments is 'bgp-rib', i.e. `route_fam=evpn|ipv4|ipv6` and `route_type=1|2|3|4|5`. The latter relates to EVPN route-trypes and is optional. Defaults to '2' (mac-ip-routes). 
+- report-specific options are options specific to a report, if applicable. Currently, the only report that needs extra arguments is 'bgp-rib', i.e. `route_fam=evpn|ipv4|ipv6|l3vpn-v4|l3vpn-v6` (or the long `l3vpn-*-unicast` names) and `route_type=1|2|3|4|5` for EVPN only. The latter relates to EVPN route-types and is optional. Defaults to '2' (mac-ip-routes). 
 
 ## Examples
 
@@ -307,19 +309,19 @@ Show all BGP peers on all nodes that are in state `active`:
 ```
                                                                   BGP Peers                                                                   
                                                       Fields filter:{'state': 'active'}                                                       
-+--------------------------------------------------------------------------------------------------------------------------------------------+
-|              |           |                 | AFI/SAFI  | AFI/SAFI  |               |         |               |          |         |        |
-|              |           |                 | EVPN      | IPv4-UC   |               |         |               |          |         |        |
-| Node         | NI        | 1_peer          | Rx/Act/Tx | Rx/Act/Tx | export_policy | group   | import_policy | local_as | peer_as | state  |
-|--------------+-----------+-----------------+-----------+-----------+---------------+---------+---------------+----------+---------+--------|
-| clab-4l2s-l4 | ipvrf-200 | 10.200.4.100    | disabled  | down      | v200-out      | clients |               | 6848     | 65534   | active |
-|--------------+-----------+-----------------+-----------+-----------+---------------+---------+---------------+----------+---------+--------|
-| clab-4l2s-s1 | default   | 192.168.0.225   | disabled  | down      | pass-all      | dcgw    | pass-all      | 65100    | 65200   | active |
-|              |           | 192.168.255.201 | 0/0/0     | disabled  | pass-evpn     | overlay | pass-evpn     | 100      | 100     | active |
-|--------------+-----------+-----------------+-----------+-----------+---------------+---------+---------------+----------+---------+--------|
-| clab-4l2s-s2 | default   | 192.168.0.229   | disabled  | down      | pass-all      | dcgw    | pass-all      | 65100    | 65200   | active |
-|              |           | 192.168.0.231   | disabled  | down      | pass-all      | dcgw    | pass-all      | 65100    | 65201   | active |
-+--------------------------------------------------------------------------------------------------------------------------------------------+
++---------------------------------------------------------------------------------------------------------------------------------------------------------+
+|              |           |                 | U4 R/A/T | U6 R/A/T | EV R/A/T | V4 R/A/T | V6 R/A/T |               |         |               |          |         |        |
+| Node         | NI        | 1_peer          |          |          |          |          |          | export_policy | group   | import_policy | local_as | peer_as | state  |
+|--------------+-----------+-----------------+----------+----------+----------+----------+----------+---------------+---------+---------------+----------+---------+--------|
+| clab-4l2s-l4 | ipvrf-200 | 10.200.4.100    | disabled | -        | disabled | -        | -        | v200-out      | clients |               | 6848     | 65534   | active |
+|--------------+-----------+-----------------+----------+----------+----------+----------+----------+---------------+---------+---------------+----------+---------+--------|
+| clab-4l2s-s1 | default   | 192.168.0.225   | disabled | -        | disabled | -        | -        | pass-all      | dcgw    | pass-all      | 65100    | 65200   | active |
+|              |           | 192.168.255.201 | disabled | -        | 0/0/0    | -        | -        | pass-evpn     | overlay | pass-evpn     | 100      | 100     | active |
++---------------------------------------------------------------------------------------------------------------------------------------------------------+
+```
+
+Column keys: **U4** = IPv4 unicast, **U6** = IPv6 unicast, **EV** = EVPN, **V4** = L3VPN IPv4, **V6** = L3VPN IPv6 (values are received / active / sent, `disabled`, `down`, or `-`).
+
 ```
 
 ### ipv4-rib
@@ -403,6 +405,11 @@ Show all EVPN RT=2 routes for MAC address that starts with "1A:DC":
 | clab-4l2s-s2 | default | *>   | 01:24:24:24:24:24:24:00:00:01 | 10.200.1.10 | 1A:DC:0E:FF:00:41 | 192.168.255.2:202 | i       | 192.168.255.2 | igp    | 192.168.255.2   | 202 |
 +--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
 ```
+
+VPN-IPv4 / VPN-IPv6 BGP RIB (per network-instance) use **RD** and **Pfx** columns instead of a single `Prefix` field:
+
+`fcli bgp-rib -r l3vpn-v4 -f Pfx="10.*"`  
+`fcli bgp-rib -r l3vpn-v6`  (same as `-r l3vpn-ipv6-unicast`)
 
 #### bgp-rib path attributes
 
