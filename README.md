@@ -411,6 +411,8 @@ VPN-IPv4 / VPN-IPv6 BGP RIB (per network-instance) use **RD** and **Pfx** column
 `fcli bgp-rib -r l3vpn-v4 -f Pfx="10.*"`  
 `fcli bgp-rib -r l3vpn-v6`  (same as `-r l3vpn-ipv6-unicast`)
 
+Nodes that do not expose the L3VPN RIB gNMI path (for example EVPN-only leaves) contribute **no rows** for that family instead of failing the whole report.
+
 #### bgp-rib path attributes
 
 The `bgp-rib` table shows a curated set of priority fields so it stays readable.

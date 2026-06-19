@@ -17,6 +17,39 @@ BGP_RIB_ROUTE_FAM_ALIASES: Dict[str, str] = {
 }
 
 
+def _gnmi_path_missing(exc: BaseException) -> bool:
+    """True when a gNMI Get failed because the path does not exist on the device."""
+    try:
+        import grpc
+
+        missing = (
+            grpc.StatusCode.NOT_FOUND,
+            grpc.StatusCode.INVALID_ARGUMENT,
+            grpc.StatusCode.UNIMPLEMENTED,
+        )
+    except ImportError:  # pragma: no cover
+        return False
+
+    chain: List[Optional[BaseException]] = [exc]
+    if exc.__cause__ is not None:
+        chain.append(exc.__cause__)
+    if exc.__context__ is not None and exc.__context__ is not exc.__cause__:
+        chain.append(exc.__context__)
+
+    for cur in chain:
+        if cur is None:
+            continue
+        code_fn = getattr(cur, "code", None)
+        if not callable(code_fn):
+            continue
+        try:
+            if code_fn() in missing:
+                return True
+        except Exception:
+            continue
+    return False
+
+
 class RoutingMixin:
     """Mixin providing routing and BGP related getters."""
 
@@ -410,9 +443,16 @@ class RoutingMixin:
                 attribs[ni["name"]].update({path_copy.pop("index"): path_copy})
 
         path_spec: Dict[str, str] = PATH_SPECS[route_fam]
-        resp = self.get(
-            paths=[str(path_spec.get("path"))], datatype=path_spec["datatype"]
-        )
+        rib_path = str(path_spec.get("path"))
+        try:
+            resp = self.get(paths=[rib_path], datatype=path_spec["datatype"])
+        except BaseException as e:
+            # Leaves / platforms without IP-VPN have no l3vpn-* RIB path; skip instead of failing.
+            if route_fam in ("l3vpn-ipv4-unicast", "l3vpn-ipv6-unicast") and _gnmi_path_missing(
+                e
+            ):
+                return {"bgp_rib": []}
+            raise
         for ni in resp[0].get("network-instance", []):
             ni = augment_routes(ni, attribs[ni["name"]])
 

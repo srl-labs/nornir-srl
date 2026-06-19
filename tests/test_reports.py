@@ -283,6 +283,41 @@ def test_get_bgp_rib_l3vpn_ipv4_alias_and_columns():
     assert route["0_st"] == "u*>"
 
 
+def test_get_bgp_rib_l3vpn_returns_empty_when_rib_path_absent():
+    """Nodes without an L3VPN RIB path (e.g. EVPN-only leaves) return an empty RIB."""
+
+    import grpc
+
+    class _RpcNotFound(Exception):
+        def code(self) -> grpc.StatusCode:
+            return grpc.StatusCode.NOT_FOUND
+
+    class _LeafNoL3vpn(_FakeRouting):
+        def get(
+            self,
+            paths: List[str],
+            datatype: Optional[str] = "config",
+            strip_mod: Optional[bool] = True,
+        ) -> List[Dict[str, Any]]:
+            p = paths[0]
+            if "l3vpn-ipv4-unicast" in p and "local-rib" in p:
+                raise _RpcNotFound()
+            return super().get(paths, datatype, strip_mod)
+
+    attr_only = [
+        {
+            "network-instance": [
+                {
+                    "name": "default",
+                    "bgp-rib": {"attr-sets": {"attr-set": []}},
+                }
+            ]
+        }
+    ]
+    dev = _LeafNoL3vpn({"attr-sets/attr-set": attr_only})
+    assert dev.get_bgp_rib(route_fam="l3vpn-v4") == {"bgp_rib": []}
+
+
 # --------------------------------------------------------------------------- #
 # get_tunnel_table next-hop resolution
 # --------------------------------------------------------------------------- #
