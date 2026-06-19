@@ -1,10 +1,114 @@
 # Routing related methods extracted from srlinux.py
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional
 import copy
+import logging
+import threading
+from contextlib import contextmanager
+from typing import Any, Dict, Iterator, List, Optional, Tuple
+
 import jmespath
+
 from .helpers import lpm
+
+# CLI / API aliases (e.g. ``-r l3vpn-v4``) → YANG ``afi-safi-name`` used in paths.
+BGP_RIB_ROUTE_FAM_ALIASES: Dict[str, str] = {
+    "l3vpn-v4": "l3vpn-ipv4-unicast",
+    "l3vpn-ipv4": "l3vpn-ipv4-unicast",
+    "l3vpn-ipv4-unicast": "l3vpn-ipv4-unicast",
+    "l3vpn-v6": "l3vpn-ipv6-unicast",
+    "l3vpn-ipv6": "l3vpn-ipv6-unicast",
+    "l3vpn-ipv6-unicast": "l3vpn-ipv6-unicast",
+}
+
+_pygnmi_suppress_lock = threading.Lock()
+_pygnmi_suppress_depth = 0
+_pygnmi_suppress_saved: Tuple[List[logging.Handler], int, bool] | None = None
+
+
+@contextmanager
+def _suppress_pygnmi_client_logging() -> Iterator[None]:
+    """Silence pygnmi's pre-raise CRITICAL log for expected invalid-path Get failures.
+
+    pygnmi attaches a StreamHandler to ``pygnmi.client`` with a low handler level,
+    so raising the logger level alone is not always enough to suppress output.
+
+    fcli queries many hosts concurrently; without a refcount, one task could
+    restore handlers while another host's L3VPN Get was still running, letting
+    GRPC noise leak back onto stderr/stdout.
+    """
+    global _pygnmi_suppress_depth, _pygnmi_suppress_saved
+    log = logging.getLogger("pygnmi.client")
+    with _pygnmi_suppress_lock:
+        _pygnmi_suppress_depth += 1
+        if _pygnmi_suppress_depth == 1:
+            _pygnmi_suppress_saved = (
+                list(log.handlers),
+                log.level,
+                log.propagate,
+            )
+            log.handlers.clear()
+            log.setLevel(logging.CRITICAL + 1)
+            log.propagate = False
+    try:
+        yield
+    finally:
+        with _pygnmi_suppress_lock:
+            _pygnmi_suppress_depth -= 1
+            if _pygnmi_suppress_depth == 0 and _pygnmi_suppress_saved is not None:
+                handlers, prev_level, prev_propagate = _pygnmi_suppress_saved
+                _pygnmi_suppress_saved = None
+                log.setLevel(prev_level)
+                log.propagate = prev_propagate
+                for h in handlers:
+                    log.addHandler(h)
+
+
+def _gnmi_path_missing(exc: BaseException) -> bool:
+    """True when a gNMI Get failed because the path does not exist on the device."""
+    text = str(exc).lower()
+    # pygnmi embeds server text in gNMIException.args[0]; SR Linux uses this for unknown path elems.
+    if "path not valid" in text and (
+        "unknown element" in text or "l3vpn" in text or "unknown path" in text
+    ):
+        return True
+
+    try:
+        import grpc
+
+        missing = (
+            grpc.StatusCode.NOT_FOUND,
+            grpc.StatusCode.INVALID_ARGUMENT,
+            grpc.StatusCode.UNIMPLEMENTED,
+        )
+    except ImportError:  # pragma: no cover
+        return False
+
+    chain: List[Optional[BaseException]] = [exc]
+    if exc.__cause__ is not None:
+        chain.append(exc.__cause__)
+    if exc.__context__ is not None and exc.__context__ is not exc.__cause__:
+        chain.append(exc.__context__)
+    # pygnmi wraps grpc errors in gNMIException(..., orig_exc=...) without raise-from chaining.
+    orig = getattr(exc, "orig_exc", None)
+    if isinstance(orig, BaseException):
+        chain.append(orig)
+
+    def _code_match(obj: Any) -> bool:
+        code_fn = getattr(obj, "code", None)
+        if not callable(code_fn):
+            return False
+        try:
+            return bool(code_fn() in missing)
+        except Exception:
+            return False
+
+    for cur in chain:
+        if cur is not None and _code_match(cur):
+            return True
+    if orig is not None and not isinstance(orig, BaseException) and _code_match(orig):
+        return True
+    return False
 
 
 class RoutingMixin:
@@ -39,6 +143,8 @@ class RoutingMixin:
         else:
             raise Exception("Cannot get gNMI capabilities")
 
+        route_fam = BGP_RIB_ROUTE_FAM_ALIASES.get(route_fam.lower(), route_fam)
+
         BGP_EVPN_VERSION_MAP = {
             1: ("2021-", "2022-", "2023-", "2024-03", "2024-07"),
             2: ("20"),
@@ -56,6 +162,8 @@ class RoutingMixin:
             "evpn": "evpn",
             "ipv4": "ipv4-unicast",
             "ipv6": "ipv6-unicast",
+            "l3vpn-ipv4-unicast": "l3vpn-ipv4-unicast",
+            "l3vpn-ipv6-unicast": "l3vpn-ipv6-unicast",
         }
         ROUTE_TYPE_VERSIONS = {
             1: {
@@ -241,6 +349,52 @@ class RoutingMixin:
                 },
             },
         }
+        if route_fam in ("l3vpn-ipv4-unicast", "l3vpn-ipv6-unicast"):
+            # Hyphenated YANG leaf names must be JMESPath quoted identifiers, not bare tokens.
+            # Some releases expose the VPN NLRI as ``prefix`` instead of ``ipv4-prefix`` /
+            # ``ipv6-prefix``; OR picks whichever is present.
+            _pfx_expr = (
+                '"ipv4-prefix" || prefix'
+                if route_fam == "l3vpn-ipv4-unicast"
+                else '"ipv6-prefix" || prefix'
+            )
+            ip_rib_jmespath_tail = {
+                1: (
+                    f'.{{neighbor:neighbor, "0_st":"_r_state", "RD":"route-distinguisher", '
+                    f'"Pfx":{_pfx_expr}, "lpref":"local-pref", med:med, "next-hop":"next-hop",'
+                    f'"as-path":"as-path".segment[0].member}}'
+                ),
+                2: (
+                    f'.{{neighbor:neighbor, "0_st":"_r_state", "RD":"route-distinguisher", '
+                    f'"Pfx":{_pfx_expr}, "lpref":"local-pref", med:med, "next-hop":"next-hop",'
+                    f'"as-path":"as-path".segment[0].member,'
+                    '"communities":[communities.community, communities."large-community"][]|join(\', \',@)}}'
+                ),
+                3: (
+                    f'.{{neighbor:neighbor, "0_st":"_r_state", "RD":"route-distinguisher", '
+                    f'"Pfx":{_pfx_expr}, "lpref":"local-pref", med:med, "next-hop":"next-hop",'
+                    f'"as-path":"as-path".segment[0].member,'
+                    '"communities":[communities.community, communities."large-community"][]|join(\',\',@)}}'
+                ),
+            }
+        else:
+            ip_rib_jmespath_tail = {
+                1: (
+                    '.{neighbor:neighbor, "0_st":"_r_state", "Prefix":prefix, "lpref":"local-pref", med:med, '
+                    '"next-hop":"next-hop","as-path":"as-path".segment[0].member}}'
+                ),
+                2: (
+                    '.{neighbor:neighbor, "0_st":"_r_state", "Prefix":prefix, "lpref":"local-pref", med:med, '
+                    '"next-hop":"next-hop","as-path":"as-path".segment[0].member,'
+                    '"communities":[communities.community, communities."large-community"][]|join(\', \',@)}}'
+                ),
+                3: (
+                    '.{neighbor:neighbor, "0_st":"_r_state", "Prefix":prefix, "lpref":"local-pref", med:med, '
+                    '"next-hop":"next-hop","as-path":"as-path".segment[0].member,'
+                    '"communities":[communities.community, communities."large-community"][]|join(\',\',@)}}'
+                ),
+            }
+
         RIB_IP_PATH_VERSIONS = {
             1: {
                 "RIB_IP_PATH": (
@@ -250,7 +404,7 @@ class RoutingMixin:
                 "RIB_IP_JMESPATH": '"network-instance"[].{NI:name, Rib:"bgp-rib"."'
                 + ROUTE_FAMILY[route_fam]
                 + '"."local-rib"."routes"[]'
-                + '.{neighbor:neighbor, "0_st":"_r_state", "Prefix":prefix, "lpref":"local-pref", med:med, "next-hop":"next-hop","as-path":"as-path".segment[0].member}}',
+                + ip_rib_jmespath_tail[1],
             },
             2: {
                 "RIB_IP_PATH": (
@@ -260,8 +414,7 @@ class RoutingMixin:
                 "RIB_IP_JMESPATH": '"network-instance"[].{NI:name, Rib:"bgp-rib"."afi-safi"[]."'
                 + ROUTE_FAMILY[route_fam]
                 + '"."local-rib"."routes"[]'
-                + '.{neighbor:neighbor, "0_st":"_r_state", "Prefix":prefix, "lpref":"local-pref", med:med, "next-hop":"next-hop","as-path":"as-path".segment[0].member,\
-                      "communities":[communities.community, communities."large-community"][]|join(\', \',@)}}',
+                + ip_rib_jmespath_tail[2],
             },
             3: {
                 "RIB_IP_PATH": (
@@ -271,8 +424,7 @@ class RoutingMixin:
                 "RIB_IP_JMESPATH": '"network-instance"[].{NI:name, Rib:"bgp-rib"."afi-safi"[]."'
                 + ROUTE_FAMILY[route_fam]
                 + '"."local-rib"."route"[]'
-                + '.{neighbor:neighbor, "0_st":"_r_state", "Prefix":prefix, "lpref":"local-pref", med:med, "next-hop":"next-hop","as-path":"as-path".segment[0].member,\
-                      "communities":[communities.community, communities."large-community"][]|join(\',\',@)}}',
+                + ip_rib_jmespath_tail[3],
             },
         }
 
@@ -329,6 +481,16 @@ class RoutingMixin:
                 "jmespath": ip_jmespath,
                 "datatype": "state",
             },
+            "l3vpn-ipv4-unicast": {
+                "path": RIB_IP_PATH_VERSIONS[ip_path_version]["RIB_IP_PATH"],
+                "jmespath": ip_jmespath,
+                "datatype": "state",
+            },
+            "l3vpn-ipv6-unicast": {
+                "path": RIB_IP_PATH_VERSIONS[ip_path_version]["RIB_IP_PATH"],
+                "jmespath": ip_jmespath,
+                "datatype": "state",
+            },
         }
 
         attribs: Dict[str, Dict[str, Any]] = dict()
@@ -342,9 +504,18 @@ class RoutingMixin:
                 attribs[ni["name"]].update({path_copy.pop("index"): path_copy})
 
         path_spec: Dict[str, str] = PATH_SPECS[route_fam]
-        resp = self.get(
-            paths=[str(path_spec.get("path"))], datatype=path_spec["datatype"]
-        )
+        rib_path = str(path_spec.get("path"))
+        if route_fam in ("l3vpn-ipv4-unicast", "l3vpn-ipv6-unicast"):
+            with _suppress_pygnmi_client_logging():
+                try:
+                    resp = self.get(paths=[rib_path], datatype=path_spec["datatype"])
+                except BaseException as e:
+                    # Leaves / platforms without IP-VPN have no l3vpn-* RIB path; skip instead of failing.
+                    if _gnmi_path_missing(e):
+                        return {"bgp_rib": []}
+                    raise
+        else:
+            resp = self.get(paths=[rib_path], datatype=path_spec["datatype"])
         for ni in resp[0].get("network-instance", []):
             ni = augment_routes(ni, attribs[ni["name"]])
 
@@ -394,6 +565,10 @@ class RoutingMixin:
                                     peer_data["ipv4-unicast"] = afi
                                 elif afi["afi-safi-name"] == "ipv6-unicast":
                                     peer_data["ipv6-unicast"] = afi
+                                elif afi["afi-safi-name"] == "l3vpn-ipv4-unicast":
+                                    peer_data["l3vpn-ipv4-unicast"] = afi
+                                elif afi["afi-safi-name"] == "l3vpn-ipv6-unicast":
+                                    peer_data["l3vpn-ipv6-unicast"] = afi
                         peer["_local-asn"] = peer_data["local-as"]
                         peer["_flags"] = ""
                         peer["_flags"] += (
@@ -461,14 +636,72 @@ class RoutingMixin:
                                 peer["_ipv6"] = "disabled"
                         else:
                             peer["_ipv6"] = "-"
+                        if peer_data.get("l3vpn-ipv4-unicast"):
+                            if (
+                                peer_data["l3vpn-ipv4-unicast"]["admin-state"]
+                                == "enable"
+                            ):
+                                peer["_l3vpn4"] = (
+                                    str(
+                                        peer_data["l3vpn-ipv4-unicast"][
+                                            "received-routes"
+                                        ]
+                                    )
+                                    + "/"
+                                    + str(
+                                        peer_data["l3vpn-ipv4-unicast"]["active-routes"]
+                                    )
+                                    + "/"
+                                    + str(
+                                        peer_data["l3vpn-ipv4-unicast"]["sent-routes"]
+                                    )
+                                )
+                                if (
+                                    peer_data["l3vpn-ipv4-unicast"].get("oper-state")
+                                    == "down"
+                                ):
+                                    peer["_l3vpn4"] = "down"
+                            else:
+                                peer["_l3vpn4"] = "disabled"
+                        else:
+                            peer["_l3vpn4"] = "-"
+                        if peer_data.get("l3vpn-ipv6-unicast"):
+                            if (
+                                peer_data["l3vpn-ipv6-unicast"]["admin-state"]
+                                == "enable"
+                            ):
+                                peer["_l3vpn6"] = (
+                                    str(
+                                        peer_data["l3vpn-ipv6-unicast"][
+                                            "received-routes"
+                                        ]
+                                    )
+                                    + "/"
+                                    + str(
+                                        peer_data["l3vpn-ipv6-unicast"]["active-routes"]
+                                    )
+                                    + "/"
+                                    + str(
+                                        peer_data["l3vpn-ipv6-unicast"]["sent-routes"]
+                                    )
+                                )
+                                if (
+                                    peer_data["l3vpn-ipv6-unicast"].get("oper-state")
+                                    == "down"
+                                ):
+                                    peer["_l3vpn6"] = "down"
+                            else:
+                                peer["_l3vpn6"] = "disabled"
+                        else:
+                            peer["_l3vpn6"] = "-"
 
         path_spec = {
             "path": f"/network-instance[name={network_instance}]/protocols/bgp/neighbor",
             "jmespath": '"network-instance"[].{NI:name, Neighbors: protocols.bgp.neighbor[].{"1_peer":"peer-address",\
                     "peer-as":"peer-as", state:"session-state","local-as":"_local-asn",flags:"_flags",\
                     "group":"peer-group", "export-policy":"export-policy", "import-policy":"import-policy",\
-                    "AF: IPv4\\nRx/Act/Tx":"_ipv4", "AF: IPv6\\nRx/Act/Tx":"_ipv6", \
-                    "AF: EVPN\\nRx/Act/Tx":"_evpn"}}',
+                    "U4\\nR/A/T":"_ipv4", "U6\\nR/A/T":"_ipv6", "EVPN\\nR/A/T":"_evpn",\
+                    "VPNv4\\nR/A/T":"_l3vpn4", "VPNv6\\nR/A/T":"_l3vpn6"}}',
             "datatype": "all",
             "key": "index",
         }

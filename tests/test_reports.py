@@ -22,6 +22,9 @@ def test_clean_structured_key_strips_order_prefix():
 
 def test_clean_structured_key_collapses_newlines():
     assert clean_structured_key("AF: EVPN\nRx/Act/Tx") == "AF: EVPN Rx/Act/Tx"
+    assert clean_structured_key("U4 R/A/T") == "U4 R/A/T"
+    assert clean_structured_key("U4\nR/A/T") == "U4 R/A/T"
+    assert clean_structured_key("EVPN\nR/A/T") == "EVPN R/A/T"
 
 
 def test_clean_structured_key_leaves_plain_keys():
@@ -212,6 +215,182 @@ def test_get_bgp_rib_evpn_lean_has_no_extra_attrs():
     assert "soo" not in route
     assert "dpath" not in route
     assert "communities" not in route
+
+
+def test_get_bgp_rib_l3vpn_ipv4_alias_and_columns():
+    """L3VPN IPv4 RIB uses RD + Pfx; ``l3vpn-v4`` is an accepted alias."""
+    attr_sets = [
+        {
+            "network-instance": [
+                {
+                    "name": "default",
+                    "bgp-rib": {
+                        "attr-sets": {
+                            "attr-set": [
+                                {
+                                    "index": 1,
+                                    "as-path": {"segment": [{"member": [65002, "i"]}]},
+                                }
+                            ]
+                        }
+                    },
+                }
+            ]
+        }
+    ]
+    routes = [
+        {
+            "network-instance": [
+                {
+                    "name": "default",
+                    "bgp-rib": {
+                        "afi-safi": [
+                            {
+                                "afi-safi-name": "l3vpn-ipv4-unicast",
+                                "l3vpn-ipv4-unicast": {
+                                    "local-rib": {
+                                        "route": [
+                                            {
+                                                "attr-id": 1,
+                                                "used-route": True,
+                                                "valid-route": True,
+                                                "best-route": True,
+                                                "neighbor": "10.0.0.6",
+                                                "route-distinguisher": "65000:1",
+                                                "ipv4-prefix": "172.16.1.0/24",
+                                                "next-hop": "10.0.0.6",
+                                                "local-pref": 100,
+                                                "med": 0,
+                                                "communities": {
+                                                    "community": [],
+                                                    "large-community": [],
+                                                },
+                                            }
+                                        ]
+                                    }
+                                },
+                            }
+                        ]
+                    },
+                }
+            ]
+        }
+    ]
+    dev = _FakeRouting({"attr-sets/attr-set": attr_sets, "local-rib/route": routes})
+    out = dev.get_bgp_rib(route_fam="l3vpn-v4", detail=False)
+    route = out["bgp_rib"][0]["Rib"][0]
+    assert route["RD"] == "65000:1"
+    assert route["Pfx"] == "172.16.1.0/24"
+    assert route["neighbor"] == "10.0.0.6"
+    assert route["0_st"] == "u*>"
+
+
+def test_get_bgp_rib_l3vpn_returns_empty_when_rib_path_absent():
+    """Nodes without an L3VPN RIB path (e.g. EVPN-only leaves) return an empty RIB."""
+
+    import grpc
+
+    class _RpcNotFound(Exception):
+        def code(self) -> grpc.StatusCode:
+            return grpc.StatusCode.NOT_FOUND
+
+    class _LeafNoL3vpn(_FakeRouting):
+        def get(
+            self,
+            paths: List[str],
+            datatype: Optional[str] = "config",
+            strip_mod: Optional[bool] = True,
+        ) -> List[Dict[str, Any]]:
+            p = paths[0]
+            if "l3vpn-ipv4-unicast" in p and "local-rib" in p:
+                raise _RpcNotFound()
+            return super().get(paths, datatype, strip_mod)
+
+    attr_only = [
+        {
+            "network-instance": [
+                {
+                    "name": "default",
+                    "bgp-rib": {"attr-sets": {"attr-set": []}},
+                }
+            ]
+        }
+    ]
+    dev = _LeafNoL3vpn({"attr-sets/attr-set": attr_only})
+    assert dev.get_bgp_rib(route_fam="l3vpn-v4") == {"bgp_rib": []}
+
+
+def test_get_bgp_rib_l3vpn_empty_on_pygnmi_path_invalid_message():
+    """pygnmi surfaces SR Linux path errors as a string (no grpc __cause__ chain)."""
+
+    class _LeafNoL3vpnPygnmi(_FakeRouting):
+        def get(
+            self,
+            paths: List[str],
+            datatype: Optional[str] = "config",
+            strip_mod: Optional[bool] = True,
+        ) -> List[Dict[str, Any]]:
+            p = paths[0]
+            if "l3vpn-ipv4-unicast" in p and "local-rib" in p:
+                raise RuntimeError(
+                    "GRPC ERROR Host: leaf2:57400, Error: Path not valid - unknown element "
+                    "'l3vpn-ipv4-unicast'. Options are [ipv4-unicast, ipv6-unicast, evpn, "
+                    "ipv4-flowspec-v1, ipv6-flowspec-v1, route-target, afi-safi-name]"
+                )
+            return super().get(paths, datatype, strip_mod)
+
+    attr_only = [
+        {
+            "network-instance": [
+                {
+                    "name": "default",
+                    "bgp-rib": {"attr-sets": {"attr-set": []}},
+                }
+            ]
+        }
+    ]
+    dev = _LeafNoL3vpnPygnmi({"attr-sets/attr-set": attr_only})
+    assert dev.get_bgp_rib(route_fam="l3vpn-v4") == {"bgp_rib": []}
+
+
+def test_get_bgp_rib_l3vpn_empty_when_orig_exc_has_grpc_code():
+    """pygnmi ``gNMIException`` stores RpcError in ``orig_exc``, not ``__cause__``."""
+
+    import grpc
+
+    class _InactiveLike:
+        def code(self) -> grpc.StatusCode:
+            return grpc.StatusCode.INVALID_ARGUMENT
+
+    class _GnmiExcWrapper(Exception):
+        def __init__(self) -> None:
+            super().__init__("GRPC ERROR Host: leaf:57400, Error: Path not valid")
+            self.orig_exc = _InactiveLike()
+
+    class _LeafOrig(_FakeRouting):
+        def get(
+            self,
+            paths: List[str],
+            datatype: Optional[str] = "config",
+            strip_mod: Optional[bool] = True,
+        ) -> List[Dict[str, Any]]:
+            p = paths[0]
+            if "l3vpn-ipv4-unicast" in p and "local-rib" in p:
+                raise _GnmiExcWrapper()
+            return super().get(paths, datatype, strip_mod)
+
+    attr_only = [
+        {
+            "network-instance": [
+                {
+                    "name": "default",
+                    "bgp-rib": {"attr-sets": {"attr-set": []}},
+                }
+            ]
+        }
+    ]
+    dev = _LeafOrig({"attr-sets/attr-set": attr_only})
+    assert dev.get_bgp_rib(route_fam="l3vpn-v4") == {"bgp_rib": []}
 
 
 # --------------------------------------------------------------------------- #

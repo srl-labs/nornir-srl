@@ -488,7 +488,9 @@ def bgp_peers(
     """Get BGP peer status and route statistics for all network instances.
 
     Returns peer address, peer AS, session state, local AS, flags (D=dynamic, B=BFD, F=fast-failover),
-    and route counts (Rx/Active/Tx) for IPv4, IPv6, and EVPN address families.
+    and Rx/Active/Tx route counts per AFI/SAFI: IPv4 unicast (U4), IPv6 unicast (U6), EVPN,
+    L3VPN IPv4 (VPNv4), L3VPN IPv6 (VPNv6). Table column headers show the AFI on the first line
+    and R/A/T on the second; JSON keys use a space instead of the newline.
 
     Args:
         inv_filter: Inventory filter as comma-separated key=value pairs (e.g. 'role=spine'). Supports wildcards.
@@ -508,7 +510,15 @@ def bgp_peers(
 
 @mcp.tool()
 def bgp_rib(
-    route_fam: Literal["evpn", "ipv4", "ipv6"],
+    route_fam: Literal[
+        "evpn",
+        "ipv4",
+        "ipv6",
+        "l3vpn-v4",
+        "l3vpn-v6",
+        "l3vpn-ipv4-unicast",
+        "l3vpn-ipv6-unicast",
+    ],
     route_type: Optional[Literal["1", "2", "3", "4", "5"]] = None,
     inv_filter: Optional[str] = None,
     field_filter: Optional[str] = None,
@@ -522,7 +532,8 @@ def bgp_rib(
     EVPN/IP-VPN loop-prevention and route-leaking issues.
 
     Args:
-        route_fam: Route family - one of 'evpn', 'ipv4', 'ipv6'.
+        route_fam: BGP RIB address family: evpn, ipv4, ipv6, or L3VPN IPv4/IPv6 unicast
+            (``l3vpn-v4`` / ``l3vpn-v6`` short names, or ``l3vpn-ipv4-unicast`` / ``l3vpn-ipv6-unicast``).
         route_type: Route type for EVPN (1-5). Only applicable when route_fam='evpn'.
             1=Ethernet Auto-Discovery, 2=MAC/IP, 3=Inclusive Multicast, 4=ES, 5=IP Prefix.
         inv_filter: Inventory filter as comma-separated key=value pairs. Supports wildcards.
