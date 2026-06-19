@@ -318,6 +318,79 @@ def test_get_bgp_rib_l3vpn_returns_empty_when_rib_path_absent():
     assert dev.get_bgp_rib(route_fam="l3vpn-v4") == {"bgp_rib": []}
 
 
+def test_get_bgp_rib_l3vpn_empty_on_pygnmi_path_invalid_message():
+    """pygnmi surfaces SR Linux path errors as a string (no grpc __cause__ chain)."""
+
+    class _LeafNoL3vpnPygnmi(_FakeRouting):
+        def get(
+            self,
+            paths: List[str],
+            datatype: Optional[str] = "config",
+            strip_mod: Optional[bool] = True,
+        ) -> List[Dict[str, Any]]:
+            p = paths[0]
+            if "l3vpn-ipv4-unicast" in p and "local-rib" in p:
+                raise RuntimeError(
+                    "GRPC ERROR Host: leaf2:57400, Error: Path not valid - unknown element "
+                    "'l3vpn-ipv4-unicast'. Options are [ipv4-unicast, ipv6-unicast, evpn, "
+                    "ipv4-flowspec-v1, ipv6-flowspec-v1, route-target, afi-safi-name]"
+                )
+            return super().get(paths, datatype, strip_mod)
+
+    attr_only = [
+        {
+            "network-instance": [
+                {
+                    "name": "default",
+                    "bgp-rib": {"attr-sets": {"attr-set": []}},
+                }
+            ]
+        }
+    ]
+    dev = _LeafNoL3vpnPygnmi({"attr-sets/attr-set": attr_only})
+    assert dev.get_bgp_rib(route_fam="l3vpn-v4") == {"bgp_rib": []}
+
+
+def test_get_bgp_rib_l3vpn_empty_when_orig_exc_has_grpc_code():
+    """pygnmi ``gNMIException`` stores RpcError in ``orig_exc``, not ``__cause__``."""
+
+    import grpc
+
+    class _InactiveLike:
+        def code(self) -> grpc.StatusCode:
+            return grpc.StatusCode.INVALID_ARGUMENT
+
+    class _GnmiExcWrapper(Exception):
+        def __init__(self) -> None:
+            super().__init__("GRPC ERROR Host: leaf:57400, Error: Path not valid")
+            self.orig_exc = _InactiveLike()
+
+    class _LeafOrig(_FakeRouting):
+        def get(
+            self,
+            paths: List[str],
+            datatype: Optional[str] = "config",
+            strip_mod: Optional[bool] = True,
+        ) -> List[Dict[str, Any]]:
+            p = paths[0]
+            if "l3vpn-ipv4-unicast" in p and "local-rib" in p:
+                raise _GnmiExcWrapper()
+            return super().get(paths, datatype, strip_mod)
+
+    attr_only = [
+        {
+            "network-instance": [
+                {
+                    "name": "default",
+                    "bgp-rib": {"attr-sets": {"attr-set": []}},
+                }
+            ]
+        }
+    ]
+    dev = _LeafOrig({"attr-sets/attr-set": attr_only})
+    assert dev.get_bgp_rib(route_fam="l3vpn-v4") == {"bgp_rib": []}
+
+
 # --------------------------------------------------------------------------- #
 # get_tunnel_table next-hop resolution
 # --------------------------------------------------------------------------- #

@@ -19,6 +19,13 @@ BGP_RIB_ROUTE_FAM_ALIASES: Dict[str, str] = {
 
 def _gnmi_path_missing(exc: BaseException) -> bool:
     """True when a gNMI Get failed because the path does not exist on the device."""
+    text = str(exc).lower()
+    # pygnmi embeds server text in gNMIException.args[0]; SR Linux uses this for unknown path elems.
+    if "path not valid" in text and (
+        "unknown element" in text or "l3vpn" in text or "unknown path" in text
+    ):
+        return True
+
     try:
         import grpc
 
@@ -35,18 +42,25 @@ def _gnmi_path_missing(exc: BaseException) -> bool:
         chain.append(exc.__cause__)
     if exc.__context__ is not None and exc.__context__ is not exc.__cause__:
         chain.append(exc.__context__)
+    # pygnmi wraps grpc errors in gNMIException(..., orig_exc=...) without raise-from chaining.
+    orig = getattr(exc, "orig_exc", None)
+    if isinstance(orig, BaseException):
+        chain.append(orig)
+
+    def _code_match(obj: Any) -> bool:
+        code_fn = getattr(obj, "code", None)
+        if not callable(code_fn):
+            return False
+        try:
+            return bool(code_fn() in missing)
+        except Exception:
+            return False
 
     for cur in chain:
-        if cur is None:
-            continue
-        code_fn = getattr(cur, "code", None)
-        if not callable(code_fn):
-            continue
-        try:
-            if code_fn() in missing:
-                return True
-        except Exception:
-            continue
+        if cur is not None and _code_match(cur):
+            return True
+    if orig is not None and not isinstance(orig, BaseException) and _code_match(orig):
+        return True
     return False
 
 
