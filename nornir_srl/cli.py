@@ -754,7 +754,9 @@ def bgp_rib(
             kwargs["route_type"] = route_type
         return Result(host=task.host, result=device.get_bgp_rib(**kwargs))
 
-    rib_title = "BGP RIB (" + BGP_RIB_ROUTE_FAM_ALIASES.get(route_fam.lower(), route_fam) + ")"
+    rib_title = (
+        "BGP RIB (" + BGP_RIB_ROUTE_FAM_ALIASES.get(route_fam.lower(), route_fam) + ")"
+    )
     run_show(ctx, "bgp_rib", _bgp_rib, field_filter, title=rib_title)
 
 

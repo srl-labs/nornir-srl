@@ -637,7 +637,10 @@ class RoutingMixin:
                         else:
                             peer["_ipv6"] = "-"
                         if peer_data.get("l3vpn-ipv4-unicast"):
-                            if peer_data["l3vpn-ipv4-unicast"]["admin-state"] == "enable":
+                            if (
+                                peer_data["l3vpn-ipv4-unicast"]["admin-state"]
+                                == "enable"
+                            ):
                                 peer["_l3vpn4"] = (
                                     str(
                                         peer_data["l3vpn-ipv4-unicast"][
@@ -646,9 +649,7 @@ class RoutingMixin:
                                     )
                                     + "/"
                                     + str(
-                                        peer_data["l3vpn-ipv4-unicast"][
-                                            "active-routes"
-                                        ]
+                                        peer_data["l3vpn-ipv4-unicast"]["active-routes"]
                                     )
                                     + "/"
                                     + str(
@@ -665,7 +666,10 @@ class RoutingMixin:
                         else:
                             peer["_l3vpn4"] = "-"
                         if peer_data.get("l3vpn-ipv6-unicast"):
-                            if peer_data["l3vpn-ipv6-unicast"]["admin-state"] == "enable":
+                            if (
+                                peer_data["l3vpn-ipv6-unicast"]["admin-state"]
+                                == "enable"
+                            ):
                                 peer["_l3vpn6"] = (
                                     str(
                                         peer_data["l3vpn-ipv6-unicast"][
@@ -674,9 +678,7 @@ class RoutingMixin:
                                     )
                                     + "/"
                                     + str(
-                                        peer_data["l3vpn-ipv6-unicast"][
-                                            "active-routes"
-                                        ]
+                                        peer_data["l3vpn-ipv6-unicast"]["active-routes"]
                                     )
                                     + "/"
                                     + str(
