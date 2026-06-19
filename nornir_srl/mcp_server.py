@@ -488,8 +488,9 @@ def bgp_peers(
     """Get BGP peer status and route statistics for all network instances.
 
     Returns peer address, peer AS, session state, local AS, flags (D=dynamic, B=BFD, F=fast-failover),
-    and Rx/Active/Tx route counts per AFI/SAFI: IPv4 unicast (U4), IPv6 unicast (U6), EVPN (EV),
-    L3VPN IPv4 (V4), L3VPN IPv6 (V6).
+    and Rx/Active/Tx route counts per AFI/SAFI: IPv4 unicast (U4), IPv6 unicast (U6), EVPN,
+    L3VPN IPv4 (VPNv4), L3VPN IPv6 (VPNv6). Table column headers show the AFI on the first line
+    and R/A/T on the second; JSON keys use a space instead of the newline.
 
     Args:
         inv_filter: Inventory filter as comma-separated key=value pairs (e.g. 'role=spine'). Supports wildcards.

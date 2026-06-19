@@ -310,9 +310,10 @@ Show all BGP peers on all nodes that are in state `active`:
                                                                   BGP Peers                                                                   
                                                       Fields filter:{'state': 'active'}                                                       
 +---------------------------------------------------------------------------------------------------------------------------------------------------------+
-|              |           |                 | U4 R/A/T | U6 R/A/T | EV R/A/T | V4 R/A/T | V6 R/A/T |               |         |               |          |         |        |
-| Node         | NI        | 1_peer          |          |          |          |          |          | export_policy | group   | import_policy | local_as | peer_as | state  |
-|--------------+-----------+-----------------+----------+----------+----------+----------+----------+---------------+---------+---------------+----------+---------+--------|
+|              |           |                 | U4    | U6    | EVPN  | VPNv4 | VPNv6 |               |         |               |          |         |        |
+|              |           |                 | R/A/T | R/A/T | R/A/T | R/A/T | R/A/T |               |         |               |          |         |        |
+| Node         | NI        | 1_peer          |       |       |       |       |       | export_policy | group   | import_policy | local_as | peer_as | state  |
+|--------------+-----------+-----------------+-------+-------+-------+-------+-------+---------------+---------+---------------+----------+---------+--------|
 | clab-4l2s-l4 | ipvrf-200 | 10.200.4.100    | disabled | -        | disabled | -        | -        | v200-out      | clients |               | 6848     | 65534   | active |
 |--------------+-----------+-----------------+----------+----------+----------+----------+----------+---------------+---------+---------------+----------+---------+--------|
 | clab-4l2s-s1 | default   | 192.168.0.225   | disabled | -        | disabled | -        | -        | pass-all      | dcgw    | pass-all      | 65100    | 65200   | active |
@@ -320,9 +321,7 @@ Show all BGP peers on all nodes that are in state `active`:
 +---------------------------------------------------------------------------------------------------------------------------------------------------------+
 ```
 
-Column keys: **U4** = IPv4 unicast, **U6** = IPv6 unicast, **EV** = EVPN, **V4** = L3VPN IPv4, **V6** = L3VPN IPv6 (values are received / active / sent, `disabled`, `down`, or `-`).
-
-```
+Column headers use two lines in the live table (AFI label, then **R/A/T**). **U4** / **U6** = IPv4/IPv6 unicast, **EVPN**, **VPNv4** / **VPNv6** = L3VPN address families (values are received / active / sent, `disabled`, `down`, or `-`). JSON/YAML/CSV keys collapse the newline to a single space.
 
 ### ipv4-rib
 

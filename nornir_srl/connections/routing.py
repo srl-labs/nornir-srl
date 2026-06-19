@@ -1,9 +1,14 @@
 # Routing related methods extracted from srlinux.py
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional
 import copy
+import logging
+import threading
+from contextlib import contextmanager
+from typing import Any, Dict, Iterator, List, Optional, Tuple
+
 import jmespath
+
 from .helpers import lpm
 
 # CLI / API aliases (e.g. ``-r l3vpn-v4``) → YANG ``afi-safi-name`` used in paths.
@@ -15,6 +20,48 @@ BGP_RIB_ROUTE_FAM_ALIASES: Dict[str, str] = {
     "l3vpn-ipv6": "l3vpn-ipv6-unicast",
     "l3vpn-ipv6-unicast": "l3vpn-ipv6-unicast",
 }
+
+_pygnmi_suppress_lock = threading.Lock()
+_pygnmi_suppress_depth = 0
+_pygnmi_suppress_saved: Tuple[List[logging.Handler], int, bool] | None = None
+
+
+@contextmanager
+def _suppress_pygnmi_client_logging() -> Iterator[None]:
+    """Silence pygnmi's pre-raise CRITICAL log for expected invalid-path Get failures.
+
+    pygnmi attaches a StreamHandler to ``pygnmi.client`` with a low handler level,
+    so raising the logger level alone is not always enough to suppress output.
+
+    fcli queries many hosts concurrently; without a refcount, one task could
+    restore handlers while another host's L3VPN Get was still running, letting
+    GRPC noise leak back onto stderr/stdout.
+    """
+    global _pygnmi_suppress_depth, _pygnmi_suppress_saved
+    log = logging.getLogger("pygnmi.client")
+    with _pygnmi_suppress_lock:
+        _pygnmi_suppress_depth += 1
+        if _pygnmi_suppress_depth == 1:
+            _pygnmi_suppress_saved = (
+                list(log.handlers),
+                log.level,
+                log.propagate,
+            )
+            log.handlers.clear()
+            log.setLevel(logging.CRITICAL + 1)
+            log.propagate = False
+    try:
+        yield
+    finally:
+        with _pygnmi_suppress_lock:
+            _pygnmi_suppress_depth -= 1
+            if _pygnmi_suppress_depth == 0 and _pygnmi_suppress_saved is not None:
+                handlers, prev_level, prev_propagate = _pygnmi_suppress_saved
+                _pygnmi_suppress_saved = None
+                log.setLevel(prev_level)
+                log.propagate = prev_propagate
+                for h in handlers:
+                    log.addHandler(h)
 
 
 def _gnmi_path_missing(exc: BaseException) -> bool:
@@ -458,15 +505,17 @@ class RoutingMixin:
 
         path_spec: Dict[str, str] = PATH_SPECS[route_fam]
         rib_path = str(path_spec.get("path"))
-        try:
+        if route_fam in ("l3vpn-ipv4-unicast", "l3vpn-ipv6-unicast"):
+            with _suppress_pygnmi_client_logging():
+                try:
+                    resp = self.get(paths=[rib_path], datatype=path_spec["datatype"])
+                except BaseException as e:
+                    # Leaves / platforms without IP-VPN have no l3vpn-* RIB path; skip instead of failing.
+                    if _gnmi_path_missing(e):
+                        return {"bgp_rib": []}
+                    raise
+        else:
             resp = self.get(paths=[rib_path], datatype=path_spec["datatype"])
-        except BaseException as e:
-            # Leaves / platforms without IP-VPN have no l3vpn-* RIB path; skip instead of failing.
-            if route_fam in ("l3vpn-ipv4-unicast", "l3vpn-ipv6-unicast") and _gnmi_path_missing(
-                e
-            ):
-                return {"bgp_rib": []}
-            raise
         for ni in resp[0].get("network-instance", []):
             ni = augment_routes(ni, attribs[ni["name"]])
 
@@ -649,8 +698,8 @@ class RoutingMixin:
             "jmespath": '"network-instance"[].{NI:name, Neighbors: protocols.bgp.neighbor[].{"1_peer":"peer-address",\
                     "peer-as":"peer-as", state:"session-state","local-as":"_local-asn",flags:"_flags",\
                     "group":"peer-group", "export-policy":"export-policy", "import-policy":"import-policy",\
-                    "U4 R/A/T":"_ipv4", "U6 R/A/T":"_ipv6", "EV R/A/T":"_evpn", \
-                    "V4 R/A/T":"_l3vpn4", "V6 R/A/T":"_l3vpn6"}}',
+                    "U4\\nR/A/T":"_ipv4", "U6\\nR/A/T":"_ipv6", "EVPN\\nR/A/T":"_evpn",\
+                    "VPNv4\\nR/A/T":"_l3vpn4", "VPNv6\\nR/A/T":"_l3vpn6"}}',
             "datatype": "all",
             "key": "index",
         }

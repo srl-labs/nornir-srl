@@ -23,6 +23,8 @@ def test_clean_structured_key_strips_order_prefix():
 def test_clean_structured_key_collapses_newlines():
     assert clean_structured_key("AF: EVPN\nRx/Act/Tx") == "AF: EVPN Rx/Act/Tx"
     assert clean_structured_key("U4 R/A/T") == "U4 R/A/T"
+    assert clean_structured_key("U4\nR/A/T") == "U4 R/A/T"
+    assert clean_structured_key("EVPN\nR/A/T") == "EVPN R/A/T"
 
 
 def test_clean_structured_key_leaves_plain_keys():
