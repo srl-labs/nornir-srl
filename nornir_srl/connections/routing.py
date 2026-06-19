@@ -257,26 +257,28 @@ class RoutingMixin:
         }
         if route_fam in ("l3vpn-ipv4-unicast", "l3vpn-ipv6-unicast"):
             # Hyphenated YANG leaf names must be JMESPath quoted identifiers, not bare tokens.
-            _pfx_q = (
-                "ipv4-prefix"
+            # Some releases expose the VPN NLRI as ``prefix`` instead of ``ipv4-prefix`` /
+            # ``ipv6-prefix``; OR picks whichever is present.
+            _pfx_expr = (
+                '"ipv4-prefix" || prefix'
                 if route_fam == "l3vpn-ipv4-unicast"
-                else "ipv6-prefix"
+                else '"ipv6-prefix" || prefix'
             )
             ip_rib_jmespath_tail = {
                 1: (
                     f'.{{neighbor:neighbor, "0_st":"_r_state", "RD":"route-distinguisher", '
-                    f'"Pfx":"{_pfx_q}", "lpref":"local-pref", med:med, "next-hop":"next-hop",'
+                    f'"Pfx":{_pfx_expr}, "lpref":"local-pref", med:med, "next-hop":"next-hop",'
                     f'"as-path":"as-path".segment[0].member}}'
                 ),
                 2: (
                     f'.{{neighbor:neighbor, "0_st":"_r_state", "RD":"route-distinguisher", '
-                    f'"Pfx":"{_pfx_q}", "lpref":"local-pref", med:med, "next-hop":"next-hop",'
+                    f'"Pfx":{_pfx_expr}, "lpref":"local-pref", med:med, "next-hop":"next-hop",'
                     f'"as-path":"as-path".segment[0].member,'
                     '"communities":[communities.community, communities."large-community"][]|join(\', \',@)}}'
                 ),
                 3: (
                     f'.{{neighbor:neighbor, "0_st":"_r_state", "RD":"route-distinguisher", '
-                    f'"Pfx":"{_pfx_q}", "lpref":"local-pref", med:med, "next-hop":"next-hop",'
+                    f'"Pfx":{_pfx_expr}, "lpref":"local-pref", med:med, "next-hop":"next-hop",'
                     f'"as-path":"as-path".segment[0].member,'
                     '"communities":[communities.community, communities."large-community"][]|join(\',\',@)}}'
                 ),
