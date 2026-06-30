@@ -88,22 +88,7 @@ Running `fcli` without additional arguments will start an interactive shell insi
 
 This command assumes that the containerlab topology file is named `clab_topo.yml` and is in the current directory. If not, change the `CLAB_TOPO` variable accordingly. Also, it assumes that the containerlab topology is using the default containerlab docker-network naming, i.e. name of the lab. If you have overridden the management network with `.mgmt.network` in the topology file, change the `--network` option accordingly.
 
-## Python-based installation with `pip`
-
-Create a Python virtual-env using your favorite workflow, For example:
-```
-mkdir nornir-srl && cd nornir-srl
-python3 -m venv .venv
-source .venv/bin/activate
-```
-Following command will install the the `nornir-srl` module and all its dependencies, including Nornir core.
-
-```
-pip install wheel
-pip install -U nornir-srl
-```
-
-## Python-based installation with `uv`
+## Python-based installation with `uv` (recommended)
 
 [`uv`](https://github.com/astral-sh/uv) is a standalone Python package manager.
 Install `uv` and then install `nornir-srl` directly from GitHub:
@@ -122,6 +107,21 @@ fcli-mcp --help
 ```
 
 > **Note:** Ensure your shell's `PATH` includes the directory where `uv` or `pip` installs binaries (typically `~/.local/bin` on Linux/macOS).
+
+## Python-based installation with `pip`
+
+Create a Python virtual-env using your favorite workflow, For example:
+```
+mkdir nornir-srl && cd nornir-srl
+python3 -m venv .venv
+source .venv/bin/activate
+```
+Following command will install the the `nornir-srl` module and all its dependencies, including Nornir core.
+
+```
+pip install wheel
+pip install -U nornir-srl
+```
 
 ## Nornir-based inventory mode
 
