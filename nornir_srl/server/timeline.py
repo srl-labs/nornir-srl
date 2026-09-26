@@ -39,6 +39,7 @@ from ..changes import (
 from ..checks import Finding, run_checks
 from ..fabric import FabricState
 from ..incidents import Incident, correlate
+from ..reports import reading_reports
 
 if TYPE_CHECKING:  # pragma: no cover - types only
     from .store import FabricStore
@@ -293,7 +294,9 @@ class Watcher:
         store = self.store
         if store.stopping:
             raise RuntimeError("the store is stopping")
-        state = store.fabric_state(None, WATCH_REPORTS, history=False)
+        state = store.fabric_state(
+            None, reading_reports(WATCH_REPORTS), history=False, watched=self.timeline.watched()
+        )
         # What the flap check counts in, and the cables the correlation
         # remembers from before a link went down.
         state.changes = self.timeline.recent()

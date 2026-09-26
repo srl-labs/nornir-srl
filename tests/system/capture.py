@@ -41,8 +41,10 @@ DEFAULT_PORT = 57400
 
 #: Reports with no gNMI exchange of their own to record. ``overview`` and
 #: ``topology`` are computed by the server from streamed state; ``checks``
-#: correlates the reports it declares, and is recorded through those.
-SKIP = {"overview", "topology", "checks"}
+#: correlates the reports it declares, and is recorded through those;
+#: ``bgp_received_routes`` makes exactly the gets of the ``bgp_rib_*``
+#: reports, and is replayed from theirs.
+SKIP = {"overview", "topology", "checks", "bgp_received_routes"}
 
 
 class RecordingDevice(SrLinux):

@@ -11,8 +11,16 @@ import pytest
 from nornir_srl.connections.helpers import clean_structured_key
 from nornir_srl.connections.interfaces import NetworkInstanceMixin
 from nornir_srl.connections.routing import RoutingMixin
-from nornir_srl.records import Egress
-from nornir_srl.reports import ES_TABLE, IP_RIB_TABLE, LAG_TABLE, TUNNEL_TABLE, bgp_rib_table
+from nornir_srl.records import BgpRib, BgpRoute, Egress
+from nornir_srl.reports import (
+    ES_TABLE,
+    IP_RIB_TABLE,
+    LAG_TABLE,
+    TUNNEL_TABLE,
+    bgp_rib_table,
+    coerce_params,
+    get_report,
+)
 
 # --------------------------------------------------------------------------- #
 # clean_structured_key
@@ -1448,6 +1456,120 @@ def _vrf_rib_device(
             ),
         }
     )
+
+
+def test_get_rib_reads_a_named_instance_from_the_envelope_it_arrives_under():
+    """A Get naming the instance is answered under that path, not the instance list."""
+    device = _FakeRouting(
+        {
+            "ipv4-unicast": [
+                {
+                    "network-instance[name=default]/route-table/ipv4-unicast": {
+                        "route": [{"ipv4-prefix": "192.0.2.1/32", "active": True, "next-hop-group": "7"}]
+                    }
+                }
+            ],
+            "next-hop-group": [
+                {"network-instance[name=default]/route-table": {"next-hop-group": [{"index": "7", "next-hop": [{"next-hop": "9"}]}]}}
+            ],
+            "next-hop[index=": [
+                {
+                    "network-instance[name=default]/route-table": {
+                        "next-hop": [{"index": "9", "type": "direct", "ip-address": "fe80::1", "subinterface": "ethernet-1/1.0"}]
+                    }
+                }
+            ],
+        }
+    )
+    (table,) = device.get_rib(afi="ipv4-unicast", network_instance="default")["ip_rib"]
+    assert table.ni == "default"
+    (route,) = table.routes
+    assert route.prefix == "192.0.2.1/32"
+    assert route.next_hops[0].egress == (Egress("interface", "ethernet-1/1.0"),)
+
+
+class _PathRouting(RoutingMixin):
+    """RoutingMixin answering each path of a Get on its own, and keeping them."""
+
+    def __init__(self, responses: Dict[str, List[Dict[str, Any]]]):
+        self._responses = responses
+        self.asked: List[str] = []
+
+    def get(self, paths: List[str], datatype: Optional[str] = "config", strip_mod: Optional[bool] = True) -> List[Dict[str, Any]]:
+        self.asked.extend(paths)
+        return [payload for path in paths for payload in self._responses.get(path, [{}])]
+
+
+def _instance(name: str, table: Dict[str, Any]) -> List[Dict[str, Any]]:
+    return [{"network-instance": [{"name": name, "route-table": table}]}]
+
+
+def test_get_routes_asks_for_the_prefixes_and_only_the_next_hops_they_use():
+    base = "/network-instance[name=*]/route-table"
+    device = _PathRouting(
+        {
+            f"{base}/ipv4-unicast/route[ipv4-prefix=6.6.6.1/32]": _instance(
+                "ipvrf-1",
+                {"ipv4-unicast": {"route": [{"ipv4-prefix": "6.6.6.1/32", "active": True, "next-hop-group": "100", "origin-network-instance": "ipvrf-1"}]}},
+            ),
+            f"{base}/next-hop-group[index=100]": _instance(
+                "ipvrf-1", {"next-hop-group": [{"index": "100", "next-hop": [{"next-hop": "1"}, {"next-hop": "2"}]}]}
+            ),
+            # One payload per next-hop, both of the same instance.
+            f"{base}/next-hop[index=1]": _instance(
+                "ipvrf-1", {"next-hop": [{"index": "1", "ip-address": "192.0.2.12", "tunnel": {"ip-prefix": "192.0.2.12/32", "type": "vxlan"}}]}
+            ),
+            f"{base}/next-hop[index=2]": _instance(
+                "ipvrf-1", {"next-hop": [{"index": "2", "ip-address": "192.0.2.13", "tunnel": {"ip-prefix": "192.0.2.13/32", "type": "vxlan"}}]}
+            ),
+        }
+    )
+    (table,) = device.get_routes("ipv4-unicast", ["6.6.6.1/32", "9.9.9.9/32"])["ip_rib"]
+    assert table.ni == "ipvrf-1"
+    (route,) = table.routes
+    assert [h.address for h in route.next_hops] == ["192.0.2.12", "192.0.2.13"]
+    assert [e.label for h in route.next_hops for e in h.egress] == ["vxlan:192.0.2.12/32", "vxlan:192.0.2.13/32"]
+    assert not any(p.endswith("[index=*]") for p in device.asked), "never the whole next-hop tables"
+
+
+def test_get_routes_asks_nothing_for_no_prefixes():
+    device = _PathRouting({})
+    assert device.get_routes("ipv4-unicast", []) == {"ip_rib": []}
+    assert device.asked == []
+
+
+def test_get_rib_summary_reads_each_table_size():
+    from nornir_srl.records import RouteTableSummary
+
+    stats = lambda active: {"statistics": {"active-routes": active}}  # noqa: E731
+    device = _PathRouting(
+        {
+            "/network-instance[name=*]/route-table/ipv4-unicast/statistics/active-routes": [
+                {
+                    "network-instance": [
+                        {"name": "default", "route-table": {"ipv4-unicast": stats(10)}},
+                        {"name": "ipvrf-1", "route-table": {"ipv4-unicast": stats(20)}},
+                    ]
+                }
+            ],
+        }
+    )
+    assert device.get_rib_summary()["rib_summary"] == [
+        RouteTableSummary("default", "ipv4", active=10),
+        RouteTableSummary("ipvrf-1", "ipv4", active=20),
+    ]
+
+
+def test_a_server_reading_holds_the_underlay_rib_and_the_size_of_the_rest():
+    from nornir_srl.reports import get_report, reading_reports
+
+    chosen = reading_reports(("lldp", "ipv4_rib", "ipv6_rib"))
+    assert chosen == ("lldp", "ipv4_rib_underlay", "ipv6_rib_underlay", "rib_summary")
+    underlay = get_report("ipv4_rib_underlay")
+    assert underlay.stands_in_for == "ipv4_rib"
+    assert all("[name=default]" in spec.path for spec in underlay.subscribe)
+    assert all(spec.path.endswith("/statistics/active-routes") for spec in get_report("rib_summary").subscribe)
+    assert reading_reports(("lldp",)) == ("lldp",), "no route table, no sizes either"
 
 
 #: An indirect next-hop as SR Linux reports it: the BGP peer address, and the
@@ -3050,3 +3172,77 @@ def test_get_arp_reads_a_single_interface_dict_on_the_network_instance():
     (cache,) = device.get_arp()["arp"]
     assert cache.nis == ("vrf1",)
     assert cache.interface == "irb1.100"
+
+
+def test_received_routes_takes_a_link_local_peer_scoped_to_its_interface():
+    """An unnumbered peer is fe80::…%<interface>: a peer, if not an IP address."""
+    peer = "fe80::1863:eff:feff:1%ethernet-1/29.0"
+    other = "fe80::1863:eff:feff:1%ethernet-1/30.0"
+
+    class Device:
+        def get_bgp_rib(self, route_fam, route_type=None, rib="in"):
+            routes = (BgpRoute(peer, prefix="10.0.0.1/32"), BgpRoute(other), BgpRoute("0.0.0.0"))
+            return {"bgp_rib": [BgpRib("default", route_fam, route_type or "", routes)]}
+
+    spec = get_report("bgp_received_routes")
+    params = coerce_params(spec, {"peer": peer, "family": "ipv4"})
+    assert params == {"peer": peer, "family": "ipv4"}
+    (rib,) = spec.getter(Device(), **params)["bgp_rib"]
+    assert [r.neighbor for r in rib.routes] == [peer]
+    # Without a peer: what every peer sent, and nothing originated locally.
+    ribs = spec.getter(Device())["bgp_rib"]
+    assert len(ribs) == 9  # five EVPN route types and four other families
+    assert {r.neighbor for rib in ribs for r in rib.routes} == {peer, other}
+
+
+def test_get_bgp_rib_out_reads_what_was_sent_to_each_peer():
+    """rib='out' is the rib-out-post: keyed by the peer a route went to, with
+    the attributes it was sent with, and not the local-rib."""
+    attr_sets, _ = _ip_rib_payloads("ipv4-unicast", "10.10.0.0/24", {"community": ["65000:100"]})
+    sent = [
+        {
+            "network-instance": [
+                {
+                    "name": "default",
+                    "bgp-rib": {
+                        "afi-safi": [
+                            {
+                                "afi-safi-name": "ipv4-unicast",
+                                "ipv4-unicast": {
+                                    "rib-in-out": {
+                                        "rib-out-post": {
+                                            "route": [
+                                                {"prefix": "192.0.2.11/32", "neighbor": "10.0.0.6", "attr-id": 1}
+                                            ]
+                                        }
+                                    }
+                                },
+                            }
+                        ]
+                    },
+                }
+            ]
+        }
+    ]
+    dev = _FakeRouting({"attr-sets/attr-set": attr_sets, "rib-in-out/rib-out-post/route": sent})
+    (rib,) = dev.get_bgp_rib(route_fam="ipv4", rib="out")["bgp_rib"]
+    (route,) = rib.routes
+    assert (route.prefix, route.neighbor, route.communities) == ("192.0.2.11/32", "10.0.0.6", ("65000:100",))
+    assert not (route.used or route.valid or route.best)
+    with pytest.raises(ValueError):
+        dev.get_bgp_rib(route_fam="ipv4", rib="sideways")
+
+
+@pytest.mark.parametrize("name,rib", [("bgp_received_routes", "in"), ("bgp_advertised_routes", "out")])
+def test_peer_routes_read_their_own_side_of_the_rib(name, rib):
+    asked = []
+
+    class Device:
+        def get_bgp_rib(self, route_fam, route_type=None, rib="in"):
+            asked.append(rib)
+            return {"bgp_rib": [BgpRib("default", route_fam, route_type or "", (BgpRoute("10.0.0.6"),))]}
+
+    ribs = get_report(name).getter(Device(), peer="10.0.0.6", family="evpn")["bgp_rib"]
+    assert [r.route_type for r in ribs] == ["1", "2", "3", "4", "5"]
+    assert set(asked) == {rib}
+    assert ("st" in get_report(name).table_for({}).column_names) == (rib == "in")

@@ -69,7 +69,7 @@ from .acks import mark as mark_acknowledged
 from .changes import parse_since
 from .checks import REQUIRED_REPORTS, run_checks
 from .incidents import correlate
-from .records import BgpVpnInstance, NeighborCache, NeighborEntry, Route, as_dict
+from .records import BgpVpnInstance, EthernetSegment, NeighborCache, NeighborEntry, Route, RouteNextHop, as_dict
 from .reports import ALL_SURFACES, SERVER, ParamSpec
 from .rows import Column, countdown
 
@@ -98,21 +98,26 @@ class Sighting:
     #: binding that named the MAC. ``local``: a bridge-table entry learned on
     #: this node's own port. ``remote``: one learned over the overlay, from a
     #: VTEP or behind a segment. ``duplicate``: learned locally here and on
-    #: :attr:`also_on` as well. ``not-found``: no node has it.
+    #: :attr:`also_on` as well. ``multihomed``: learned locally here and on
+    #: :attr:`also_on`, each on a port of the same ethernet-segment.
+    #: ``bgp``: a host route to the IP that BGP installed in a route table.
+    #: ``not-found``: no node has it.
     kind: str
     #: The IP a binding was found for, or the MAC.
     address: str
     #: What the entry is on: the subinterface an address is configured on or a
     #: binding or a local entry was learned on, the VTEP a remote one came
     #: from, or the segment it is behind. Exactly one of the three is set for
-    #: anything that was found.
+    #: anything that was found, except that a local entry learned on a port of
+    #: an ethernet-segment also carries that segment's ESI.
     interface: str = ""
     vtep: str = ""
     esi: str = ""
     #: How the entry got there, as the table says it: ``learnt``, ``evpn``,
     #: ``static``, ``dynamic``.
     origin: str = ""
-    #: ``configured``: the prefix as it is configured, ``192.0.2.3/32``.
+    #: ``configured``: the prefix as it is configured, ``192.0.2.3/32``;
+    #: ``bgp``: the host route, ``6.6.6.1/32``.
     prefix: str = ""
     #: ``arp``/``neighbor``: the MAC the binding resolved to, and when it goes.
     mac: str = ""
@@ -122,11 +127,15 @@ class Sighting:
     vni: Optional[int] = None
     #: ``remote`` behind a segment: what the segment is called on the nodes
     #: that have it configured. Empty when none of the collected nodes do.
+    #: Learned locally: the segment the port it was learned on belongs to.
     segments: Tuple[str, ...] = ()
-    #: ``duplicate``: the other nodes that learned it locally.
+    #: ``duplicate`` or ``multihomed``: the other nodes that learned it locally.
     also_on: Tuple[str, ...] = ()
     #: ``not-found``: how many nodes' bridge tables were searched.
     searched: int = 0
+    #: ``bgp``: the route's next-hops, each with what it resolves over:
+    #: ``10.1.4.16 (vxlan 192.0.2.15, 192.0.2.16)``.
+    next_hops: Tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -480,6 +489,60 @@ def _es_names(state: FabricState) -> Dict[str, Tuple[str, ...]]:
     return {esi: tuple(sorted(found)) for esi, found in names.items()}
 
 
+def _port_segments(state: FabricState) -> Dict[Tuple[str, str], EthernetSegment]:
+    """(node, port) -> the ethernet-segment that port belongs to on that node."""
+    return {
+        (node, port): segment
+        for node, segment in state.items("es")
+        if segment.esi
+        for port in segment.interfaces
+        if port
+    }
+
+
+def _next_hop_text(hop: RouteNextHop) -> str:
+    """A route's next-hop, with the tunnels or interfaces it leaves by."""
+    tunnels = [e.value.split("/", 1)[0] for e in hop.egress if e.kind == "tunnel"]
+    interfaces = [e.value for e in hop.egress if e.kind != "tunnel" and e.value]
+    via = ""
+    if tunnels:
+        kinds = sorted({e.tunnel for e in hop.egress if e.kind == "tunnel" and e.tunnel})
+        via = f"{'/'.join(kinds) or 'tunnel'} {', '.join(dict.fromkeys(tunnels))}"
+    elif interfaces:
+        via = ", ".join(dict.fromkeys(interfaces))
+    return f"{hop.address or hop.type or '?'}" + (f" ({via})" if via else "")
+
+
+def _bgp_host_routes(state: FabricState, address: Any) -> List[Sighting]:
+    """The active host routes to *address* that BGP installed, on every node."""
+    found = []
+    for report in ("ipv4_rib", "ipv6_rib"):
+        for node, table in state.items(report):
+            for route in table.routes:
+                if not route.active or not route.type.startswith("bgp"):
+                    continue
+                network = _network(route.prefix)
+                if (
+                    network is None
+                    or network.version != address.version
+                    or network.prefixlen != network.max_prefixlen
+                    or network.network_address != address
+                ):
+                    continue
+                found.append(
+                    Sighting(
+                        node=node,
+                        ni=table.ni,
+                        kind="bgp",
+                        address=str(address),
+                        origin=route.type,
+                        prefix=route.prefix,
+                        next_hops=tuple(_next_hop_text(hop) for hop in route.next_hops),
+                    )
+                )
+    return found
+
+
 def lens_where(state: FabricState, target: str = "") -> List[Sighting]:
     """Every place in the fabric that knows about one MAC or IP address.
 
@@ -488,7 +551,10 @@ def lens_where(state: FabricState, target: str = "") -> List[Sighting]:
     over the overlay, and do two of them disagree about that*.
 
     An IP is resolved through ARP or ND to a MAC first, so ``where 10.0.1.51``
-    and ``where 00:C1:AB:00:01:21`` converge on the same answer.
+    and ``where 00:C1:AB:00:01:21`` converge on the same answer. An IP no
+    interface has and no binding names can still be a host route BGP
+    learned - a loopback behind a CE, an EVPN RT-5 host - and each node that
+    installed one says how it learned it and where it forwards.
     """
     wanted = str(target or "").strip()
     if not wanted:
@@ -539,15 +605,18 @@ def lens_where(state: FabricState, target: str = "") -> List[Sighting]:
                     expiry=countdown(entry.expires_in) if ages_out else "",
                 )
             )
+        sightings.extend(_bgp_host_routes(state, address))
         if not mac:
             if not sightings:
                 nodes = set(state.nodes("ni")) | set(state.nodes("arp")) | set(state.nodes("nd"))
+                nodes |= set(state.nodes("ipv4_rib")) | set(state.nodes("ipv6_rib"))
                 sightings.append(
                     Sighting(node="", ni="", kind="not-found", address=str(address), searched=len(nodes))
                 )
             return sightings
 
     segments = _es_names(state)
+    ports = _port_segments(state)
     # Network-instance -> the sightings learned locally in it, by position.
     local: Dict[str, List[int]] = {}
     for node, table, entry in state.sub_items("mac", "entries"):
@@ -555,8 +624,19 @@ def lens_where(state: FabricState, target: str = "") -> List[Sighting]:
             continue
         if entry.local:
             local.setdefault(table.ni, []).append(len(sightings))
+            # A bridge table names the subinterface; a segment names its port.
+            segment = ports.get((node, parent(str(entry.interface or ""))))
             sightings.append(
-                Sighting(node, table.ni, "local", mac, interface=entry.interface, origin=text(entry.type))
+                Sighting(
+                    node,
+                    table.ni,
+                    "local",
+                    mac,
+                    interface=entry.interface,
+                    origin=text(entry.type),
+                    esi=segment.esi if segment else "",
+                    segments=(segment.name,) if segment else (),
+                )
             )
             continue
         sightings.append(
@@ -576,18 +656,22 @@ def lens_where(state: FabricState, target: str = "") -> List[Sighting]:
         )
 
     # Two nodes both owning one MAC locally is legitimate when they are the two
-    # sides of an all-active segment, and is a duplicate or a silent move
-    # otherwise. The bridge table cannot say which, so say that it cannot: each
-    # local sighting becomes a duplicate naming the others.
+    # sides of a multihomed segment, and is a duplicate or a silent move
+    # otherwise. When every node learned it on a port of one and the same
+    # segment it is multihomed; when not, the bridge table cannot say which,
+    # so say that it cannot: each local sighting becomes a duplicate naming
+    # the others.
     for indexes in local.values():
         owners = sorted({sightings[i].node for i in indexes})
         if len(owners) < 2:
             continue
+        esis = {sightings[i].esi for i in indexes}
+        kind = "multihomed" if len(esis) == 1 and "" not in esis else "duplicate"
         for i in indexes:
             sighting = sightings[i]
             sightings[i] = replace(
                 sighting,
-                kind="duplicate",
+                kind=kind,
                 also_on=tuple(node for node in owners if node != sighting.node),
             )
 
@@ -613,17 +697,26 @@ def _sighting_detail(sighting: Sighting) -> str:
         if _mac(sighting.address):
             return f"no node reports it in any bridge table ({sighting.searched} searched)"
         return (
-            "no interface has it and no ARP or ND entry names it "
-            f"({sighting.searched} nodes searched)"
+            "no interface has it, no ARP or ND entry names it and no BGP host "
+            f"route leads to it ({sighting.searched} nodes searched)"
         )
     if sighting.kind == "configured":
         return f"{sighting.prefix} configured on {sighting.interface}"
+    if sighting.kind == "bgp":
+        hops = "; ".join(sighting.next_hops) or "no next-hop"
+        return f"{sighting.prefix} learned by {sighting.origin}, next-hop {hops}"
     detail = sighting.origin
     if sighting.vtep:
         detail += f", overlay {sighting.overlay}"
         detail += f", vni {sighting.vni}" if sighting.vni is not None else ""
     elif sighting.esi:
         detail += f", segment {', '.join(sighting.segments) or 'not local'}"
+        detail += f" ({sighting.esi})" if sighting.kind != "remote" else ""
+    if sighting.kind == "multihomed":
+        return detail + (
+            f"; also learned locally on {', '.join(sighting.also_on)}, "
+            f"on the same ethernet-segment"
+        )
     if sighting.also_on:
         detail += (
             f"; also learned locally on {', '.join(sighting.also_on)}: expected on "
@@ -636,7 +729,10 @@ WHERE_COLUMNS: Tuple[Column, ...] = (
     Column("NI", "ni"),
     Column("Found", "kind"),
     Column("Address", "address"),
-    Column("Via", lambda s: s.interface or s.vtep or s.esi),
+    Column(
+        "Via",
+        lambda s: s.interface or s.vtep or s.esi or ", ".join(h.split(" ", 1)[0] for h in s.next_hops),
+    ),
     Column("Detail", _sighting_detail),
 )
 
@@ -645,6 +741,8 @@ _SIGHTING_STATE = {
     "local": _UP,
     "arp": _UP,
     "neighbor": _UP,
+    "bgp": _UP,
+    "multihomed": _UP,
     "duplicate": _WARN,
     "not-found": _DOWN,
 }
@@ -666,10 +764,15 @@ def _sighting_item(s: Sighting) -> Item:
     if s.mac:
         details.append(Detail("MAC", s.mac))
     if s.origin:
-        details.append(Detail("Origin", s.origin))
+        details.append(Detail("Learned by" if s.kind == "bgp" else "Origin", s.origin))
+    if s.next_hops:
+        details.append(Detail("Next-hop", tuple(s.next_hops)))
     if s.expiry:
         details.append(Detail("Expires", s.expiry))
-    if s.also_on:
+    if s.also_on and s.kind == "multihomed":
+        details.append(Detail("Also learned locally on", tuple(s.also_on)))
+        details.append(Detail("Note", "learned on the same ethernet-segment on each node"))
+    elif s.also_on:
         details.append(
             Detail(
                 "Also learned locally on",
@@ -1674,7 +1777,7 @@ LENSES: Tuple[LensSpec, ...] = (
             "configured or owns it, which nodes learned it over the overlay, "
             "and whether more than one claims it locally."
         ),
-        requires=("ni", "mac", "arp", "nd", "es"),
+        requires=("ni", "mac", "arp", "nd", "es", "ipv4_rib", "ipv6_rib"),
         columns=WHERE_COLUMNS,
         run=lens_where,
         tree=tree_where,

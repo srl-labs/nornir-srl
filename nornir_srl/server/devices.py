@@ -10,6 +10,8 @@ source simply by swapping the ``get`` implementation:
   subscribe to, without duplicating the path definitions.
 * :class:`CachedDevice` answers from the streamed state tree, falling back to a
   TTL-cached gNMI ``Get`` for paths that could not be subscribed.
+* :class:`DirectDevice` answers with those Gets only, for paths asked for by
+  key that nothing subscribes to.
 """
 
 from __future__ import annotations
@@ -91,6 +93,31 @@ class RecordingDevice(MixinDevice):
         result: List[Dict[str, Any]] = []
         for path in paths:
             result.extend(self._getter(path, datatype or "config"))
+        return result
+
+
+class DirectDevice(MixinDevice):
+    """Report getters answered by gNMI Gets alone, never from the streamed state.
+
+    For what a reading asks for by key - one prefix, one next-hop-group, one
+    VRF's route table - and does not subscribe to. Served from the streamed
+    tree, such a path would be borrowed from whatever else is streamed under
+    the same root, and answer with that rather than with what the node has.
+    """
+
+    def __init__(self, stream: HostStream) -> None:
+        self.stream = stream
+        self.capabilities = getattr(stream.device, "capabilities", None)
+
+    def get(
+        self,
+        paths: List[str],
+        datatype: Optional[str] = "config",
+        strip_mod: Optional[bool] = True,
+    ) -> List[Dict[str, Any]]:
+        result: List[Dict[str, Any]] = []
+        for path in paths:
+            result.extend(self.stream.direct_get(path, datatype or "config"))
         return result
 
 

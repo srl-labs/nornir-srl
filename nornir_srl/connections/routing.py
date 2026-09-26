@@ -2,10 +2,11 @@
 from __future__ import annotations
 
 import logging
+import re
 import threading
 from contextlib import contextmanager
 from dataclasses import replace
-from typing import Any, Dict, Iterator, List, Optional, Tuple
+from typing import Any, Dict, Iterator, List, Optional, Sequence, Tuple
 
 from ..records import (
     BgpPeers,
@@ -17,6 +18,7 @@ from ..records import (
     Route,
     RouteNextHop,
     RouteTable,
+    RouteTableSummary,
     StaticNextHop,
     StaticRoute,
     StaticRouteTable,
@@ -276,6 +278,207 @@ def _gnmi_path_missing(exc: BaseException) -> bool:
     return False
 
 
+#: A Get envelope that names the network-instance: what a path with every key
+#: of the instance spelled out is answered under.
+_KEYED_INSTANCE = re.compile(r"^/?network-instance\[name=([^\]]+)\](?:/(.*))?$")
+_STEP = re.compile(r"([^/\[]+)((?:\[[^\]]*\])*)")
+
+
+def _instances(payloads: Sequence[Any]) -> Iterator[Dict[str, Any]]:
+    """The network-instances in Get payloads, whichever envelope they came in.
+
+    A wildcard instance is answered under ``network-instance``, as the list;
+    a named one - ``/network-instance[name=default]/route-table/ipv4-unicast`` -
+    under that path itself, holding only what is below it. The latter is
+    rebuilt into one entry of the former, so a getter reads either the same.
+    """
+    for payload in payloads:
+        if not isinstance(payload, dict):
+            continue
+        for key, value in payload.items():
+            if key == "network-instance":
+                yield from (ni for ni in as_list(value) if isinstance(ni, dict))
+                continue
+            match = _KEYED_INSTANCE.match(str(key))
+            if not match or not isinstance(value, dict):
+                continue
+            ni: Dict[str, Any] = {"name": match.group(1)}
+            node: Dict[str, Any] = ni
+            steps = _STEP.findall(match.group(2) or "")
+            for i, (name, keys) in enumerate(steps):
+                last = i == len(steps) - 1
+                if keys:
+                    entry = dict(k.split("=", 1) for k in re.findall(r"\[([^\]]*)\]", keys) if "=" in k)
+                    if last:
+                        entry.update(value)
+                    node[name] = [entry]
+                    node = entry
+                elif last:
+                    node[name] = value
+                else:
+                    node = node.setdefault(name, {})
+            if not steps:
+                ni.update(value)
+            yield ni
+
+
+def _afi_routes(ni: Any, afi: str) -> List[Dict[str, Any]]:
+    """The route entries of one network-instance's *afi* table."""
+    if not isinstance(ni, dict):
+        return []
+    table = (ni.get("route-table") or {}).get(afi) or {}
+    return [r for r in as_list(table.get("route")) if isinstance(r, dict)]
+
+
+def _route_tables(
+    afi: str,
+    route_payloads: Sequence[Dict[str, Any]],
+    nhs: Sequence[Dict[str, Any]],
+    nhgroups: Sequence[Dict[str, Any]],
+    lpm_address: Optional[str] = None,
+) -> List[RouteTable]:
+    """Route tables, with each route's next-hops resolved as far as *nhs* and *nhgroups* go.
+
+    Each argument is the payloads of one or more Gets, all merged.
+    """
+    prefix_key = "ipv4-prefix" if afi == "ipv4-unicast" else "ipv6-prefix"
+
+    # The next-hop, next-hop-group and route tables are three separate Gets,
+    # so they can disagree: a route can name a group, or a group a next-hop,
+    # that the neighbouring Get did not (or no longer) return. Resolving
+    # defensively degrades one row instead of failing the whole report.
+    nh_mapping: Dict[str, Dict[str, Any]] = {}
+    for ni in _instances(nhs):
+        # One instance can arrive in several payloads, one per Get.
+        tmp_map: Dict[str, Any] = nh_mapping.setdefault(ni.get("name"), {})
+        for nh in as_list(ni.get("route-table", {}).get("next-hop")):
+            entry: Dict[str, Any] = {
+                "ip-address": nh.get("ip-address"),
+                "type": nh.get("type"),
+                "subinterface": nh.get("subinterface"),
+            }
+            indirect = nh.get("indirect", {})
+            resolving_tunnel = indirect.get(
+                "resolving-tunnel", nh.get("resolving-tunnel")
+            )
+            resolving_route = indirect.get(
+                "resolving-route", nh.get("resolving-route")
+            )
+            # A next-hop already resolved onto a tunnel carries it directly,
+            # under its own key and naming the type ``type`` rather than
+            # ``tunnel-type``; an indirect one names the tunnel it recurses
+            # on instead. Either way the VTEP is what the route egresses to.
+            tunnel = resolving_tunnel or nh.get("tunnel") or {}
+            if tunnel:
+                entry["tunnel"] = Egress(
+                    "tunnel",
+                    str(tunnel.get("ip-prefix") or ""),
+                    tunnel=str(tunnel.get("tunnel-type") or tunnel.get("type") or ""),
+                )
+            if resolving_route:
+                entry["resolving-route"] = resolving_route.get("ip-prefix")
+                # The resolving route names its own next-hop-group, which is
+                # what lets an indirect next-hop be followed to a real port.
+                entry["resolving-nhg"] = resolving_route.get("next-hop-group")
+            tmp_map[nh.get("index")] = entry
+
+    nhgroup_mapping: Dict[str, Dict[str, List[Any]]] = {}
+    for ni in _instances(nhgroups):
+        ni_name = ni.get("name")
+        nh_map: Dict[str, List[Any]] = nhgroup_mapping.setdefault(ni_name, {})
+        for nhgroup in as_list(ni.get("route-table", {}).get("next-hop-group")):
+            nh_map[nhgroup.get("index")] = [
+                nh_mapping.get(ni_name, {}).get(nh.get("next-hop"), {})
+                for nh in as_list(nhgroup.get("next-hop"))
+            ]
+
+    def egress(
+        ni_name: str, nh: Dict[str, Any], seen: Tuple[str, ...] = ()
+    ) -> List[Egress]:
+        """Where a next-hop leaves the node.
+
+        A next-hop resolved down to a port or a tunnel says so itself. An
+        indirect one only names the route it resolves through, so the port
+        is one level further down, in the next-hop-group of *that* route -
+        which is why a BGP route in an ip-vrf, whose next-hop is the BGP
+        peer rather than a connected address, is followed rather than
+        reported as the prefix it recurses on. The prefix is still what is
+        shown when the chain cannot be walked to an interface.
+        """
+        if nh.get("subinterface"):
+            return [Egress("interface", str(nh["subinterface"]))]
+        if nh.get("tunnel"):
+            return [nh["tunnel"]]
+        via = nh.get("resolving-nhg")
+        if via and via not in seen and len(seen) < _MAX_NH_RESOLVE_DEPTH:
+            hops = [
+                hop
+                for onward in nhgroup_mapping.get(ni_name, {}).get(via, [])
+                for hop in egress(ni_name, onward, seen + (via,))
+            ]
+            if hops:
+                return hops
+        if nh.get("resolving-route"):
+            return [Egress("route", str(nh["resolving-route"]))]
+        return []
+
+    tables: List[RouteTable] = []
+    for ni in _instances(route_payloads):
+        ni_name = str(ni.get("name", ""))
+        afi_table = ni.get("route-table", {}).get(afi) or {}
+        if not afi_table:
+            continue
+        raw_routes = [r for r in as_list(afi_table.get("route")) if isinstance(r, dict)]
+        if lpm_address:
+            # Narrowing keeps the one prefix the address falls into, or
+            # nothing: the instance then has no route to it. Nothing is
+            # rewritten in place, so a payload a cache still holds on
+            # behalf of the renders that want the table in full is intact.
+            lpm_prefix = lpm(
+                lpm_address, [r[prefix_key] for r in raw_routes if prefix_key in r]
+            )
+            if not lpm_prefix:
+                continue
+            raw_routes = [r for r in raw_routes if r.get(prefix_key) == lpm_prefix]
+
+        routes = []
+        for route in raw_routes:
+            orig_ni = str(route.get("origin-network-instance") or ni_name)
+            leaked = orig_ni != ni_name
+            next_hops: List[RouteNextHop] = []
+            if "next-hop-group" in route:
+                nhg_ni = str(route.get("next-hop-group-network-instance") or orig_ni)
+                for nh in nhgroup_mapping.get(nhg_ni, {}).get(route["next-hop-group"], []):
+                    next_hops.append(
+                        RouteNextHop(
+                            address=str(nh.get("ip-address") or ""),
+                            type=str(nh.get("type") or ""),
+                            resolving_route=str(nh.get("resolving-route") or ""),
+                            egress=tuple(
+                                # A leaked route leaves through a port of
+                                # the instance it came from.
+                                replace(hop, ni=orig_ni)
+                                if leaked and hop.kind == "interface"
+                                else hop
+                                for hop in egress(nhg_ni, nh)
+                            ),
+                        )
+                    )
+            routes.append(
+                Route(
+                    prefix=str(route.get(prefix_key) or ""),
+                    type=str(route.get("route-type") or ""),
+                    active=bool(route.get("active")),
+                    metric=as_int(route.get("metric")),
+                    preference=as_int(route.get("preference")),
+                    leaked_from=orig_ni if leaked else "",
+                    next_hops=tuple(next_hops),
+                )
+            )
+        tables.append(RouteTable(ni=ni_name, routes=tuple(routes)))
+    return tables
+
+
 class RoutingMixin:
     """Mixin providing routing and BGP related getters."""
 
@@ -296,13 +499,20 @@ class RoutingMixin:
         route_type: Optional[str] = "2",
         network_instance: str = "*",
         detail: bool = False,
+        rib: str = "in",
     ) -> Dict[str, Any]:
         """The BGP RIB of one family, as records carrying every path attribute.
 
         *detail* is accepted for the callers that used to ask for the extra
         attributes: a record carries all of them, and the table declared for
         the report decides which to show.
+
+        *rib* ``out`` reads the rib-out-post instead: the routes sent to each
+        peer, keyed by the peer they went to, with the attributes they were
+        sent with and none of the used/valid/best flags a received route has.
         """
+        if rib not in ("in", "out"):
+            raise ValueError(f"Invalid rib {rib}: 'in' or 'out'")
         del detail
         mod_version = model_version(
             self.capabilities, "bgp-rib", "urn:nokia.com:srlinux:bgp:rib-bgp"
@@ -329,18 +539,26 @@ class RoutingMixin:
             raise ValueError(f"Invalid route type {route_type}")
 
         # The rib-in-post of an EVPN route type, or the local-rib of an IP
-        # family. Up to 24.7 the family sits directly under bgp-rib and the
+        # family; or for *rib* ``out``, the rib-out-post of either. Up to 24.7 the family sits directly under bgp-rib and the
         # containers are named in the plural; from 24.10 it sits under an
         # afi-safi list entry, and the containers are singular.
         under_afi_safi = f"/bgp-rib/afi-safi[afi-safi-name={family}]/{family}"
         if family == "evpn":
             container = _EVPN_ROUTE_CONTAINERS[str(route_type)]
+            post = "rib-out-post" if rib == "out" else "rib-in-post"
             path = (
                 f"/network-instance[name={network_instance}]"
                 + (under_afi_safi if evpn_path_version == 2 else f"/bgp-rib/{family}")
-                + f"/rib-in-out/rib-in-post/{container}{'' if evpn_path_version == 2 else 's'}"
+                + f"/rib-in-out/{post}/{container}{'' if evpn_path_version == 2 else 's'}"
             )
-            steps = ("rib-in-out", "rib-in-post", container)
+            steps = ("rib-in-out", post, container)
+        elif rib == "out":
+            path = (
+                f"/network-instance[name={network_instance}]"
+                + (under_afi_safi if ip_path_version > 1 else f"/bgp-rib/{family}")
+                + f"/rib-in-out/rib-out-post/route{'s' if ip_path_version < 3 else ''}"
+            )
+            steps = ("rib-in-out", "rib-out-post", "route")
         else:
             path = (
                 f"/network-instance[name={network_instance}]"
@@ -362,12 +580,13 @@ class RoutingMixin:
             for attr_set in ni.get("bgp-rib", {}).get("attr-sets", {}).get("attr-set", []):
                 attribs[ni_name][attr_set.get("index")] = attr_set
 
-        if family in ("l3vpn-ipv4-unicast", "l3vpn-ipv6-unicast"):
+        # Leaves / platforms without IP-VPN have no l3vpn-* RIB path, and a
+        # release that keeps no rib-out-post has none for what was sent.
+        if family in ("l3vpn-ipv4-unicast", "l3vpn-ipv6-unicast") or rib == "out":
             with _suppress_pygnmi_client_logging():
                 try:
                     resp = self.get(paths=[path], datatype="state")
                 except BaseException as e:
-                    # Leaves / platforms without IP-VPN have no l3vpn-* RIB path; skip instead of failing.
                     if _gnmi_path_missing(e):
                         logger.debug(
                             "%s: no %s RIB on this node, reporting it empty: %s",
@@ -467,8 +686,6 @@ class RoutingMixin:
         network_instance: Optional[str] = "*",
         lpm_address: Optional[str] = None,
     ) -> Dict[str, Any]:
-        prefix_key = "ipv4-prefix" if afi == "ipv4-unicast" else "ipv6-prefix"
-
         nhgroups = self.get(
             paths=[
                 f"/network-instance[name={network_instance}]/route-table/next-hop-group[index=*]"
@@ -481,146 +698,92 @@ class RoutingMixin:
             ],
             datatype="state",
         )
-
-        # The next-hop, next-hop-group and route tables are three separate Gets,
-        # so they can disagree: a route can name a group, or a group a next-hop,
-        # that the neighbouring Get did not (or no longer) return. Resolving
-        # defensively degrades one row instead of failing the whole report.
-        nh_mapping: Dict[str, Dict[str, Any]] = {}
-        for ni in as_list(first_payload(nhs).get("network-instance")):
-            tmp_map: Dict[str, Any] = {}
-            for nh in as_list(ni.get("route-table", {}).get("next-hop")):
-                entry: Dict[str, Any] = {
-                    "ip-address": nh.get("ip-address"),
-                    "type": nh.get("type"),
-                    "subinterface": nh.get("subinterface"),
-                }
-                indirect = nh.get("indirect", {})
-                resolving_tunnel = indirect.get(
-                    "resolving-tunnel", nh.get("resolving-tunnel")
-                )
-                resolving_route = indirect.get(
-                    "resolving-route", nh.get("resolving-route")
-                )
-                # A next-hop already resolved onto a tunnel carries it directly,
-                # under its own key and naming the type ``type`` rather than
-                # ``tunnel-type``; an indirect one names the tunnel it recurses
-                # on instead. Either way the VTEP is what the route egresses to.
-                tunnel = resolving_tunnel or nh.get("tunnel") or {}
-                if tunnel:
-                    entry["tunnel"] = Egress(
-                        "tunnel",
-                        str(tunnel.get("ip-prefix") or ""),
-                        tunnel=str(tunnel.get("tunnel-type") or tunnel.get("type") or ""),
-                    )
-                if resolving_route:
-                    entry["resolving-route"] = resolving_route.get("ip-prefix")
-                    # The resolving route names its own next-hop-group, which is
-                    # what lets an indirect next-hop be followed to a real port.
-                    entry["resolving-nhg"] = resolving_route.get("next-hop-group")
-                tmp_map[nh.get("index")] = entry
-            nh_mapping[ni.get("name")] = tmp_map
-
-        nhgroup_mapping: Dict[str, Dict[str, List[Any]]] = {}
-        for ni in as_list(first_payload(nhgroups).get("network-instance")):
-            ni_name = ni.get("name")
-            nh_map: Dict[str, List[Any]] = {}
-            for nhgroup in as_list(ni.get("route-table", {}).get("next-hop-group")):
-                nh_map[nhgroup.get("index")] = [
-                    nh_mapping.get(ni_name, {}).get(nh.get("next-hop"), {})
-                    for nh in as_list(nhgroup.get("next-hop"))
-                ]
-            nhgroup_mapping[ni_name] = nh_map
-
-        def egress(
-            ni_name: str, nh: Dict[str, Any], seen: Tuple[str, ...] = ()
-        ) -> List[Egress]:
-            """Where a next-hop leaves the node.
-
-            A next-hop resolved down to a port or a tunnel says so itself. An
-            indirect one only names the route it resolves through, so the port
-            is one level further down, in the next-hop-group of *that* route -
-            which is why a BGP route in an ip-vrf, whose next-hop is the BGP
-            peer rather than a connected address, is followed rather than
-            reported as the prefix it recurses on. The prefix is still what is
-            shown when the chain cannot be walked to an interface.
-            """
-            if nh.get("subinterface"):
-                return [Egress("interface", str(nh["subinterface"]))]
-            if nh.get("tunnel"):
-                return [nh["tunnel"]]
-            via = nh.get("resolving-nhg")
-            if via and via not in seen and len(seen) < _MAX_NH_RESOLVE_DEPTH:
-                hops = [
-                    hop
-                    for onward in nhgroup_mapping.get(ni_name, {}).get(via, [])
-                    for hop in egress(ni_name, onward, seen + (via,))
-                ]
-                if hops:
-                    return hops
-            if nh.get("resolving-route"):
-                return [Egress("route", str(nh["resolving-route"]))]
-            return []
-
         resp = self.get(
             paths=[f"/network-instance[name={network_instance}]/route-table/{afi}"],
             datatype="state",
         )
-        tables: List[RouteTable] = []
-        for ni in as_list(first_payload(resp).get("network-instance")):
-            ni_name = str(ni.get("name", ""))
-            afi_table = ni.get("route-table", {}).get(afi) or {}
-            if not afi_table:
-                continue
-            raw_routes = [r for r in as_list(afi_table.get("route")) if isinstance(r, dict)]
-            if lpm_address:
-                # Narrowing keeps the one prefix the address falls into, or
-                # nothing: the instance then has no route to it. Nothing is
-                # rewritten in place, so a payload a cache still holds on
-                # behalf of the renders that want the table in full is intact.
-                lpm_prefix = lpm(
-                    lpm_address, [r[prefix_key] for r in raw_routes if prefix_key in r]
-                )
-                if not lpm_prefix:
-                    continue
-                raw_routes = [r for r in raw_routes if r.get(prefix_key) == lpm_prefix]
+        return {
+            "ip_rib": _route_tables(
+                afi, [first_payload(resp)], [first_payload(nhs)], [first_payload(nhgroups)], lpm_address
+            )
+        }
 
-            routes = []
-            for route in raw_routes:
-                orig_ni = str(route.get("origin-network-instance") or ni_name)
-                leaked = orig_ni != ni_name
-                next_hops: List[RouteNextHop] = []
-                if "next-hop-group" in route:
-                    nhg_ni = str(route.get("next-hop-group-network-instance") or orig_ni)
-                    for nh in nhgroup_mapping.get(nhg_ni, {}).get(route["next-hop-group"], []):
-                        next_hops.append(
-                            RouteNextHop(
-                                address=str(nh.get("ip-address") or ""),
-                                type=str(nh.get("type") or ""),
-                                resolving_route=str(nh.get("resolving-route") or ""),
-                                egress=tuple(
-                                    # A leaked route leaves through a port of
-                                    # the instance it came from.
-                                    replace(hop, ni=orig_ni)
-                                    if leaked and hop.kind == "interface"
-                                    else hop
-                                    for hop in egress(nhg_ni, nh)
-                                ),
-                            )
-                        )
-                routes.append(
-                    Route(
-                        prefix=str(route.get(prefix_key) or ""),
-                        type=str(route.get("route-type") or ""),
-                        active=bool(route.get("active")),
-                        metric=as_int(route.get("metric")),
-                        preference=as_int(route.get("preference")),
-                        leaked_from=orig_ni if leaked else "",
-                        next_hops=tuple(next_hops),
+    def get_routes(self, afi: str, prefixes: Sequence[str]) -> Dict[str, Any]:
+        """Only *prefixes*, in whichever network-instances have them.
+
+        What a reading asks for when it follows a few prefixes without holding
+        the route tables they are in: a Get per prefix, then only the
+        next-hop-groups and next-hops those routes name, rather than every
+        table of the node. A next-hop that resolves through another route is
+        shown as that route, not followed on to a port: that would take the
+        resolving route's groups as well.
+        """
+        prefix_key = "ipv4-prefix" if afi == "ipv4-unicast" else "ipv6-prefix"
+        if not prefixes:
+            return {"ip_rib": []}
+        routes = self.get(
+            paths=[
+                f"/network-instance[name=*]/route-table/{afi}/route[{prefix_key}={prefix}]"
+                for prefix in prefixes
+            ],
+            datatype="state",
+        )
+        # Asked for under every instance: the indexes are unique on the node,
+        # and the route does not always say which instance its group is in.
+        groups = sorted(
+            {
+                str(route["next-hop-group"])
+                for ni in _instances(routes)
+                for route in _afi_routes(ni, afi)
+                if "next-hop-group" in route
+            }
+        )
+        nhgroups = self.get(
+            paths=[f"/network-instance[name=*]/route-table/next-hop-group[index={index}]" for index in groups],
+            datatype="state",
+        ) if groups else []
+        hops = sorted(
+            {
+                str(member["next-hop"])
+                for ni in _instances(nhgroups)
+                for nhgroup in as_list((ni.get("route-table") or {}).get("next-hop-group"))
+                for member in as_list(nhgroup.get("next-hop"))
+                if isinstance(member, dict) and member.get("next-hop") is not None
+            }
+        )
+        nhs = self.get(
+            paths=[f"/network-instance[name=*]/route-table/next-hop[index={index}]" for index in hops],
+            datatype="state",
+        ) if hops else []
+        return {"ip_rib": _route_tables(afi, routes, nhs, nhgroups)}
+
+    def get_rib_summary(self) -> Dict[str, Any]:
+        """How many active routes each network-instance holds, per address family.
+
+        The one leaf, not the ``statistics`` container around it: a reading
+        streams it for every instance of every node, and it is all a reading
+        compares.
+        """
+        summaries: List[RouteTableSummary] = []
+        for afi, family in (("ipv4-unicast", "ipv4"), ("ipv6-unicast", "ipv6")):
+            resp = self.get(
+                paths=[f"/network-instance[name=*]/route-table/{afi}/statistics/active-routes"],
+                datatype="state",
+            )
+            for ni in as_list(first_payload(resp).get("network-instance")):
+                if not isinstance(ni, dict):
+                    continue
+                stats = (((ni.get("route-table") or {}).get(afi) or {}).get("statistics")) or {}
+                if not stats:
+                    continue
+                summaries.append(
+                    RouteTableSummary(
+                        ni=str(ni.get("name", "")),
+                        family=family,
+                        active=as_int(stats.get("active-routes")) or 0,
                     )
                 )
-            tables.append(RouteTable(ni=ni_name, routes=tuple(routes)))
-        return {"ip_rib": tables}
+        return {"rib_summary": summaries}
 
     def get_tunnel_table(self, network_instance: str = "*") -> Dict[str, Any]:
         """Get the IP tunnel-table (LDP, SR-ISIS, RSVP, VXLAN, ...).

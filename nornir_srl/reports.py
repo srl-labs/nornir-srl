@@ -32,11 +32,12 @@ column name is written.
 from __future__ import annotations
 
 import ipaddress
-from dataclasses import dataclass
-from typing import Any, Callable, Dict, FrozenSet, List, Mapping, Optional, Tuple, Union
+from dataclasses import dataclass, replace
+from typing import Any, Callable, Dict, FrozenSet, List, Mapping, Optional, Sequence, Tuple, Union
 
 from .connections.routing import BGP_RIB_ROUTE_FAM_ALIASES
 from .records import (
+    BgpRib,
     BgpRoute,
     EthernetSegment,
     IrbAddress,
@@ -81,6 +82,72 @@ class SubscriptionSpec:
         if self.mode == "sample":
             entry["sample_interval"] = int(self.sample_interval * 1_000_000_000)
         return entry
+
+
+#: Paths streamed ON_CHANGE rather than sampled. SAMPLE re-sends the whole
+#: subtree every interval whether anything changed or not, which for the
+#: state of a few hundred services on every node is most of what a large
+#: fabric's server does. These change rarely and carry no counters, so a
+#: change is all they send; measured on SR Linux, they are silent at steady
+#: state. What does carry counters - interface and subinterface statistics,
+#: BFD, the control plane's CPU - stays sampled: ON_CHANGE would send every
+#: tick of every counter. So do the ARP and ND caches, which live under the
+#: sampled subinterfaces.
+#:
+#: A path is streamed one way or the other on every report that reads it,
+#: and never overlaps a sampled one (tests/test_registry.py).
+ON_CHANGE_PATHS: FrozenSet[str] = frozenset(
+    {
+        # What a service is: its type, state, interfaces and overlay.
+        "/network-instance[name=*]/type",
+        "/network-instance[name=*]/oper-state",
+        "/network-instance[name=*]/interface",
+        "/network-instance[name=*]/vxlan-interface",
+        "/network-instance[name=*]/protocols/bgp/router-id",
+        "/network-instance[name=*]/protocols/bgp-vpn",
+        "/network-instance[name=*]/protocols/bgp-evpn",
+        "/network-instance[name=*]/static-routes",
+        # Port state, apart from its counters.
+        "/interface[name=*]/admin-state",
+        "/interface[name=*]/oper-state",
+        "/interface[name=*]/oper-down-reason",
+        "/interface[name=*]/description",
+        "/system/network-instance/protocols/evpn/ethernet-segments",
+        "/system/lldp/interface[name=*]/neighbor",
+        # Sessions carry message counters, so they are not silent - but a few
+        # updates per keepalive are still a fraction of re-sending every
+        # session every interval, and a peer that goes is deleted.
+        "/network-instance[name=*]/protocols/bgp/neighbor",
+        "/system/name/host-name",
+        "/platform/chassis",
+        # Route tables: a route is re-sent when it changes, and only then.
+        "/network-instance[name=*]/route-table/ipv4-unicast",
+        "/network-instance[name=*]/route-table/ipv6-unicast",
+        "/network-instance[name=*]/route-table/next-hop-group[index=*]",
+        "/network-instance[name=*]/route-table/next-hop[index=*]",
+        "/network-instance[name=*]/route-table/ipv4-unicast/statistics/active-routes",
+        "/network-instance[name=*]/route-table/ipv6-unicast/statistics/active-routes",
+        "/network-instance[name=default]/route-table/ipv4-unicast",
+        "/network-instance[name=default]/route-table/ipv6-unicast",
+        "/network-instance[name=default]/route-table/next-hop-group[index=*]",
+        "/network-instance[name=default]/route-table/next-hop[index=*]",
+        "/network-instance[name=default]/route-table/ipv4-unicast/route/ipv4-prefix",
+        "/network-instance[name=default]/route-table/ipv6-unicast/route/ipv6-prefix",
+    }
+)
+
+
+def subscription_mode(path: str) -> str:
+    """How *path* is streamed: ``on_change`` or ``sample``; see :data:`ON_CHANGE_PATHS`."""
+    return "on_change" if path in ON_CHANGE_PATHS else "sample"
+
+
+def _streamed(report: "ReportSpec") -> "ReportSpec":
+    """*report*, with each of its paths streamed the way :data:`ON_CHANGE_PATHS` says."""
+    return replace(
+        report,
+        subscribe=tuple(replace(spec, mode=subscription_mode(spec.path)) for spec in report.subscribe),
+    )
 
 
 @dataclass(frozen=True)
@@ -176,6 +243,9 @@ class ReportSpec:
     #: returns items that :mod:`nornir_srl.rows` flattens by the fields they
     #: carry.
     table: Union[None, Table, Callable[[Mapping[str, Any]], Table]] = None
+    #: The report whose records this one collects a narrower cut of, and
+    #: whose place it takes in a fabric reading; see :func:`reading_reports`.
+    stands_in_for: Optional[str] = None
 
     @property
     def tool_name(self) -> str:
@@ -1024,6 +1094,114 @@ def _bgp_rib_variants() -> List[ReportSpec]:
     return variants
 
 
+#: The families a peer's received routes can be asked for, by the name the
+#: BGP peers table gives them, and what the RIB getter calls each.
+_RECEIVED_FAMILIES: Dict[str, str] = {
+    "evpn": "evpn",
+    "ipv4-unicast": "ipv4",
+    "ipv6-unicast": "ipv6",
+    "l3vpn-ipv4-unicast": "l3vpn-ipv4-unicast",
+    "l3vpn-ipv6-unicast": "l3vpn-ipv6-unicast",
+}
+_RECEIVED_ALIASES = {"ipv4": "ipv4-unicast", "ipv6": "ipv6-unicast"}
+
+
+def _same_address(a: str, b: str) -> bool:
+    """Whether two peer addresses are one, however each is written.
+
+    A link-local peer carries the interface it is scoped to, which is part of
+    which peer it is: compared as written when either does not parse.
+    """
+    try:
+        return ipaddress.ip_address(a) == ipaddress.ip_address(b)
+    except ValueError:
+        return a.strip().lower() == b.strip().lower()
+
+
+def _peer_rib(rib: str) -> Callable[..., Dict[str, Any]]:
+    """A getter for the routes exchanged with one BGP peer, in one direction.
+
+    *rib* ``in`` is what peers sent, read out of the same RIB the BGP RIB
+    reports show; ``out`` is what was sent to them, out of the rib-out-post.
+    Either keeps the routes whose neighbor is *peer*, or without one every
+    peer's. Without a *family* every family is read - which is also what the
+    server discovers the paths to stream from, as it calls a getter without
+    arguments - and EVPN is every route type.
+    """
+
+    def getter(device: Any, peer: Optional[str] = None, family: Optional[str] = None) -> Dict[str, Any]:
+        if family:
+            wanted = _RECEIVED_ALIASES.get(family.lower(), family.lower())
+            if wanted not in _RECEIVED_FAMILIES:
+                raise ValueError(
+                    f"family: '{family}' is not one of {', '.join(_RECEIVED_FAMILIES)}"
+                )
+            families = [wanted]
+        else:
+            families = list(_RECEIVED_FAMILIES)
+        ribs: List[BgpRib] = []
+        for name in families:
+            route_fam = _RECEIVED_FAMILIES[name]
+            for route_type in ("1", "2", "3", "4", "5") if name == "evpn" else (None,):
+                kwargs: Dict[str, Any] = {"route_fam": route_fam, "rib": rib}
+                if route_type is not None:
+                    kwargs["route_type"] = route_type
+                for table in device.get_bgp_rib(**kwargs).get("bgp_rib", []):
+                    routes = tuple(
+                        route
+                        for route in table.routes
+                        # A locally originated route names no peer.
+                        if route.neighbor not in ("", "0.0.0.0", "::")
+                        and (not peer or _same_address(route.neighbor, peer))
+                    )
+                    if routes:
+                        ribs.append(replace(table, routes=routes))
+        return {"bgp_rib": ribs}
+
+    return getter
+
+
+#: One layout for every family, so a peer's routes read as one table: the
+#: NLRI fields a family or route type does not have stay empty.
+BGP_RECEIVED_TABLE = Table(
+    columns=(
+        Column("NI", "ni"),
+        Column("family", "family"),
+        # The EVPN route type, 1 to 5; empty for the other families.
+        Column("type", "route_type"),
+    ),
+    each="routes",
+    each_columns=(
+        Column("peer", "neighbor"),
+        Column("st", _route_status),
+        Column("RD", "rd"),
+        Column("Prefix", "prefix"),
+        Column("MAC", "mac"),
+        Column("IP", "ip"),
+        Column("ESI", "esi"),
+        Column("Tag", "tag"),
+        Column("next-hop", "next_hop"),
+        Column("vni", "vni"),
+        Column("RT", lambda r: _joined(r.route_targets)),
+        Column("as-path", lambda r: _listed(r.as_path)),
+        Column(
+            "communities",
+            lambda r: _joined([*r.communities, *r.large_communities, *r.ext_communities]),
+        ),
+        Column("lpref", "local_pref"),
+        Column("med", "med"),
+        Column("origin", "origin"),
+    ),
+)
+
+#: What was sent carries no used/valid/best flags, and names the peer it went to.
+BGP_ADVERTISED_TABLE = Table(
+    columns=BGP_RECEIVED_TABLE.columns,
+    each="routes",
+    each_columns=tuple(c for c in BGP_RECEIVED_TABLE.each_columns if c.name != "st"),
+)
+
+
 REPORTS: List[ReportSpec] = [
     ReportSpec(
         name="overview",
@@ -1213,6 +1391,41 @@ REPORTS: List[ReportSpec] = [
         surfaces=INTERACTIVE,
     ),
     *_bgp_rib_variants(),
+    *(
+        ReportSpec(
+            name=f"bgp_{direction}_routes",
+            resource="bgp_rib",
+            title=f"BGP {direction.capitalize()} Routes",
+            description=description,
+            getter=_peer_rib(rib),
+            table=table,
+            category="BGP RIB",
+            surfaces=STREAMING,
+            params=(
+                ParamSpec(
+                    name="peer",
+                    label="Peer",
+                    placeholder="10.0.0.1",
+                    help="The peer address whose routes to list; empty lists every peer's",
+                    # Not 'address': an unnumbered peer is a link-local address
+                    # scoped to its interface, fe80::1%ethernet-1/1.0, which does
+                    # not parse as one.
+                ),
+                ParamSpec(
+                    name="family",
+                    label="Family",
+                    placeholder="all",
+                    help="evpn, ipv4-unicast, ipv6-unicast, l3vpn-ipv4-unicast or l3vpn-ipv6-unicast; empty is every family",
+                ),
+            ),
+        )
+        for direction, rib, table, description in (
+            ("received", "in", BGP_RECEIVED_TABLE,
+             "Routes a BGP peer sent, in every family or the one chosen, from the RIB-in-post."),
+            ("advertised", "out", BGP_ADVERTISED_TABLE,
+             "Routes sent to a BGP peer, in every family or the one chosen, from the RIB-out-post."),
+        )
+    ),
     ReportSpec(
         name="ipv4_rib",
         table=IP_RIB_TABLE,
@@ -1544,13 +1757,86 @@ REPORTS: List[ReportSpec] = [
     ),
 ]
 
+REPORTS = [_streamed(r) for r in REPORTS]
 REPORTS_BY_NAME: Dict[str, ReportSpec] = {r.name: r for r in REPORTS}
+
+
+# --------------------------------------------------------------------------- #
+# What the server's own readings collect
+# --------------------------------------------------------------------------- #
+
+#: Only the underlay's route table, with the next-hops it uses.
+_UNDERLAY = "default"
+
+
+def _underlay_rib(afi: str, family: str, title: str) -> ReportSpec:
+    return ReportSpec(
+        name=f"{family}_rib_underlay",
+        table=IP_RIB_TABLE,
+        resource="ip_rib",
+        title=f"{title} RIB (underlay)",
+        description=f"The {title} route table of the default network-instance.",
+        getter=lambda d: d.get_rib(afi=afi, network_instance=_UNDERLAY),
+        category="Routing",
+        # Surfaces offer the whole table; this one only stands in for it.
+        surfaces=frozenset(),
+        subscribe=(
+            SubscriptionSpec(f"/network-instance[name={_UNDERLAY}]/route-table/{afi}", datatype="state"),
+            SubscriptionSpec(f"/network-instance[name={_UNDERLAY}]/route-table/next-hop-group[index=*]", datatype="state"),
+            SubscriptionSpec(f"/network-instance[name={_UNDERLAY}]/route-table/next-hop[index=*]", datatype="state"),
+        ),
+        stands_in_for=f"{family}_rib",
+    )
+
+
+RIB_SUMMARY = "rib_summary"
+
+#: Reports no surface offers, which the server's readings collect in place of,
+#: or alongside, the ones the checks name.
+_READING_ONLY: Tuple[ReportSpec, ...] = (
+    _underlay_rib("ipv4-unicast", "ipv4", "IPv4"),
+    _underlay_rib("ipv6-unicast", "ipv6", "IPv6"),
+    ReportSpec(
+        name=RIB_SUMMARY,
+        resource="rib_summary",
+        title="Route table sizes",
+        description="Active routes per network-instance and address family.",
+        getter=lambda d: d.get_rib_summary(),
+        category="Routing",
+        surfaces=frozenset(),
+        sample_interval=20,
+        subscribe=(
+            SubscriptionSpec("/network-instance[name=*]/route-table/ipv4-unicast/statistics/active-routes", sample_interval=20),
+            SubscriptionSpec("/network-instance[name=*]/route-table/ipv6-unicast/statistics/active-routes", sample_interval=20),
+        ),
+    ),
+)
+_READING_ONLY = tuple(_streamed(r) for r in _READING_ONLY)
+_READING_ONLY_BY_NAME: Dict[str, ReportSpec] = {r.name: r for r in _READING_ONLY}
+
+
+def reading_reports(reports: Sequence[str]) -> Tuple[str, ...]:
+    """*reports*, as a server reading the whole fabric every few seconds collects them.
+
+    The route tables are the one thing a fabric-wide reading cannot afford
+    in full: every prefix of every VRF of every node, streamed and re-read on
+    each reading, is what a large fabric's server spends all its time on. What
+    the readings use them for is the underlay - which loopbacks each node
+    reaches - so that is the table they hold prefix by prefix, and every
+    other table is followed by its size. The full tables are still there
+    for whoever opens them.
+    """
+    stand_ins = {r.stands_in_for: r.name for r in _READING_ONLY if r.stands_in_for}
+    chosen = [stand_ins.get(name, name) for name in reports]
+    if any(name in stand_ins for name in reports):
+        chosen.append(RIB_SUMMARY)
+    return tuple(dict.fromkeys(chosen))
 
 
 def get_report(name: str) -> ReportSpec:
     """Look a report up by its canonical name."""
     try:
-        return REPORTS_BY_NAME[name]
+        return REPORTS_BY_NAME.get(name) or _READING_ONLY_BY_NAME[name]
     except KeyError:
         raise KeyError(f"unknown report '{name}'") from None
 

@@ -1082,3 +1082,258 @@ def test_a_node_that_allows_fewer_paths_is_believed(monkeypatch):
         assert len(device.subscribe_requests[-1]["subscription"]) == 2
     finally:
         stream.stop()
+
+
+# --------------------------------------------------------------------------- #
+# ON_CHANGE next to SAMPLE
+# --------------------------------------------------------------------------- #
+
+NI_ITF_PATH = "/network-instance[name=*]/interface"
+NI_TYPE_PATH = "/network-instance[name=*]/type"
+SUBIF_PATH = "/interface[name=*]/subinterface"
+
+
+def _ni_interfaces(stream) -> Dict[str, List[str]]:
+    found: Dict[str, List[str]] = {}
+    for envelope in stream.snapshot(NI_ITF_PATH) or []:
+        for ni in envelope.get("network-instance", []):
+            found[ni["name"]] = [itf["name"] for itf in ni.get("interface", [])]
+    return found
+
+
+@pytest.fixture
+def mixed_stream(monkeypatch):
+    """Instance interfaces on ON_CHANGE, instance types on SAMPLE, one envelope."""
+    monkeypatch.setattr(stream_module, "STALE_ENTRY_TICKS", 0)
+    monkeypatch.setattr(stream_module, "MIN_STALE_TTL", 0.2)
+    monkeypatch.setattr(stream_module, "PRUNE_INTERVAL", 0.0)
+    device = FakeDevice(
+        {
+            NI_ITF_PATH: [
+                {
+                    "network-instance": [
+                        {"name": "default", "interface": [{"name": "ethernet-1/1.0"}]},
+                        {"name": "ipvrf-1", "interface": [{"name": "irb0.1"}, {"name": "irb0.2"}]},
+                    ]
+                }
+            ],
+            NI_TYPE_PATH: [
+                {"network-instance": [{"name": "default", "type": "default"}, {"name": "ipvrf-1", "type": "ip-vrf"}]}
+            ],
+        }
+    )
+    stream = HostStream("leaf1", device, restart_debounce=TEST_DEBOUNCE)
+    stream.ensure_paths(
+        [
+            SubscriptionSpec(NI_ITF_PATH, "all", mode="on_change"),
+            SubscriptionSpec(NI_TYPE_PATH, "all", sample_interval=10),
+        ]
+    )
+    assert wait_for(lambda: device.subscribe_requests)
+    assert wait_for(lambda: stream.connected)
+    # What SR Linux opens an ON_CHANGE subscription with: every entry, keyed.
+    _initial_sync(device, {"default": ["ethernet-1/1.0"], "ipvrf-1": ["irb0.1", "irb0.2"]})
+    assert wait_for(lambda: stream.synced)
+    stream._subscribed_at = time.time() - 60
+    yield stream, device
+    stream.stop()
+
+
+def _initial_sync(device, interfaces: Dict[str, List[str]]) -> None:
+    for ni, names in interfaces.items():
+        device.push("", [(f"network-instance[name={ni}]/interface[name={n}]/oper-state", "up") for n in names])
+    device.updates.put({"sync_response": True})
+
+
+def _types(device, *names: str) -> None:
+    """One SAMPLE tick of the instance types."""
+    device.push("", [(f"network-instance[name={n}]/type", "ip-vrf") for n in names])
+
+
+def test_sample_eviction_leaves_what_on_change_streams_alone(mixed_stream):
+    """ON_CHANGE sends nothing while nothing changes, which is not going away.
+
+    The SAMPLE path feeding the same envelope used to age every list under it,
+    and an instance's interfaces vanished 45 s after the subscription started.
+    """
+    stream, device = mixed_stream
+    for _ in range(10):
+        _types(device, "default", "ipvrf-1")
+        time.sleep(0.05)
+    assert _ni_interfaces(stream) == {"default": ["ethernet-1/1.0"], "ipvrf-1": ["irb0.1", "irb0.2"]}
+
+
+def test_an_on_change_delete_removes_the_entry(mixed_stream):
+    stream, device = mixed_stream
+    device.push("", deletes=["network-instance[name=ipvrf-1]/interface[name=irb0.2]"])
+    assert wait_for(lambda: _ni_interfaces(stream).get("ipvrf-1") == ["irb0.1"])
+
+
+def test_an_instance_on_change_no_longer_holds_is_aged_out_by_sample(mixed_stream):
+    """A removed instance: ON_CHANGE deletes its interfaces, SAMPLE stops sending its type."""
+    stream, device = mixed_stream
+    device.push(
+        "",
+        deletes=[
+            "network-instance[name=ipvrf-1]/interface[name=irb0.1]",
+            "network-instance[name=ipvrf-1]/interface[name=irb0.2]",
+        ],
+    )
+    deadline = time.monotonic() + 3
+    while time.monotonic() < deadline and "ipvrf-1" in str(stream.snapshot(NI_TYPE_PATH)):
+        _types(device, "default")
+        time.sleep(0.05)
+    assert "ipvrf-1" not in str(stream.snapshot(NI_TYPE_PATH))
+    assert _ni_interfaces(stream) == {"default": ["ethernet-1/1.0"]}
+
+
+def test_a_resubscription_drops_what_its_initial_sync_did_not_resend(mixed_stream):
+    """Deletes made while the subscription was being replaced are never sent.
+
+    The initial sync of the new one is the whole state of an ON_CHANGE path, so
+    what it leaves out is gone.
+    """
+    stream, device = mixed_stream
+    stream._restart()
+    assert wait_for(lambda: not stream.synced)
+    _initial_sync(device, {"default": ["ethernet-1/1.0"], "ipvrf-1": ["irb0.1"]})
+    assert wait_for(lambda: _ni_interfaces(stream) == {"default": ["ethernet-1/1.0"], "ipvrf-1": ["irb0.1"]})
+
+
+def test_deleting_the_last_child_does_not_leave_its_parent_behind():
+    """A subscription below a list entry is never told the entry itself went."""
+    device = FakeDevice(
+        {
+            SUBIF_PATH: [
+                {
+                    "interface": [
+                        {"name": "ethernet-1/1", "subinterface": [{"index": 0, "admin-state": "enable"}]},
+                        {"name": "lo9", "subinterface": [{"index": 0, "admin-state": "enable"}]},
+                    ]
+                }
+            ]
+        }
+    )
+    stream = HostStream("leaf1", device, restart_debounce=TEST_DEBOUNCE)
+    try:
+        stream.ensure_paths([SubscriptionSpec(SUBIF_PATH, "all", mode="on_change")])
+        assert wait_for(lambda: stream.connected)
+        device.push("", [(f"interface[name={n}]/subinterface[index=0]/admin-state", "enable") for n in ("ethernet-1/1", "lo9")])
+        device.updates.put({"sync_response": True})
+        assert wait_for(lambda: stream.synced)
+        device.push("", deletes=["srl_nokia-interfaces:interface[name=lo9]/subinterface[index=0]"])
+
+        def names():
+            # The whole root, as the topology and the overview read it: a
+            # single path's view hides an entry without the branch it asked for.
+            return [itf["name"] for itf in stream.snapshot_roots(("interface",)).get("interface", [])]
+
+        assert wait_for(lambda: names() == ["ethernet-1/1"])
+    finally:
+        stream.stop()
+
+
+def test_what_on_change_sends_during_a_resync_is_not_lost(mixed_stream):
+    """A resync reads the node with Gets and swaps the result in afterwards.
+
+    A change ON_CHANGE delivers in between lands in the tree about to be
+    replaced, and is never sent again: SAMPLE would re-send it next tick.
+    """
+    stream, device = mixed_stream
+    real_get = device.get
+    read = threading.Event()
+    resume = threading.Event()
+
+    def slow_get(paths, datatype="config", strip_mod=True):
+        result = real_get(paths, datatype, strip_mod)
+        read.set()
+        resume.wait(2)
+        return result
+
+    device.get = slow_get
+    resyncing = threading.Thread(target=stream.resync)
+    resyncing.start()
+    assert read.wait(2)
+    # Read, not yet swapped in: the node changes now.
+    device.push("", deletes=["network-instance[name=ipvrf-1]/interface[name=irb0.2]"])
+    device.push("", [("network-instance[name=default]/interface[name=lo0.0]/oper-state", "up")])
+    time.sleep(0.2)
+    resume.set()
+    resyncing.join(3)
+    device.get = real_get
+    assert _ni_interfaces(stream) == {"default": ["ethernet-1/1.0", "lo0.0"], "ipvrf-1": ["irb0.1"]}
+
+
+def test_a_resync_tells_the_store_only_once_it_has_let_go_of_the_stream(mixed_stream):
+    """The store holds its lock while it reads a stream, so the stream must not
+    call into the store while holding its own: the two would wait on each other."""
+    stream, device = mixed_stream
+    free: List[bool] = []
+
+    def on_update():
+        other = threading.Thread(target=lambda: free.append(stream._lock.acquire(timeout=0.5) and (stream._lock.release() or True)))
+        other.start()
+        other.join()
+
+    stream.on_update = on_update
+    real_get = device.get
+    read = threading.Event()
+
+    def slow_get(paths, datatype="config", strip_mod=True):
+        result = real_get(paths, datatype, strip_mod)
+        read.set()
+        time.sleep(0.2)
+        return result
+
+    device.get = slow_get
+    resyncing = threading.Thread(target=stream.resync)
+    resyncing.start()
+    assert read.wait(2)
+    device.push("", [("network-instance[name=default]/interface[name=lo0.0]/oper-state", "up")])
+    resyncing.join(5)
+    device.get = real_get
+    assert free and all(free)
+
+
+def test_a_path_another_one_covers_does_not_overwrite_its_data():
+    """A Get does not say which leaves key a list, so its lists are merged opaquely.
+
+    Reading ``route/ipv4-prefix`` after ``ipv4-unicast`` then replaced every route
+    with its keys alone. SAMPLE put the rest back next tick; ON_CHANGE never does.
+    """
+    table = "/network-instance[name=default]/route-table/ipv4-unicast"
+    keys_only = table + "/route/ipv4-prefix"
+    route = {"ipv4-prefix": "192.0.2.1/32", "route-type": "bgp", "id": 0}
+    device = FakeDevice(
+        {
+            table: [{"network-instance[name=default]/route-table/ipv4-unicast": {"route": [{**route, "active": True, "metric": 0}]}}],
+            keys_only: [{"network-instance[name=default]/route-table/ipv4-unicast": {"route": [dict(route)]}}],
+        }
+    )
+    stream = HostStream("leaf1", device, restart_debounce=TEST_DEBOUNCE)
+    try:
+        stream.ensure_paths([SubscriptionSpec(table, mode="on_change"), SubscriptionSpec(keys_only, mode="on_change")])
+
+        def routes():
+            return [r for env in stream.snapshot(table) for r in env[table.lstrip("/")]["route"]]
+
+        assert [r.get("active") for r in routes()] == [True]
+        stream.resync()
+        assert [r.get("active") for r in routes()] == [True]
+    finally:
+        stream.stop()
+
+
+def test_a_subscription_with_on_change_paths_carries_a_heartbeat(mixed_stream):
+    """Without it, a node that fell off the network looks like one where nothing changed."""
+    stream, device = mixed_stream
+    request = device.subscribe_requests[-1]
+    assert stream_module.HEARTBEAT.as_gnmi() in request["subscription"]
+    stream.last_update = stream._subscribed_at = time.time() - 60
+    assert stream.stale_for is not None
+
+
+def test_a_sampled_only_subscription_needs_no_heartbeat(lldp_stream):
+    stream, device = lldp_stream
+    assert wait_for(lambda: device.subscribe_requests)
+    assert stream_module.HEARTBEAT.as_gnmi() not in device.subscribe_requests[-1]["subscription"]

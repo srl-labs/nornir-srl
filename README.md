@@ -4,7 +4,7 @@
 [![SR Linux](https://img.shields.io/badge/SR%20Linux-25.3.2%20%7C%2025.10.3%20%7C%2026.3.1%20%7C%2026.7.1-blue)](#tested-sr-linux-releases)
 [![PyPI](https://img.shields.io/pypi/v/nornir-srl)](https://pypi.org/project/nornir-srl/)
 
-**fcli** is a fabric observability tool for Nokia SR Linux. It talks gNMI to every node in the inventory and presents the same reports on three surfaces:
+**fcli** is a fabric observability tool for Nokia [SR Linux](https://www.nokia.com/ip-networks/service-router-linux-NOS/). It talks gNMI to every node in the inventory and presents the same reports on three surfaces:
 
 1. **`fcli server`** — a live web UI, kept current by gNMI subscriptions (the primary way to use it)
 2. **`fcli <report>`** — one-shot CLI tables, JSON, YAML or CSV
@@ -356,7 +356,7 @@ The server reads the fabric every `--watch-interval` seconds (15 by default) and
 * **Incidents**: every check's findings grouped by root cause. A link that goes down arrives as *one* incident, together with the BGP, BFD and IGP sessions that went down over it. A node that stopped answering becomes the root of everything that points at it. The same cause in many places folds into one pattern, e.g. *"BFD session down on 16 links: the far end has never answered — is BFD enabled there?"*.
 * **A timeline** of what changed: sessions, ports, LLDP neighbours, BFD and IGP adjacencies, DF elections, MAC moves, route counts that halved, nodes that stopped answering, and findings raised and cleared. It feeds the **flapping** check.
 * **Acknowledgements**: **✓ ACK** on an incident's card takes a known problem out of the Overview, the topology badges, colours and summary, with an optional note. It comes back on its own if a new finding joins it, and the acknowledgement ends when the fault clears. **↺ Un-ACK** undoes it. **✓ ACK all** in the Incidents toolbar acknowledges every open incident in the current view at once, with one note. Acks last as long as the server runs; add `--persist-acks` to keep them across restarts.
-* **Route tables and neighbour caches**: one change per route table ("312 changed next-hops, 4 withdrawn …"), with the default routes, every node's system address and your **watched prefixes** (`--watch-prefix`, or 👁 Watched on the Changes page) reported one by one, ECMP width included; an IP that starts answering from another MAC.
+* **Route tables and neighbour caches**: one change per underlay route table ("312 changed next-hops, 4 withdrawn …") and a VRF's route count halving, with the default routes, every node's system address and your **watched prefixes** (`--watch-prefix`, or 👁 Watched on the Changes page) reported one by one, ECMP width included; an IP that starts answering from another MAC.
 * **A baseline**: the fabric as it was once the server settled, or whenever you press **📌 Set baseline** on the Changes page. `since: baseline` shows the drift from it, which is what a maintenance window or a config push actually changed.
 
 ```
@@ -390,8 +390,8 @@ OpenAI runs against the Responses API with `store=false`: fcli replays the model
 ### How the live data works
 
 1. **Automatic discovery**: When a report is opened for the first time, its getter runs against a recording proxy to discover the exact gNMI paths it reads.
-2. **Streaming cache**: Each path is bootstrapped with a gNMI `Get` to seed an in-memory state tree and pin down the response shape, then kept current via a `Subscribe` RPC (STREAM/SAMPLE). Tables render directly from the tree with zero device round-trips.
-3. **Resilience & pending paths**: Unpopulated paths (e.g. empty MAC tables) fall back to periodic `Get`s until state appears, automatically joining the subscription once live. Lost nodes are detected across RPC errors, hanging calls, and missing SAMPLE intervals, with background reconnects for rebooting nodes.
+2. **Streaming cache**: Each path is bootstrapped with a gNMI `Get` to seed an in-memory state tree and pin down the response shape, then kept current via a `Subscribe` RPC: ON_CHANGE for state that changes rarely, SAMPLE for counters. Tables render directly from the tree with zero device round-trips.
+3. **Resilience & pending paths**: Unpopulated paths (e.g. empty MAC tables) fall back to periodic `Get`s until state appears, automatically joining the subscription once live. Lost nodes are detected across RPC errors, hanging calls, and missed SAMPLE intervals (with a sampled heartbeat when a node streams ON_CHANGE), with background reconnects for rebooting nodes.
 
 See [How the live data works](docs/live-data.md) for the complete design document on subscription lifecycle, state trees, pending path resolution, and failure recovery.
 
@@ -630,8 +630,10 @@ One registry drives all three surfaces, so a report cannot drift between CLI, MC
 | Sub-Interfaces | `subif` | yes | Type, addresses, oper-state |
 | LAGs | `lag` | yes | LAG members and LACP |
 | Network Instances | `ni` | yes | NIs, their EVPN EVI and the interfaces bound to them |
-| BGP Peers | `bgp-peers` | yes | Session state and per-AF Rx/Act/Tx route counts |
+| BGP Peers | `bgp-peers` | yes | Session state and per-AF Rx/Act/Tx route counts; Rx links to the routes the peer sent, Tx to the ones sent to it |
 | BGP RIB | `bgp-rib -r …` | split per family / EVPN type | RIB-in-post with path attributes |
+| BGP Received Routes | | yes | The routes one peer sent, in one family or all of them, from the RIB-in-post |
+| BGP Advertised Routes | | yes | The routes sent to one peer, in one family or all of them, from the RIB-out-post |
 | IPv4 / IPv6 RIB | `ipv4-rib`, `ipv6-rib` | yes | Route table with resolved next-hops; `-a` for LPM |
 | Static Routes | `static-routes` | yes | Configured statics and their state |
 | Tunnel Table | `tunnel-table` | yes | VXLAN, LDP, SR-ISIS, RSVP, … |

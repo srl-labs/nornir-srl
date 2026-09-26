@@ -39,6 +39,7 @@ from .tree import (
     parse_path,
     prune,
     select_path,
+    sweep,
 )
 
 logger = logging.getLogger(__name__)
@@ -181,6 +182,12 @@ def _extract_item_path(item: Any) -> str:
 #: streaming - so a request is planned to stay within it; see
 #: :func:`plan_subscription`. A device that says it allows fewer is believed.
 MAX_SUBSCRIBED_PATHS = 36
+
+#: Sampled alongside a subscription that has ON_CHANGE paths in it. Those say
+#: nothing while nothing changes, which is also what a node that silently
+#: dropped off the network says; one leaf that is due every few seconds is
+#: what tells the two apart (see :attr:`HostStream.stale_for`).
+HEARTBEAT = SubscriptionSpec("/system/information/current-datetime", "state", "sample", 10)
 
 _MAX_PATHS_ERROR = re.compile(r"maximum of (\d+) subscribed paths")
 
@@ -376,6 +383,17 @@ class HostStream:
         self._envelope_seen: Dict[str, float] = {}
         self.last_update: Optional[float] = None
         self.connected = False
+        #: Whether the running subscription has sent its initial sync.
+        self.synced = False
+        #: When it started, on the clock list entries are aged by.
+        self._subscribed_from = 0.0
+        #: What arrived while a resync was reading the node, to apply again to
+        #: the tree it reads once that is swapped in; ``None`` outside one.
+        self._replay: Optional[List[Dict[str, Any]]] = None
+        #: Whether the running subscription carries :data:`HEARTBEAT`.
+        self._heartbeat = False
+        #: The ON_CHANGE paths of the running subscription, parsed.
+        self._on_change: List[Tuple[str, List[Tuple[str, Dict[str, str]]]]] = []
         self.error: Optional[str] = None
 
         self._dirty = threading.Event()
@@ -416,9 +434,29 @@ class HostStream:
             len(added),
             ", ".join(s.path for s in added),
         )
-        for spec in added:
-            self._bootstrap(spec, self._tree)
+        with self._lock:
+            known = [s.spec for s in self._paths.values() if s.streamable]
+        # Widest first, so a path is only ever read into the tree once nothing
+        # already there holds more of it.
+        for spec in sorted(added, key=lambda s: len(parse_path(s.path))):
+            self._bootstrap(spec, self._tree_for(spec, known, self._tree))
         self._dirty.set()
+
+    @staticmethod
+    def _tree_for(spec: SubscriptionSpec, specs: List[SubscriptionSpec], tree: Dict[str, Any]) -> Dict[str, Any]:
+        """Where *spec*'s bootstrap Get goes: *tree*, or nowhere if another path covers it.
+
+        A Get does not say which leaves key a list, so what it returns is
+        merged in as a plain list, and a second Get of the same list replaces
+        the first. The narrower one of two paths answers with less of each entry
+        - ``route/ipv4-prefix`` with a route's keys alone - and read after the
+        wider one it would leave only that. SAMPLE puts the rest back on its
+        next tick; ON_CHANGE never does. The wider path already holds all of
+        it, so the narrower one is read only to learn its envelope.
+        """
+        if any(_covers(other, spec) for other in specs if other.path != spec.path):
+            return {}
+        return tree
 
     def _bootstrap(self, spec: SubscriptionSpec, tree: Dict[str, Any]) -> bool:
         """Seed *tree* with a gNMI Get and learn the response envelope keys.
@@ -500,7 +538,7 @@ class HostStream:
                     break
                 env_key = next(iter(item))
                 env_path = "" if env_key in ("/", "") else env_key
-                insert(tree, env_path, item[env_key], key_hints=hints)
+                insert(tree, env_path, item[env_key], key_hints=hints, pin=spec.mode == "on_change")
                 if env_path not in envelopes:
                     envelopes.append(env_path)
             state.streamable = streamable
@@ -543,21 +581,35 @@ class HostStream:
             specs = [
                 state.spec for state in self._paths.values() if state.streamable
             ]
-        if not specs:
-            return
+            if not specs:
+                return
+            # The Gets take a while, and what the subscription delivers in the
+            # meantime lands in the tree about to be replaced. SAMPLE would send
+            # it again next tick; ON_CHANGE never does.
+            self._replay = []
         logger.debug("%s: resyncing %d path(s)", self.name, len(specs))
         started = time.time()
         fresh: Dict[str, Any] = {}
-        for spec in specs:
-            if not self._bootstrap(spec, fresh):
-                # Swapping in a half-read tree would blank the reports of a node
-                # that is merely unreachable. Keeping the old one leaves them on
-                # their last known state, which ``last_update`` dates for the UI.
-                logger.debug("%s: resync aborted at %s", self.name, spec.path)
-                return
-        with self._lock:
-            self._tree = fresh
+        try:
+            for spec in specs:
+                if not self._bootstrap(spec, self._tree_for(spec, specs, fresh)):
+                    # Swapping in a half-read tree would blank the reports of a node
+                    # that is merely unreachable. Keeping the old one leaves them on
+                    # their last known state, which ``last_update`` dates for the UI.
+                    logger.debug("%s: resync aborted at %s", self.name, spec.path)
+                    return
+            with self._lock:
+                self._tree = fresh
+                arrived, self._replay = self._replay or [], None
+                # In order and under the lock, so nothing newer slips in between:
+                # replaying from before the first Get converges on the latest state.
+                for message in arrived:
+                    self._apply(message, notify=False)
+        finally:
+            with self._lock:
+                self._replay = None
         self.last_update = time.time()
+        self._notify()
         logger.debug(
             "%s: resynced %d path(s) in %.3fs",
             self.name,
@@ -615,8 +667,13 @@ class HostStream:
             wanted = [
                 s.spec for s in self._paths.values() if s.streamable and s.bootstrapped
             ]
-            specs, self._covered, polled = plan_subscription(wanted, self.max_paths)
+            heartbeat = any(s.mode == "on_change" for s in wanted)
+            specs, self._covered, polled = plan_subscription(wanted, self.max_paths - heartbeat)
+            if heartbeat and specs:
+                specs.append(HEARTBEAT)
+            self._heartbeat = heartbeat and bool(specs)
             self._polled = set(polled)
+            self._on_change = [(s.path, parse_path(s.path)) for s in specs if s.mode == "on_change"]
         if polled:
             logger.info(
                 "%s: %d path(s) do not fit the %d a subscription may carry, polling them: %s",
@@ -671,7 +728,9 @@ class HostStream:
                 self._subscription = subscription
                 self.connected = True
                 self.error = None
+                self.synced = False
                 self._subscribed_at = time.time()
+                self._subscribed_from = time.monotonic()
                 logger.info("%s: subscribed to %d path(s)", self.name, len(specs))
                 while self._alive(generation):
                     try:
@@ -742,10 +801,22 @@ class HostStream:
     # update handling
     # ------------------------------------------------------------------ #
 
-    def _apply(self, message: Dict[str, Any]) -> None:
+    def _apply(self, message: Dict[str, Any], notify: bool = True) -> None:
+        """Merge one notification into the tree.
+
+        *notify* runs :attr:`on_update` afterwards, which the store answers by
+        taking its own lock. It is only ever called without this stream's lock
+        held: the store takes the two the other way round.
+        """
+        if message.get("sync_response"):
+            self._synced()
+            return
         update = message.get("update")
         if not update:
             return
+        with self._lock:
+            if self._replay is not None:
+                self._replay.append(message)
         prefix = update.get("prefix") or ""
         timestamp = update.get("timestamp") or 0
         touched_itfs = set()
@@ -765,8 +836,8 @@ class HostStream:
                 item_path = _extract_item_path(item)
                 path = join_path(prefix, item_path)
                 val = item.get("val") if isinstance(item, dict) else None
-                insert(self._tree, path, val)
                 bare = _bare(path)
+                insert(self._tree, path, val, pin=self._pinned(bare))
                 for env in envelopes:
                     if _under(bare, env):
                         self._envelope_seen[env] = arrived
@@ -776,7 +847,7 @@ class HostStream:
             for item in update.get("delete", []) or []:
                 item_path = _extract_item_path(item)
                 path = join_path(prefix, item_path)
-                delete(self._tree, path)
+                delete(self._tree, path, [p for p, _elems in self._on_change])
                 gone = _deleted_interface(path)
                 if gone:
                     self.rates.forget(gone)
@@ -792,11 +863,40 @@ class HostStream:
             self._get_error = None
             self._evict_stale()
         self.last_update = time.time()
+        if notify:
+            self._notify()
+
+    def _notify(self) -> None:
         if self.on_update is not None:
             try:
                 self.on_update()
             except Exception:  # noqa: BLE001
                 pass
+
+    def _pinned(self, path: str) -> bool:
+        """Whether an update to *path* comes from one of the ON_CHANGE paths."""
+        if not self._on_change:
+            return False
+        elems = parse_path(path)
+        for _path, pattern in self._on_change:
+            if all(
+                name == p_name and all(k not in keys or key_matches(v, keys[k]) for k, v in p_keys.items())
+                for (name, keys), (p_name, p_keys) in zip(elems, pattern)
+            ):
+                return True
+        return False
+
+    def _synced(self) -> None:
+        """The initial sync is in: what it did not re-send of an ON_CHANGE path is gone.
+
+        Deletes made while the previous subscription was being replaced were
+        sent to nobody, and an ON_CHANGE path has no later tick to notice by.
+        """
+        with self._lock:
+            dropped = sum(sweep(self._tree, path, self._subscribed_from) for path, _elems in self._on_change)
+            self.synced = True
+        if dropped:
+            logger.debug("%s: dropped %d entr%s the initial sync did not re-send", self.name, dropped, "y" if dropped == 1 else "ies")
 
     def _envelopes(self) -> List[str]:
         """Every envelope a streaming path of this node feeds."""
@@ -1037,7 +1137,8 @@ class HostStream:
             ):
                 return
             spec = state.spec
-        if self._absorb(spec, resp, self._tree):
+            known = [s.spec for s in self._paths.values() if s.streamable]
+        if self._absorb(spec, resp, self._tree_for(spec, known, self._tree)):
             logger.info("%s: %s now has state, subscribing to it", self.name, path)
 
     def _raw_get(self, path: str, datatype: str) -> List[Dict[str, Any]]:
@@ -1138,10 +1239,10 @@ class HostStream:
         to find that out - so gRPC keeps considering the call healthy and the
         updates just stop.
 
-        What gives it away is the cadence. Every path is subscribed in SAMPLE
-        mode, so the target reports on a known interval whether anything changed
-        or not, and the fastest of those intervals is the one that has to keep
-        being met.
+        What gives it away is the cadence. A SAMPLE path is reported on a known
+        interval whether anything changed or not, and the fastest of those
+        intervals is the one that has to keep being met. ON_CHANGE paths have
+        no cadence, which is what the heartbeat is for.
         """
         with self._lock:
             intervals = [
@@ -1150,6 +1251,8 @@ class HostStream:
                 if state.streamable and state.bootstrapped
                 and state.spec.mode == "sample"
             ]
+            if self._heartbeat:
+                intervals.append(HEARTBEAT.sample_interval)
         if not intervals or not self.connected:
             return None  # nothing is streaming, so nothing is due
         reference = max(self.last_update or 0.0, self._subscribed_at or 0.0)

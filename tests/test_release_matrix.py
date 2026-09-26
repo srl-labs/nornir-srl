@@ -25,9 +25,15 @@ from typing import Dict, Iterator, List, Set, Tuple
 
 import pytest
 
-from nornir_srl.reports import REPORTS_BY_NAME
+from nornir_srl.reports import BGP_RECEIVED_TABLE, REPORTS_BY_NAME
 from tests.system.capture import SKIP
-from tests.system.replay import Recording, comparable_rows, recording_paths
+from tests.system.replay import (
+    Recording,
+    ReplayDevice,
+    comparable_rows,
+    deterministic_clock,
+    recording_paths,
+)
 
 #: gNMI paths a release does not have, and the report that asks for them.
 #:
@@ -55,11 +61,28 @@ _L3VPN_MISSING = {
     ),
 }
 
+#: The same two families, asked for by ``bgp_advertised_routes`` under the
+#: rib-out-post. The 26.7.2 recordings are the first to include that report,
+#: so only they carry its rejections.
+_L3VPN_ADVERTISED_MISSING = {
+    (
+        "bgp_advertised_routes",
+        "/network-instance[name=*]/bgp-rib/afi-safi[afi-safi-name=l3vpn-ipv4-unicast]"
+        "/l3vpn-ipv4-unicast/rib-in-out/rib-out-post/route",
+    ),
+    (
+        "bgp_advertised_routes",
+        "/network-instance[name=*]/bgp-rib/afi-safi[afi-safi-name=l3vpn-ipv6-unicast]"
+        "/l3vpn-ipv6-unicast/rib-in-out/rib-out-post/route",
+    ),
+}
+
 EXPECTED_MISSING_PATHS: Dict[str, Set[Tuple[str, str]]] = {
     "25.3.2": set(_L3VPN_MISSING),
     "25.10.3": set(_L3VPN_MISSING),
     "26.3.1": set(_L3VPN_MISSING),
     "26.7.1": set(_L3VPN_MISSING),
+    "26.7.2": _L3VPN_MISSING | _L3VPN_ADVERTISED_MISSING,
 }
 
 #: Reports added after the intent-based-ansible-lab recordings were taken.
@@ -103,9 +126,16 @@ def test_fixtures_exist() -> None:
     )
 
 
+#: Reports newer than most recordings, so not required of every one.
+#: ``bgp_advertised_routes`` reads the rib-out-post, which no report read when
+#: the recordings before 26.7.2 were taken; 26.7.2 replays it, the older
+#: releases exercise it on a fake device until they are recorded again.
+NOT_YET_RECORDED = frozenset({"bgp_advertised_routes"})
+
+
 def test_fixtures_cover_the_report_registry() -> None:
     """Every report is exercised on every release we claim to support."""
-    expected = {name for name in REPORTS_BY_NAME if name not in SKIP}
+    expected = {name for name in REPORTS_BY_NAME if name not in SKIP | NOT_YET_RECORDED}
     for path in recording_paths():
         recording = _recording(str(path))
         missing = expected - set(recording.reports)
@@ -196,3 +226,35 @@ def test_reports_that_need_learned_state_have_rows_on_a_leaf(release: str) -> No
             f"{release}/{recording.node}: {empty} recorded no rows on a leaf "
             "that has services, LAGs and traffic"
         )
+
+
+@pytest.mark.parametrize("path", [str(p) for p in recording_paths()])
+def test_received_routes_replay_from_the_bgp_rib_recordings(path: str) -> None:
+    """A peer's received routes are the RIB routes it sent, on every release.
+
+    The report makes the gets of the per-family RIB reports, so it is replayed
+    from theirs rather than recorded on its own.
+    """
+    recording = _recording(path)
+    calls = [
+        call
+        for name, captured in recording.reports.items()
+        if name.startswith("bgp_rib_")
+        for call in captured.calls
+    ]
+    getter = REPORTS_BY_NAME["bgp_received_routes"].getter
+    with deterministic_clock(recording.captured_at, recording.ifstats_interval, skip_sleep=True):
+        everything = getter(ReplayDevice(calls, recording.capabilities))["bgp_rib"]
+        peers = {route.neighbor for rib in everything for route in rib.routes}
+        if not peers:
+            pytest.skip(f"{recording.release}/{recording.node} received no BGP routes")
+        peer = sorted(peers)[0]
+        mine = getter(ReplayDevice(calls, recording.capabilities), peer=peer)["bgp_rib"]
+        evpn = getter(ReplayDevice(calls, recording.capabilities), peer=peer, family="evpn")["bgp_rib"]
+
+    assert "0.0.0.0" not in peers, "a locally originated route is not received"
+    assert mine and {r.neighbor for rib in mine for r in rib.routes} == {peer}
+    assert {rib.family for rib in evpn} <= {"evpn"}
+    assert sum(len(rib.routes) for rib in evpn) <= sum(len(rib.routes) for rib in mine)
+    rows = [row for rib in mine for row in BGP_RECEIVED_TABLE.rows(rib)]
+    assert rows and all(row.values["peer"] == peer for row in rows)

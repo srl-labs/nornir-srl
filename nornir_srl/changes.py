@@ -37,6 +37,7 @@ from typing import (
     Mapping,
     Optional,
     Sequence,
+    Set,
     Tuple,
 )
 
@@ -226,6 +227,40 @@ def _routes(state: FabricState, node_ok: Callable[[str], bool]) -> Iterator[Tupl
                 yield ("rib", node, _RIB_SEP.join((table.ni, family, route.prefix))), _next_hops(route)
 
 
+#: Where a reading keeps the watched prefixes it looked up one by one, by the
+#: family they are in: report, family, the ``afi`` they are asked for in.
+WATCHED_ROUTE_REPORTS: Tuple[Tuple[str, str, str], ...] = (
+    ("ipv4_watched", "ipv4", "ipv4-unicast"),
+    ("ipv6_watched", "ipv6", "ipv6-unicast"),
+)
+
+
+def _held(state: FabricState, family: str) -> Set[Tuple[str, str]]:
+    """The (node, instance) tables *state* holds prefix by prefix in *family*."""
+    return {(node, table.ni) for node, table in state.items(f"{family}_rib")}
+
+
+def _watched_routes(state: FabricState, node_ok: Callable[[str], bool]) -> Iterator[Tuple[Tuple[str, str, str], str]]:
+    """Watched prefixes, where a reading looked them up rather than holding their table.
+
+    A table the reading holds in full reports them already, so only the
+    others are taken from here.
+    """
+    for report, family, _afi in WATCHED_ROUTE_REPORTS:
+        held = _held(state, family)
+        for node, table, route in state.sub_items(report, "routes"):
+            if node_ok(node) and route.active and (node, table.ni) not in held:
+                yield ("rib-watched", node, _RIB_SEP.join((table.ni, family, route.prefix))), _next_hops(route)
+
+
+def _table_sizes(state: FabricState, node_ok: Callable[[str], bool]) -> Iterator[Tuple[Tuple[str, str, str], str]]:
+    """How many active routes each table has, where the reading does not hold its prefixes."""
+    held = {family: _held(state, family) for family in ("ipv4", "ipv6")}
+    for node, summary in state.items("rib_summary"):
+        if node_ok(node) and (node, summary.ni) not in held.get(summary.family, ()):
+            yield ("routes", node, f"{summary.ni} {summary.family}"), str(summary.active)
+
+
 def _next_hops(route: Any) -> str:
     """A route's next-hops as one comparable value: sorted, one per ECMP member."""
     hops = sorted(
@@ -257,13 +292,15 @@ _OBSERVERS: Tuple[Tuple[Tuple[str, ...], Callable[..., Iterator[Tuple[Tuple[str,
     (("mac",), _macs),
     (("vxlan",), _vxlan),
     (("ipv4_rib", "ipv6_rib"), _routes),
+    (tuple(report for report, _family, _afi in WATCHED_ROUTE_REPORTS), _watched_routes),
+    (("rib_summary",), _table_sizes),
     (("arp", "nd"), _neighbors),
     (("components", "transceivers"), _hardware),
 )
 
 #: Kinds whose value is a count, compared by how much it moved rather than
 #: by whether it did.
-_COUNTS = frozenset({"bgp-routes"})
+_COUNTS = frozenset({"bgp-routes", "routes"})
 
 
 def observe(
@@ -326,6 +363,8 @@ def diff_fabric(
     old, new = observe(before, both), observe(after, both)
     old_rib = {k: old.pop(k) for k in [k for k in old if k[0] == "rib"]}
     new_rib = {k: new.pop(k) for k in [k for k in new if k[0] == "rib"]}
+    old_watched = {k: old.pop(k) for k in [k for k in old if k[0] == "rib-watched"]}
+    new_watched = {k: new.pop(k) for k in [k for k in new if k[0] == "rib-watched"]}
     changes_learned = _diff_neighbors(
         {k: v for k, v in old.items() if k[0] in _NEIGHBOR_KINDS},
         {k: v for k, v in new.items() if k[0] in _NEIGHBOR_KINDS},
@@ -338,6 +377,7 @@ def diff_fabric(
     ]
     important = _important_prefixes(before, after, watched)
     changes += _diff_routes(old_rib, new_rib, important, at)
+    changes += _diff_watched(old_watched, new_watched, at)
     changes += changes_learned
     changes.sort(key=change_order)
     return changes
@@ -471,6 +511,17 @@ def _diff_routes(
                 "; ".join(parts),
             )
         )
+    return changes
+
+
+def _diff_watched(old: Observations, new: Observations, at: float) -> List[Change]:
+    """Watched prefixes in tables the reading only knows the size of: each one on its own."""
+    changes = []
+    for key in sorted(set(old) | set(new)):
+        before, after = old.get(key, ABSENT), new.get(key, ABSENT)
+        if before != after:
+            ni, _family, prefix = key[2].split(_RIB_SEP, 2)
+            changes.append(_prefix_change(key[1], ni, prefix, before, after, "watched", at))
     return changes
 
 
@@ -739,6 +790,7 @@ __all__ = [
     "OK",
     "WARNING",
     "WATCH_REPORTS",
+    "WATCHED_ROUTE_REPORTS",
     "as_row",
     "change_order",
     "diff_fabric",

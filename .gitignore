@@ -117,3 +117,5 @@ intent
 **/*.sav
 .gemini
 .mcp*
+## dynamic project versioning
+nornir_srl/_version.py

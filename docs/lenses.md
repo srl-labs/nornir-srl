@@ -15,7 +15,7 @@ A single unified registry (`nornir_srl/lenses.py`) powers the CLI commands, MCP 
 | --- | --- | --- | --- | --- |
 | **Incidents** | `incidents` | `fabric_incidents` | Yes | Groups every check's findings by root cause - a link, a node, a BGP session, the underlay, or one cause repeated across the fabric - so a broken cable reads as one incident rather than a dozen findings. See [Health](health.md). |
 | **Changes** | - | - (server only) | Yes | What changed and when, from the server's timeline, or with `since=baseline` the drift from the baseline. See [Health](health.md). |
-| **Where** | `where <mac\|ip>` | `locate_address` | Yes | Pinpoints which nodes own an address, which learned it via EVPN/VXLAN, and highlights duplicate IP/MAC conflicts. |
+| **Where** | `where <mac\|ip>` | `locate_address` | Yes | Pinpoints which nodes own an address, which learned it via EVPN/VXLAN, and highlights duplicate IP/MAC conflicts. A MAC learned locally on several leaves over the same ethernet-segment is reported as multihomed, with the segment named, not as a duplicate. An IP that is a BGP-learned host route (/32 or /128) is reported on each node that installed it, with the route type and its next-hops. |
 | **Path** | `path <from> <to> [--ni <vrf>]` | `trace_path` | Yes | Traces route lookups hop by hop across route tables, following all ECMP branches through VXLAN, LDP, or SR-MPLS tunnels to the destination ARP/ND. |
 | **Service** | `service <name>` | `service_detail` | Yes | Consolidates all nodes participating in a network-instance (MAC-VRF or IP-VRF), displaying EVI, VNI, RTs, interfaces, and active MAC counts side by side. |
 

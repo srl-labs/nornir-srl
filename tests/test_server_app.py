@@ -285,7 +285,8 @@ def test_table_subscribes_to_the_paths_the_report_needs(store):
     assert wait_for(lambda: all(d.subscribe_requests for d in devices.values()))
     for device in devices.values():
         paths = [s["path"] for s in device.subscribe_requests[-1]["subscription"]]
-        assert paths == [LLDP_PATH]
+        # LLDP streams ON_CHANGE, so the heartbeat comes with it.
+        assert paths == [LLDP_PATH, "/system/information/current-datetime"]
 
 
 def test_bgp_rib_reflects_streamed_best_route_changes(store):
@@ -715,10 +716,44 @@ def test_an_unreachable_node_is_not_retried_on_every_render(fabric, monkeypatch)
 def test_fabric_state_collects_what_the_checks_read(store):
     fabric_store, _devices = store
     state = fabric_store.fabric_state()
-    assert set(state.reports) == set(REQUIRED_REPORTS)
+    # The route tables arrive under the names the checks read, with the size
+    # of every table alongside.
+    assert set(state.reports) == set(REQUIRED_REPORTS) | {"rib_summary"}
     assert state.reports["lldp"]["leaf1"], "the LLDP payload is what the getter returned"
     assert state.hostnames == {"leaf1": "leaf1", "spine1": "spine1"}
     assert state.errors == {}
+
+
+def test_a_reading_streams_the_underlay_rib_and_not_every_vrf(store):
+    """The whole RIB of every VRF is what a large fabric's server drowns in."""
+    fabric_store, _devices = store
+    state = fabric_store.fabric_state()
+    assert "ipv4_rib" in state.reports and "ipv4_rib_underlay" not in state.reports
+    wanted = [entry["path"] for entry in fabric_store._streams["leaf1"].status()["paths"]]
+    route_tables = [p for p in wanted if "route-table" in p]
+    assert route_tables, "the underlay table and the sizes are streamed"
+    assert not [p for p in route_tables if "[name=*]" in p and not p.endswith("/statistics/active-routes")]
+
+
+def test_a_reading_looks_watched_prefixes_up_one_by_one(store):
+    fabric_store, devices = store
+    route = "/network-instance[name=*]/route-table/ipv4-unicast/route[ipv4-prefix=6.6.6.1/32]"
+    for device in devices.values():
+        device.responses[route] = [
+            {
+                "network-instance": [
+                    {
+                        "name": "ipvrf-1",
+                        "route-table": {"ipv4-unicast": {"route": [{"ipv4-prefix": "6.6.6.1/32", "active": True}]}},
+                    }
+                ]
+            }
+        ]
+    state = fabric_store.fabric_state(watched=["6.6.6.1/32"])
+    (table,) = state.reports["ipv4_watched"]["leaf1"]
+    assert (table.ni, [r.prefix for r in table.routes]) == ("ipvrf-1", ["6.6.6.1/32"])
+    assert "ipv6_watched" not in state.reports, "no IPv6 prefix is watched"
+    assert (route, "state") in devices["leaf1"].gets
 
 
 def test_fabric_state_honours_the_inventory_filter(store):

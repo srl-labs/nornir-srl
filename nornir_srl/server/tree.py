@@ -19,7 +19,7 @@ import copy
 import fnmatch
 import re
 import time
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
 
 __all__ = [
     "ListNode",
@@ -33,6 +33,7 @@ __all__ = [
     "key_matches",
     "materialize",
     "prune",
+    "sweep",
     "select_path",
     "strip_module",
     "strip_values",
@@ -61,9 +62,15 @@ class ListNode:
     subscription re-sends every leaf of its subtree on each tick but never
     reports a delete, so an entry that stops being written to is one that has
     gone away on the device; :func:`prune` is what acts on that.
+
+    An entry an ON_CHANGE subscription wrote to is *pinned*: that subscription
+    says nothing while nothing changes, and reports a delete when something
+    goes, so going unwritten is not going away. A pinned entry is removed by
+    its delete, and released back to ageing once no ON_CHANGE data is left in
+    it (see :func:`delete`).
     """
 
-    __slots__ = ("entries", "seen")
+    __slots__ = ("entries", "seen", "pinned")
 
     def __init__(self) -> None:
         # Key values keep the type the device reported them with where it is
@@ -71,11 +78,14 @@ class ListNode:
         # Identity goes through _key_ident, so the two forms still collide.
         self.entries: Dict[str, Tuple[Dict[str, Any], Dict[str, Any]]] = {}
         self.seen: Dict[str, float] = {}
+        self.pinned: Set[str] = set()
 
-    def entry(self, keys: Dict[str, Any]) -> Dict[str, Any]:
+    def entry(self, keys: Dict[str, Any], pin: bool = False) -> Dict[str, Any]:
         """Return (creating if needed) the child node for *keys*."""
         ident = _key_ident(keys)
         self.seen[ident] = _now()
+        if pin:
+            self.pinned.add(ident)
         found = self.entries.get(ident)
         if found is None:
             child: Dict[str, Any] = {}
@@ -89,9 +99,12 @@ class ListNode:
         self.seen[ident] = _now()
 
     def pop(self, keys: Dict[str, Any]) -> None:
-        ident = _key_ident(keys)
+        self.drop(_key_ident(keys))
+
+    def drop(self, ident: str) -> None:
         self.entries.pop(ident, None)
         self.seen.pop(ident, None)
+        self.pinned.discard(ident)
 
     def __len__(self) -> int:
         return len(self.entries)
@@ -196,6 +209,7 @@ def _descend(
     root: Dict[str, Any],
     elems: List[Tuple[str, Dict[str, str]]],
     create: bool,
+    pin: bool = False,
 ) -> Optional[Dict[str, Any]]:
     """Walk *elems* from *root*, returning the container node they address."""
     node: Dict[str, Any] = root
@@ -210,7 +224,7 @@ def _descend(
                     return None
                 node = found[1]
             else:
-                node = _as_list_node(node, name, list(keys)).entry(keys)
+                node = _as_list_node(node, name, list(keys)).entry(keys, pin)
         else:
             if not create:
                 current = node.get(name)
@@ -227,6 +241,7 @@ def insert(
     path: str,
     value: Any,
     key_hints: Optional[Dict[str, List[str]]] = None,
+    pin: bool = False,
 ) -> None:
     """Merge *value* into *root* at *path*.
 
@@ -238,27 +253,30 @@ def insert(
     caller passes what it knows from the requested path. Without a hint a list
     is stored opaquely and is promoted later, when a keyed update names its
     keys.
+
+    With *pin*, every list entry written to is pinned: the write comes from
+    an ON_CHANGE subscription (see :class:`ListNode`).
     """
     value = strip_values(value)
     elems = parse_path(path)
     if not elems:
         if isinstance(value, dict):
-            _merge_into(root, value, key_hints)
+            _merge_into(root, value, key_hints, pin)
         return
-    parent = _descend(root, elems[:-1], create=True)
+    parent = _descend(root, elems[:-1], create=True, pin=pin)
     if parent is None:  # pragma: no cover - create=True never returns None
         return
     name, keys = elems[-1]
     if keys:
-        node = _as_list_node(parent, name, list(keys)).entry(keys)
+        node = _as_list_node(parent, name, list(keys)).entry(keys, pin)
         if isinstance(value, dict):
-            _merge_into(node, value, key_hints)
+            _merge_into(node, value, key_hints, pin)
         else:
             # A keyed element with a non-dict value is not representable; keep
             # the keys so the entry at least shows up in the materialized list.
             node.clear()
         return
-    _set_child(parent, name, value, key_hints)
+    _set_child(parent, name, value, key_hints, pin)
 
 
 def _set_child(
@@ -266,6 +284,7 @@ def _set_child(
     name: str,
     value: Any,
     key_hints: Optional[Dict[str, List[str]]],
+    pin: bool = False,
 ) -> None:
     """Store *value* under ``parent[name]``, keeping list nodes list nodes."""
     current = parent.get(name)
@@ -286,9 +305,10 @@ def _set_child(
                 # and neither may drop what the other contributed. Entries that
                 # go away are cleaned up by HostStream.resync().
                 _merge_into(
-                    node.entry(item_keys),
+                    node.entry(item_keys, pin),
                     {k: v for k, v in item.items() if k not in item_keys},
                     key_hints,
+                    pin,
                 )
             else:
                 node.put(f"\x00unkeyed-{index}", {}, dict(item))
@@ -297,7 +317,7 @@ def _set_child(
         if isinstance(current, ListNode):
             # A container cannot replace a list node in place; start fresh.
             parent.pop(name, None)
-        _merge_into(_as_container(parent, name), value, key_hints)
+        _merge_into(_as_container(parent, name), value, key_hints, pin)
         return
     parent[name] = value
 
@@ -310,10 +330,11 @@ def _merge_into(
     node: Dict[str, Any],
     value: Dict[str, Any],
     key_hints: Optional[Dict[str, List[str]]] = None,
+    pin: bool = False,
 ) -> None:
     """Merge a decoded JSON object into a tree node."""
     for raw_key, raw_val in value.items():
-        _set_child(node, strip_module(raw_key), strip_values(raw_val), key_hints)
+        _set_child(node, strip_module(raw_key), strip_values(raw_val), key_hints, pin)
 
 
 def strip_values(value: Any) -> Any:
@@ -327,15 +348,41 @@ def strip_values(value: Any) -> Any:
     return value
 
 
-def delete(root: Dict[str, Any], path: str) -> None:
-    """Remove the node addressed by *path*, if present."""
+def delete(root: Dict[str, Any], path: str, patterns: Sequence[str] = ()) -> None:
+    """Remove the node addressed by *path*, if present.
+
+    Then walk back up: a list entry that held nothing but what was just
+    removed goes too. A subscription below a list entry - to
+    ``interface[name=*]/subinterface`` - is told about the subinterface that
+    went, never about the interface, which would otherwise stay behind as an
+    entry with nothing but its name.
+
+    *patterns* are the paths the ON_CHANGE subscriptions ask for. An entry on
+    the way up that one of them pinned, and that none of them still has data
+    in, is released back to ageing (see :class:`ListNode`).
+    """
     elems = parse_path(path)
     if not elems:
         root.clear()
         return
-    parent = _descend(root, elems[:-1], create=False)
-    if parent is None:
-        return
+    # Every keyed entry on the way down, to walk back up afterwards.
+    trail: List[Tuple[Dict[str, Any], str, ListNode, str, Dict[str, Any], int]] = []
+    parent: Dict[str, Any] = root
+    for depth, (name, keys) in enumerate(elems[:-1]):
+        current = parent.get(name)
+        if keys:
+            if not isinstance(current, ListNode):
+                return
+            ident = _key_ident(keys)
+            found = current.entries.get(ident)
+            if found is None:
+                return
+            trail.append((parent, name, current, ident, found[1], depth))
+            parent = found[1]
+        else:
+            if not isinstance(current, dict):
+                return
+            parent = current
     name, keys = elems[-1]
     if keys:
         current = parent.get(name)
@@ -346,6 +393,101 @@ def delete(root: Dict[str, Any], path: str) -> None:
                 parent.pop(name, None)
     else:
         parent.pop(name, None)
+
+    parsed = [parse_path(p) for p in patterns]
+    for holder, list_name, node, ident, child, depth in reversed(trail):
+        if ident in node.pinned:
+            through = [p for p in parsed if _through(elems[: depth + 1], p)]
+            if not any(_holds(child, p[depth + 1 :]) for p in through):
+                node.pinned.discard(ident)
+                node.seen[ident] = _now()
+        if not _empty(child):
+            break
+        node.drop(ident)
+        if not len(node):
+            holder.pop(list_name, None)
+
+
+def _through(elems: List[Tuple[str, Dict[str, str]]], pattern: List[Tuple[str, Dict[str, str]]]) -> bool:
+    """Whether the entry at the end of *elems* is one *pattern* passes through."""
+    if len(pattern) < len(elems):
+        return False
+    for (name, keys), (p_name, p_keys) in zip(elems, pattern):
+        if name != p_name:
+            return False
+        if any(k in keys and not key_matches(v, str(keys[k])) for k, v in p_keys.items()):
+            return False
+    return True
+
+
+def _holds(node: Any, rest: List[Tuple[str, Dict[str, str]]]) -> bool:
+    """Whether *node* has anything at the path *rest* selects below it."""
+    if not rest:
+        return not _empty(node)
+    if not isinstance(node, dict):
+        return False
+    (name, keys), below = rest[0], rest[1:]
+    child = node.get(name)
+    if isinstance(child, ListNode):
+        return any(
+            _holds(entry, below)
+            for entry_keys, entry in child.entries.values()
+            if all(key_matches(v, str(entry_keys.get(k, ""))) for k, v in keys.items())
+        )
+    if child is None:
+        return False
+    return _holds(child, below) if below else not _empty(child)
+
+
+def _empty(node: Any) -> bool:
+    """A container with nothing in it but other empty containers and lists."""
+    if isinstance(node, ListNode):
+        return not node.entries
+    if isinstance(node, dict):
+        return all(_empty(v) for v in node.values())
+    return False
+
+
+def sweep(root: Dict[str, Any], pattern: str, cutoff: float) -> int:
+    """Drop the pinned entries along and below *pattern* not written to since *cutoff*.
+
+    What an ON_CHANGE subscription's initial sync is for: it re-sends
+    everything the path has, so a pinned entry it did not re-send was deleted
+    while no subscription was there to say so - the one being replaced had
+    already gone. Returns how many entries were dropped.
+    """
+    return _sweep(root, parse_path(pattern), cutoff)
+
+
+def _sweep(node: Any, rest: List[Tuple[str, Dict[str, str]]], cutoff: float) -> int:
+    if isinstance(node, ListNode):
+        removed = 0
+        for ident in [i for i in node.pinned if node.seen.get(i, 0.0) < cutoff]:
+            node.drop(ident)
+            removed += 1
+        for _keys, child in list(node.entries.values()):
+            removed += _sweep(child, rest, cutoff)
+        return removed
+    if not isinstance(node, dict):
+        return 0
+    if not rest:
+        return sum(_sweep(v, rest, cutoff) for v in list(node.values()))
+    (name, keys), below = rest[0], rest[1:]
+    child = node.get(name)
+    if isinstance(child, ListNode):
+        removed = 0
+        for ident, (entry_keys, entry) in list(child.entries.items()):
+            if not all(key_matches(v, str(entry_keys.get(k, ""))) for k, v in keys.items()):
+                continue
+            if ident in child.pinned and child.seen.get(ident, 0.0) < cutoff:
+                child.drop(ident)
+                removed += 1
+            else:
+                removed += _sweep(entry, below, cutoff)
+        if not len(child):
+            node.pop(name, None)
+        return removed
+    return _sweep(child, below, cutoff) if child is not None else 0
 
 
 def get_node(root: Dict[str, Any], path: str) -> Optional[Any]:
@@ -385,13 +527,13 @@ def prune(node: Any, cutoff: float) -> int:
     Returns how many entries were removed. Writing to a keyed element refreshes
     each keyed ancestor on the way down (see :func:`_descend`), so an entry that
     still exists on the device stays fresh even when only a leaf deep inside it
-    is carried by the update.
+    is carried by the update. A pinned entry is not aged, though what is below
+    it still is (see :class:`ListNode`).
     """
     removed = 0
     if isinstance(node, ListNode):
-        for ident in [i for i, seen in node.seen.items() if seen < cutoff]:
-            node.entries.pop(ident, None)
-            node.seen.pop(ident, None)
+        for ident in [i for i, seen in node.seen.items() if seen < cutoff and i not in node.pinned]:
+            node.drop(ident)
             removed += 1
         for _keys, child in list(node.entries.values()):
             removed += prune(child, cutoff)

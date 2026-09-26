@@ -49,6 +49,7 @@ from nornir_srl.records import (
     BgpVpnInstance,
     BridgeTable,
     Egress,
+    EthernetSegment,
     LldpInterface,
     LldpNeighbor,
     MacEntry,
@@ -90,7 +91,19 @@ def _state(release: str) -> FabricState:
 
 
 def _releases() -> List[str]:
-    return sorted({Recording.load(path).release for path in recording_paths()})
+    """The releases the intent-based-ansible-lab fabric was recorded on.
+
+    The tests below name its MACs, addresses and services, so a release
+    recorded only from another lab (26.7.2, the 3-stage NVD fabric) has none
+    of what they look for.
+    """
+    return sorted(
+        {
+            recording.release
+            for recording in map(Recording.load, recording_paths())
+            if recording.node == LEAF
+        }
+    )
 
 
 @pytest.fixture(params=_releases())
@@ -120,7 +133,9 @@ def test_where_finds_a_locally_learned_mac(state: FabricState):
     assert local, "the MAC the leaf learned on its own port is not reported local"
     assert local[0].node == LEAF
     assert local[0].interface.startswith("lag")
-    assert not local[0].vtep and not local[0].esi
+    assert not local[0].vtep
+    # The lag it was learned on is a port of the leaf's ethernet-segment.
+    assert local[0].esi and local[0].segments
 
 
 def _a_remote_mac(state: FabricState) -> str:
@@ -225,6 +240,94 @@ def test_where_reports_a_mac_claimed_locally_by_two_nodes():
     # It is still known what each learned it on.
     assert {s.interface for s in duplicate} == {"lag1.100", "lag7.100"}
     assert not _of_kind(sightings, "local"), "a duplicate is not also reported as local"
+
+
+def _segment(name: str, esi: str, port: str) -> EthernetSegment:
+    return EthernetSegment(name, esi, "", "all-active", "up", interfaces=(port,))
+
+
+def test_where_calls_a_mac_learned_on_one_segment_on_two_nodes_multihomed():
+    """Both sides of an all-active segment learn the host behind it: not a duplicate."""
+    state = _two_leaves_owning("AA:C1:AB:57:DE:F1")
+    esi = "01:24:24:24:24:24:24:00:00:01"
+    state.reports["es"] = {"l1": [_segment("ES-1", esi, "lag1")], "l2": [_segment("ES-1", esi, "lag7")]}
+    sightings = lens_where(state, "aa:c1:ab:57:de:f1")
+    assert not _of_kind(sightings, "duplicate")
+    multihomed = _of_kind(sightings, "multihomed")
+    assert {(s.node, s.also_on, s.esi, s.segments) for s in multihomed} == {
+        ("l1", ("l2",), esi, ("ES-1",)),
+        ("l2", ("l1",), esi, ("ES-1",)),
+    }
+    rows = {row["Node"]: row for row in WHERE.rows(sightings)}
+    assert rows["l1"]["Detail"] == (
+        f"learnt, segment ES-1 ({esi}); also learned locally on l2, on the same ethernet-segment"
+    )
+    (card,) = tree_where(sightings)
+    assert (card.state, card.subtitle) == ("up", "multihomed on 2 nodes")
+    (item,) = card.entries[0].items
+    assert item.state == "up"
+    by_label = {d.label: d for d in item.details}
+    assert (by_label["Segment"].value, by_label["Segment"].state) == (("ES-1",), "")
+    assert by_label["Also learned locally on"].state == ""
+
+
+def test_where_still_calls_it_a_duplicate_when_only_one_side_is_on_a_segment():
+    state = _two_leaves_owning("AA:C1:AB:57:DE:F1")
+    state.reports["es"] = {"l1": [_segment("ES-1", "01:24:24:24:24:24:24:00:00:01", "lag1")]}
+    sightings = lens_where(state, "aa:c1:ab:57:de:f1")
+    duplicate = {s.node: s for s in _of_kind(sightings, "duplicate")}
+    assert set(duplicate) == {"l1", "l2"}
+    assert (duplicate["l1"].segments, duplicate["l2"].segments) == (("ES-1",), ())
+
+
+def _host_route_state() -> FabricState:
+    state = FabricState()
+    state.hostnames = {"l1": "l1", "l3": "l3"}
+    via_ce = Route(
+        "6.6.6.1/32", "bgp",
+        next_hops=(RouteNextHop("10.1.4.16", "indirect", "10.1.4.16/32", (Egress("tunnel", "192.0.2.15/32", "vxlan"),)),),
+    )
+    via_evpn = Route(
+        "6.6.6.1/32", "bgp-evpn",
+        next_hops=(
+            RouteNextHop("192.0.2.15", "indirect", egress=(Egress("tunnel", "192.0.2.15/32", "vxlan"),)),
+            RouteNextHop("192.0.2.16", "indirect", egress=(Egress("tunnel", "192.0.2.16/32", "vxlan"),)),
+        ),
+    )
+    state.reports = {
+        "ni": {}, "mac": {}, "arp": {}, "nd": {}, "es": {}, "ipv6_rib": {},
+        "ipv4_rib": {
+            "l1": [RouteTable("ipvrf-1", (via_ce, Route("6.6.6.0/24", "bgp")))],
+            # A host route some other protocol put there is not BGP-learned.
+            "l3": [RouteTable("ipvrf-1", (via_evpn,)), RouteTable("ipvrf-2", (Route("6.6.6.1/32", "static"),))],
+        },
+    }
+    return state
+
+
+def test_where_finds_a_host_address_bgp_learned_and_says_how_and_where_to():
+    sightings = lens_where(_host_route_state(), "6.6.6.1")
+    assert [(s.node, s.ni, s.kind, s.origin) for s in sightings] == [
+        ("l1", "ipvrf-1", "bgp", "bgp"),
+        ("l3", "ipvrf-1", "bgp", "bgp-evpn"),
+    ]
+    rows = {row["Node"]: row for row in WHERE.rows(sightings)}
+    assert rows["l1"]["Via"] == "10.1.4.16"
+    assert rows["l1"]["Detail"] == "6.6.6.1/32 learned by bgp, next-hop 10.1.4.16 (vxlan 192.0.2.15)"
+    assert rows["l3"]["Via"] == "192.0.2.15, 192.0.2.16"
+    (card,) = tree_where(sightings)
+    assert (card.state, card.subtitle) == ("up", "bgp on 2 nodes")
+    (item,) = card.entries[1].items
+    by_label = {d.label: d.value for d in item.details}
+    assert by_label["Learned by"] == "bgp-evpn"
+    assert by_label["Next-hop"] == ("192.0.2.15 (vxlan 192.0.2.15)", "192.0.2.16 (vxlan 192.0.2.16)")
+
+
+def test_where_is_not_found_when_only_a_covering_prefix_is_bgp_learned():
+    state = _host_route_state()
+    (sighting,) = lens_where(state, "6.6.6.2")
+    assert sighting.kind == "not-found"
+    assert "no BGP host route" in WHERE.row(sighting)["Detail"]
 
 
 def test_where_does_not_call_one_node_a_duplicate():

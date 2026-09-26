@@ -48,7 +48,7 @@ The server reads the fabric every `--watch-interval` seconds (15 by default; `0`
 | `mac` | a MAC moves between ports, VTEPs or segments (learning and ageing out are not news) |
 | `arp`, `nd` | an address answers from another MAC or interface: a duplicate address, a spoof or a moved host, recorded as a warning (learning and ageing out are not news) |
 | `bgp-routes` | a session's received count halves, or goes to or from zero |
-| `routes` | one change per route table (node × network-instance × family) per reading: how many prefixes changed next-hops, were withdrawn or are new, with examples. A warning if half the table or a default route went |
+| `routes` | one change per route table (node × network-instance × family) per reading: how many prefixes changed next-hops, were withdrawn or are new, with examples. A warning if half the table or a default route went. The server holds only the `default` table prefix by prefix; every other table is followed by its size, and reported when it halves (a warning) or goes to or from zero |
 | `route` | one of the prefixes that matter changes: the default routes, the host routes to every node's system address (VTEPs, loopbacks) in `default`, and **watched prefixes**. Withdrawn is an error, an ECMP narrowing a warning, installed or widened is ok |
 | `node` | a node stops or starts answering |
 | `finding` | a finding is raised or cleared, once it has lasted two readings (so a single-sample blip never reaches the timeline) |
@@ -57,7 +57,7 @@ Severity reads as `error` (something stopped working), `warning`, `ok` (somethin
 
 The **flapping** check reads the timeline. Three or more transitions of one session, port, adjacency or MAC within 10 minutes is a finding, and a MAC moving back and forth between two ports is what a loop looks like.
 
-Some changes appear with a delay. A SAMPLE subscription never reports a delete, so an entry that disappears, such as a dynamic BGP neighbour whose link went down, is only noticed once the stream's stale-entry sweep drops it: up to three sample intervals of its path, and at least 45 s. An interface going down is seen on the next reading.
+Most changes are seen on the next reading. Ports, services, routes, ethernet segments, and LLDP and BGP neighbours are streamed ON_CHANGE, so the device reports a change or a delete as it happens. What is sampled - the counters, BFD sessions, ARP and ND caches - never reports a delete. An entry that disappears there is only noticed once the stream's stale-entry sweep drops it: up to three sample intervals of its path, and at least 45 s.
 
 ### Watched prefixes
 
@@ -68,6 +68,8 @@ A route table is summarized, because one link flapping moves the next-hops of th
 * over MCP: `changes_since_baseline(watch_prefixes="10.1.4.16,6.6.6.1/32")`.
 
 A watched prefix is matched exactly, in every network-instance, and its next-hops going back and forth count towards the flapping check. Watched prefixes added at runtime last as long as the server does.
+
+The server streams the `default` route table only. The VRF tables of a large fabric are too big to stream and re-read on every reading. A watched prefix outside `default` is instead looked up on every node with a gNMI Get of that prefix, and of the next-hops it names, on each reading. Its next-hops are shown to the address or route they point at, not followed further down to a port. The full tables are still streamed while an IPv4/IPv6 RIB report or a lens that reads them is open.
 
 ## The baseline
 

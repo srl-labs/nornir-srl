@@ -667,6 +667,21 @@ class RouteTable:
     routes: Tuple[Route, ...] = ()
 
 
+@dataclass(frozen=True)
+class RouteTableSummary:
+    """How many routes one network-instance holds, for one address family.
+
+    What a reading keeps of a route table it does not hold prefix by prefix:
+    the node's own counters, which cost one leaf each however large the
+    table grows.
+    """
+
+    ni: str
+    #: ``ipv4`` or ``ipv6``.
+    family: str
+    active: int = 0
+
+
 # --------------------------------------------------------------------------- #
 # static_routes: the routes someone typed in
 # --------------------------------------------------------------------------- #
@@ -1048,6 +1063,7 @@ __all__ = [
     "Route",
     "RouteNextHop",
     "RouteTable",
+    "RouteTableSummary",
     "StaticNextHop",
     "StaticRoute",
     "StaticRouteTable",

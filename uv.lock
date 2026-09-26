@@ -873,7 +873,6 @@ wheels = [
 
 [[package]]
 name = "nornir-srl"
-version = "0.7.0"
 source = { editable = "." }
 dependencies = [
     { name = "anthropic" },

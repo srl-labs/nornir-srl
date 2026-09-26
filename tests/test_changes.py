@@ -321,6 +321,65 @@ def test_a_watched_prefix_is_reported_on_its_own_in_any_instance():
     ]
 
 
+def _sizes(node_tables):
+    from nornir_srl.records import RouteTableSummary
+
+    return {
+        node: [RouteTableSummary(ni, family, active=active) for ni, family, active in tables]
+        for node, tables in node_tables.items()
+    }
+
+
+def test_a_table_known_only_by_its_size_is_reported_when_it_halves():
+    """What a server reading keeps of a VRF: the count, compared as a count."""
+    before = fabric(rib_summary=_sizes({"leaf1": [("ipvrf-1", "ipv4", 400)]}))
+    halved = fabric(rib_summary=_sizes({"leaf1": [("ipvrf-1", "ipv4", 180)]}))
+    (change,) = diff_fabric(before, halved, at=1)
+    assert (change.kind, change.subject, change.before, change.after, change.severity) == (
+        "routes", "ipvrf-1 ipv4", "400", "180", WARNING
+    )
+    assert change.detail == "routes fell from 400 to 180"
+    # the churn of a living table is not news
+    churned = fabric(rib_summary=_sizes({"leaf1": [("ipvrf-1", "ipv4", 370)]}))
+    assert diff_fabric(before, churned, at=1) == []
+
+
+def test_a_table_held_prefix_by_prefix_is_not_counted_as_well():
+    before = fabric(
+        ipv4_rib=_rib({"leaf1": [(f"10.9.{i}.0/24", ["192.0.2.1"]) for i in range(10)]}),
+        rib_summary=_sizes({"leaf1": [("default", "ipv4", 10)]}),
+    )
+    after = fabric(
+        ipv4_rib=_rib({"leaf1": [(f"10.9.{i}.0/24", ["192.0.2.1"]) for i in range(4)]}),
+        rib_summary=_sizes({"leaf1": [("default", "ipv4", 4)]}),
+    )
+    assert [(c.kind, c.before, c.after) for c in diff_fabric(before, after, at=1)] == [
+        ("routes", "10 routes", "4 routes")
+    ]
+
+
+def test_a_watched_prefix_looked_up_on_its_own_is_reported_on_its_own():
+    """A reading holds only the underlay; a watched prefix in a VRF is looked up."""
+    watched = lambda hops: _rib({"leaf1": [("6.6.6.1/32", hops)]}, ni="ipvrf-1")  # noqa: E731
+    underlay = _rib({"leaf1": [("192.0.2.1/32", ["fe80::1"])]})
+    before = fabric(ipv4_rib=underlay, ipv4_watched=watched(["10.1.4.16", "10.1.4.17"]))
+    after = fabric(ipv4_rib=underlay, ipv4_watched=watched(["10.1.4.16"]))
+    assert [(c.kind, c.subject, c.severity, c.detail) for c in diff_fabric(before, after, at=1)] == [
+        ("route", "ipvrf-1 6.6.6.1/32", WARNING, "watched: ECMP narrowed from 2 to 1 next-hops (10.1.4.16)")
+    ]
+    gone = fabric(ipv4_rib=underlay, ipv4_watched={"leaf1": []})
+    (change,) = diff_fabric(before, gone, at=1)
+    assert (change.kind, change.severity) == ("route", ERROR)
+
+
+def test_a_watched_prefix_in_a_table_held_in_full_is_reported_once():
+    table = lambda hops: _rib({"leaf1": [("192.0.2.9/32", hops)]})  # noqa: E731
+    before = fabric(ipv4_rib=table(["fe80::1"]), ipv4_watched=table(["fe80::1"]))
+    after = fabric(ipv4_rib=table(["fe80::2"]), ipv4_watched=table(["fe80::2"]))
+    routes = [c for c in diff_fabric(before, after, at=1, watched=["192.0.2.9"]) if c.kind == "route"]
+    assert len(routes) == 1
+
+
 def test_a_prefix_is_normalized_the_way_route_tables_spell_it():
     from nornir_srl.changes import normalize_prefix
 

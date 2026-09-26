@@ -521,6 +521,7 @@ CONVERTED = (
     "subif", "ifstats", "lldp", "arp", "nd",
     "sys_info", "lag", "static_routes", "tunnel_table", "irb", "es_dest",
     "bfd", "isis", "ospf", "resources", "components", "transceivers",
+    "bgp_received_routes", "bgp_advertised_routes",
 ) + tuple(r.name for r in REPORTS if r.name.startswith("bgp_rib_"))
 
 #: What is left without a table: computed by the server's store rather than a

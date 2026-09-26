@@ -6,7 +6,7 @@ import logging
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
 
@@ -14,7 +14,7 @@ from nornir.core import Nornir
 
 from ..checks import CHECKS_COLUMNS, CHECKS_REPORT, FabricState, Finding, REQUIRED_REPORTS, run_checks
 from ..acks import AckStore, finding_key, mark as mark_acknowledged
-from ..changes import INFO, Change
+from ..changes import INFO, WATCHED_ROUTE_REPORTS, Change
 from ..incidents import Incident, correlate, locate
 from ..connections.down_reason import STANDBY_STATE, is_intent
 from ..connections.srlinux import CONNECTION_NAME
@@ -22,9 +22,9 @@ from ..fabric import containerlab_nodes
 from ..connections.layer2 import stamp_underlay_sites
 from ..lenses import LensSpec
 from ..records import as_dict
-from ..reports import ReportSpec, SubscriptionSpec, get_report
+from ..reports import ReportSpec, SubscriptionSpec, get_report, reading_reports, subscription_mode
 from ..rows import cell, clean_columns, flatten, merge_fields, sub_item_keys
-from .devices import CachedDevice, RecordingDevice
+from .devices import CachedDevice, DirectDevice, RecordingDevice
 from .stream import HostStream
 from .timeline import Reading, Timeline, Watcher
 from .topology import annotate_aliasing, annotate_health, build_topology, node_facts
@@ -100,6 +100,9 @@ class FabricStore:
         #: inv_filter key -> (when, reading), for health asked with no fresh
         #: watcher reading to answer from.
         self._health_cache: Dict[Any, Tuple[float, Reading]] = {}
+        #: The (node, service) tables last fetched for the topology's
+        #: aliasing: (when, which, report -> node -> tables).
+        self._alias_ribs: Optional[Tuple[float, Tuple[Tuple[str, str], ...], Dict[str, Dict[str, List[Any]]]]] = None
 
     # ------------------------------------------------------------------ #
     # lifecycle
@@ -494,7 +497,7 @@ class FabricStore:
         report.getter(recorder)
         interval = self.sample_interval or report.sample_interval
         return [
-            SubscriptionSpec(path=path, datatype=datatype, sample_interval=interval)
+            SubscriptionSpec(path=path, datatype=datatype, mode=subscription_mode(path), sample_interval=interval)
             for path, datatype in recorder.recorded
         ]
 
@@ -672,14 +675,22 @@ class FabricStore:
     def fabric_state(
         self,
         inv_filter: Optional[Dict[str, str]] = None,
-        reports: Sequence[str] = REQUIRED_REPORTS,
+        reports: Sequence[str] = reading_reports(REQUIRED_REPORTS),
         history: bool = True,
+        watched: Sequence[str] = (),
     ) -> FabricState:
         """Collect what the sanity checks read, across the filtered inventory.
+
+        A report that stands in for another - the underlay's route table for
+        the whole RIB - is kept under the name of the one it stands in for,
+        which is what the checks look for.
 
         With *history*, the state carries the timeline too, scoped to the
         same nodes: the recent changes a flap is counted in, and what answers
         "what changed". The watcher asks without, as it is what keeps it.
+
+        *watched* prefixes are looked up one by one on every node, wherever
+        they are installed; see :meth:`_watched_routes`.
         """
         names = self._targets(inv_filter)
         self._heal_connections(names)
@@ -692,6 +703,7 @@ class FabricStore:
         state.containerlab = containerlab_nodes(self.nornir.inventory.hosts) & set(names)
         for report_name in reports:
             spec = get_report(report_name)
+            key = spec.stands_in_for or report_name
             try:
                 self.activate(spec, names)
             except Exception as exc:  # noqa: BLE001 - the other reports still answer
@@ -702,15 +714,101 @@ class FabricStore:
             )
             for node, items, error in collected:
                 if error is not None:
-                    state.errors[(report_name, node)] = error
+                    state.errors[(key, node)] = error
                 elif items is not None:
                     payloads[node] = items
-            state.reports[report_name] = payloads
+            state.reports[key] = payloads
+        if watched:
+            self._watched_routes(state, names, watched)
         if history:
             state.changes = self.timeline.recent(nodes=names)
             state.history = self.timeline.scoped(names)
         state.acknowledged = self.acks.keys()
         return state
+
+    def _watched_routes(self, state: FabricState, names: List[str], prefixes: Sequence[str]) -> None:
+        """Look *prefixes* up on every node in *names*, into *state*.
+
+        A reading holds the underlay's route table and only the size of the
+        others, and a prefix someone asked to follow can be in any of them.
+        A Get of each, rather than a subscription: a handful of paths per
+        reading, where streaming them would take a subscription slot each.
+        """
+        for report, _family, afi in WATCHED_ROUTE_REPORTS:
+            wanted = [p for p in prefixes if (":" in p) == (afi == "ipv6-unicast")]
+            if not wanted:
+                continue
+
+            def fetch(name: str, afi: str = afi, wanted: List[str] = wanted) -> Tuple[str, Optional[List[Any]], Optional[str]]:
+                with self._lock:
+                    stream = self._streams.get(name)
+                if stream is None:
+                    return name, None, self._connect_errors.get(name, "not connected")
+                try:
+                    return name, DirectDevice(stream).get_routes(afi, wanted)["ip_rib"], None
+                except Exception as exc:  # noqa: BLE001 - one node's answer, not the reading's
+                    return name, None, str(exc)
+
+            payloads: Dict[str, Any] = {}
+            for node, tables, error in self._pool.map(fetch, names):
+                if error is not None:
+                    state.errors[(report, node)] = error
+                elif tables is not None:
+                    payloads[node] = tables
+            state.reports[report] = payloads
+
+    #: How long the service route tables fetched for the topology are reused.
+    ALIASING_TTL = 30.0
+
+    def _service_ribs(self, graph: Dict[str, Any], state: FabricState) -> FabricState:
+        """*state*, with the route tables of every service a virtual segment is in.
+
+        A reading holds the underlay's tables only, and what says which remote
+        VTEPs spread traffic over a virtual segment is the service's own table
+        on the other nodes. Only those services are fetched, only from the
+        nodes that have them, and kept a while: the topology is redrawn far
+        more often than aliasing changes.
+        """
+        services = {ni for n in graph.get("nodes", []) if n.get("virtual") for ni in n.get("services", [])}
+        wanted = tuple(sorted({(node, instance.name) for node, instance in state.items("ni") if instance.name in services}))
+        if not wanted:
+            return state
+        cached = self._alias_ribs
+        if cached is not None and cached[1] == wanted and time.time() - cached[0] < self.ALIASING_TTL:
+            fetched = cached[2]
+        else:
+            by_node: Dict[str, List[str]] = {}
+            for node, ni in wanted:
+                by_node.setdefault(node, []).append(ni)
+
+            def fetch(item: Tuple[str, List[str]]) -> Tuple[str, Dict[str, List[Any]]]:
+                node, nis = item
+                with self._lock:
+                    stream = self._streams.get(node)
+                tables: Dict[str, List[Any]] = {}
+                if stream is None:
+                    return node, tables
+                device = DirectDevice(stream)
+                for report, afi in (("ipv4_rib", "ipv4-unicast"), ("ipv6_rib", "ipv6-unicast")):
+                    for ni in nis:
+                        try:
+                            tables.setdefault(report, []).extend(device.get_rib(afi, network_instance=ni)["ip_rib"])
+                        except Exception as exc:  # noqa: BLE001 - the rest of the drawing stands
+                            logger.debug("%s: route table of %s for aliasing: %s", node, ni, exc)
+                return node, tables
+
+            fetched = {}
+            for node, tables in self._pool.map(fetch, sorted(by_node.items())):
+                for report, found in tables.items():
+                    fetched.setdefault(report, {})[node] = found
+            self._alias_ribs = (time.time(), wanted, fetched)
+        reports = dict(state.reports)
+        for report, per_node in fetched.items():
+            merged = {node: list(tables) for node, tables in reports.get(report, {}).items()}
+            for node, tables in per_node.items():
+                merged[node] = merged.get(node, []) + list(tables)
+            reports[report] = merged
+        return replace(state, reports=reports)
 
     # ------------------------------------------------------------------ #
     # health: findings and incidents
@@ -1063,7 +1161,7 @@ class FabricStore:
             graph["health_at"] = health.at
             # The route tables the checks read are also what says which
             # remote VTEPs load-balance over a virtual segment.
-            annotate_aliasing(graph, health.state)
+            annotate_aliasing(graph, self._service_ribs(graph, health.state))
         except Exception as exc:  # noqa: BLE001 - the drawing is worth having without its colours
             logger.warning("annotating the topology with health failed: %s", exc)
             logger.debug("annotating the topology failed", exc_info=exc)

@@ -1255,17 +1255,29 @@ def locate_address(address: str, inv_filter: Optional[str] = None) -> str:
             address, an irb gateway), 'local' (this node learned the MAC on its
             own port), 'remote' (it learned it over the overlay from a VTEP or
             ethernet-segment), 'arp' or 'neighbor' (an address binding that
-            named the MAC), 'duplicate' (this node learned it locally and so
-            did the nodes in also_on, which is expected on an all-active
-            segment and a fault otherwise), or 'not-found'.
+            named the MAC), 'multihomed' (this node learned it locally and so
+            did the nodes in also_on, each on a port of the same
+            ethernet-segment: expected, not a fault), 'bgp' (a host route to
+            the IP - /32 or /128 - that BGP installed in this network-instance's
+            route table), 'duplicate' (this node
+            learned it locally and so did the nodes in also_on, not all on one
+            ethernet-segment: a move or a fault), or 'not-found'.
         node, ni, address: where it was seen, and the IP or MAC seen.
-        interface, vtep, esi: what it sits on - exactly one is set.
-        prefix: for 'configured', the prefix as configured.
-        origin: how the entry got there ('learnt', 'evpn', 'static', 'dynamic').
+        interface, vtep, esi: what it sits on - exactly one is set, except
+            that a locally learned MAC on an ethernet-segment port also
+            carries that segment's esi, and none is for 'bgp', where
+            next_hops says it.
+        prefix: for 'configured', the prefix as configured; for 'bgp', the host route.
+        origin: how the entry got there ('learnt', 'evpn', 'static', 'dynamic';
+            for 'bgp', the route type: 'bgp', 'bgp-evpn', 'bgp-vpn').
+        next_hops: for 'bgp', each next-hop with the tunnels or interfaces it
+            resolves over, e.g. '192.0.2.15 (vxlan 192.0.2.15)'.
         mac, expiry: for 'arp'/'neighbor', the MAC the binding resolved to.
         overlay, vni: for 'remote', the overlay it was learned over.
-        segments: for 'remote' behind an ESI, the segment's configured names.
-        also_on: for 'duplicate', the other nodes that learned it locally.
+        segments: for 'remote' behind an ESI, the segment's configured names;
+            for a locally learned MAC, the segment its port belongs to.
+        also_on: for 'duplicate'/'multihomed', the other nodes that learned it
+            locally.
         searched: for 'not-found', how many bridge tables were looked in.
     Plus "not_collected" when a node's report could not be read.
 

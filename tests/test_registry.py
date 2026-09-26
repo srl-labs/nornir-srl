@@ -133,6 +133,38 @@ def test_config_leaves_are_not_subscribed_as_state():
                 )
 
 
+def _all_subscriptions():
+    from nornir_srl.reports import _READING_ONLY
+
+    return [spec for report in list(REPORTS) + list(_READING_ONLY) for spec in report.subscribe]
+
+
+def test_a_path_is_streamed_one_way_on_every_report():
+    """One node streams a path once, whichever report asked for it first."""
+    from nornir_srl.reports import ON_CHANGE_PATHS
+
+    specs = _all_subscriptions()
+    for spec in specs:
+        assert spec.mode == ("on_change" if spec.path in ON_CHANGE_PATHS else "sample"), spec.path
+    assert ON_CHANGE_PATHS <= {spec.path for spec in specs}, "an ON_CHANGE path no report reads"
+
+
+def test_no_on_change_path_overlaps_a_sampled_one():
+    """What a sampled path delivers is aged out; what ON_CHANGE delivers is not.
+
+    Two paths of different modes under one another would feed the same entries
+    both ways, and which one holds them would depend on which arrived last.
+    """
+    from nornir_srl.reports import SubscriptionSpec
+    from nornir_srl.server.stream import _covers
+
+    specs = {spec.path: spec.mode for spec in _all_subscriptions()}
+    for outer, outer_mode in specs.items():
+        for inner, inner_mode in specs.items():
+            if outer_mode != inner_mode and _covers(SubscriptionSpec(outer), SubscriptionSpec(inner)):
+                pytest.fail(f"{outer} ({outer_mode}) covers {inner} ({inner_mode})")
+
+
 def test_non_tabular_reports_are_not_streamed():
     """The browser only shows tables, so a report without columns cannot stream."""
     for report in REPORTS:
@@ -222,12 +254,17 @@ def test_get_report_rejects_unknown_names():
 
 
 def test_subscriptions_convert_to_gnmi_sample_intervals():
-    spec = get_report("bgp_peers").subscribe[0]
+    spec = next(s for s in get_report("ifstats").subscribe if s.path.endswith("/statistics"))
     assert spec.as_gnmi() == {
         "path": spec.path,
         "mode": "sample",
-        "sample_interval": 10_000_000_000,
+        "sample_interval": spec.sample_interval * 1_000_000_000,
     }
+
+
+def test_an_on_change_subscription_carries_no_interval():
+    spec = next(s for s in get_report("bgp_peers").subscribe if s.path.endswith("/neighbor"))
+    assert spec.as_gnmi() == {"path": spec.path, "mode": "on_change"}
 
 
 # --------------------------------------------------------------------------- #
