@@ -847,7 +847,7 @@ class HostStream:
             for item in update.get("delete", []) or []:
                 item_path = _extract_item_path(item)
                 path = join_path(prefix, item_path)
-                delete(self._tree, path, [p for p, _elems in self._on_change])
+                delete(self._tree, path, [p for p, _elems in self._on_change], pin=self._pinned(_bare(path)))
                 gone = _deleted_interface(path)
                 if gone:
                     self.rates.forget(gone)

@@ -202,10 +202,14 @@ def _vxlan(state: FabricState, node_ok: Callable[[str], bool]) -> Iterator[Tuple
 
 
 def _neighbors(state: FabricState, node_ok: Callable[[str], bool]) -> Iterator[Tuple[Tuple[str, str, str], str]]:
-    """ARP and ND entries, by network-instance and address: the MAC it resolves to, and where."""
+    """ARP and ND entries, by network-instance and address: the MAC it resolves to, and where.
+
+    Not on the management port: what its neighbours learn and age out is the
+    management network going about its business, not the fabric's.
+    """
     for report, kind in (("arp", "arp"), ("nd", "nd")):
         for node, cache, entry in state.sub_items(report, "entries"):
-            if node_ok(node) and entry.address and entry.mac:
+            if node_ok(node) and not out_of_band(cache.interface) and entry.address and entry.mac:
                 ni = "/".join(cache.nis) or "-"
                 yield (kind, node, f"{ni} {entry.address}"), f"{entry.mac.lower()} on {cache.interface}"
 

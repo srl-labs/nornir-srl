@@ -17,10 +17,14 @@ jobs:
       contents: read
 
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Build image
-        run: docker build . --file Dockerfile --tag $IMAGE_NAME --label "runnumber=${GITHUB_RUN_ID}"
+        run: |
+          VERSION=$(echo "${{ github.ref }}" | sed -e 's,.*/\(.*\),\1,' -e 's/^v//')
+          docker build . --file Dockerfile --tag $IMAGE_NAME --build-arg VERSION=$VERSION --label "runnumber=${GITHUB_RUN_ID}"
 
       - name: Log in to registry
         # This is where you will update the personal access token to GITHUB_TOKEN

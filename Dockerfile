@@ -14,6 +14,9 @@ ENV PATH="/root/.cargo/bin:/root/.local/bin:$PATH"
 WORKDIR /app
 COPY . .
 
+ARG VERSION
+ENV SETUPTOOLS_SCM_PRETEND_VERSION=${VERSION}
+
 RUN uv pip install --system .
 
 COPY entrypoint.sh /entrypoint.sh

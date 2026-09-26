@@ -261,6 +261,61 @@ def test_prune_leaves_opaque_lists_alone(clock):
     assert materialize(root)["system"]["routes"] == [{"prefix": "10.0.0.0/8"}]
 
 
+_ROUTE = "network-instance[name=ipvrf-1]/route-table/ipv4-unicast/route[ipv4-prefix={}][id=0]"
+
+
+def _routes_from_a_get(root, pin):
+    """What a bootstrap Get leaves: the route list opaque, its keys unknown."""
+    insert(
+        root,
+        "network-instance[name=ipvrf-1]/route-table/ipv4-unicast",
+        {"route": [{"ipv4-prefix": p, "id": 0, "active": True} for p in ("10.0.0.0/24", "10.0.1.0/24", "10.0.2.0/24")]},
+        pin=pin,
+    )
+
+
+def _prefixes(root):
+    table = get_node(root, "network-instance[name=ipvrf-1]/route-table/ipv4-unicast")
+    return sorted(r["ipv4-prefix"] for r in materialize(table)["route"])
+
+
+def test_an_on_change_update_pins_the_entries_it_promotes(clock):
+    """One route changing must not leave the rest of its table to age out.
+
+    A Get cannot say which leaves key the route list, so it stays opaque until
+    the first keyed update promotes it. Every entry of it was ON_CHANGE data,
+    and none of them will be re-sent until it changes.
+    """
+    root = {}
+    _routes_from_a_get(root, pin=True)
+    insert(root, _ROUTE.format("10.0.1.0/24"), {"active": False}, pin=True)
+
+    clock["t"] = 200.0
+    assert prune(root, 150.0) == 0
+    assert _prefixes(root) == ["10.0.0.0/24", "10.0.1.0/24", "10.0.2.0/24"]
+
+
+def test_an_on_change_delete_pins_the_entries_it_promotes(clock):
+    root = {}
+    _routes_from_a_get(root, pin=True)
+    delete(root, _ROUTE.format("10.0.1.0/24"), ["/network-instance[name=*]/route-table/ipv4-unicast"], pin=True)
+
+    clock["t"] = 200.0
+    assert prune(root, 150.0) == 0
+    assert _prefixes(root) == ["10.0.0.0/24", "10.0.2.0/24"]
+
+
+def test_a_sample_update_leaves_the_entries_it_promotes_to_age(clock):
+    root = {}
+    _routes_from_a_get(root, pin=False)
+    insert(root, _ROUTE.format("10.0.1.0/24"), {"active": True})
+    clock["t"] = 200.0
+    insert(root, _ROUTE.format("10.0.1.0/24"), {"active": True})
+
+    assert prune(root, 150.0) == 2
+    assert _prefixes(root) == ["10.0.1.0/24"]
+
+
 def test_pruned_entry_can_come_back(clock):
     root = {}
     insert(root, "candidate[address=10.0.0.1]/df", True)
