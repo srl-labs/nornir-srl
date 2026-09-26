@@ -61,11 +61,28 @@ _L3VPN_MISSING = {
     ),
 }
 
+#: The same two families, asked for by ``bgp_advertised_routes`` under the
+#: rib-out-post. The 26.7.2 recordings are the first to include that report,
+#: so only they carry its rejections.
+_L3VPN_ADVERTISED_MISSING = {
+    (
+        "bgp_advertised_routes",
+        "/network-instance[name=*]/bgp-rib/afi-safi[afi-safi-name=l3vpn-ipv4-unicast]"
+        "/l3vpn-ipv4-unicast/rib-in-out/rib-out-post/route",
+    ),
+    (
+        "bgp_advertised_routes",
+        "/network-instance[name=*]/bgp-rib/afi-safi[afi-safi-name=l3vpn-ipv6-unicast]"
+        "/l3vpn-ipv6-unicast/rib-in-out/rib-out-post/route",
+    ),
+}
+
 EXPECTED_MISSING_PATHS: Dict[str, Set[Tuple[str, str]]] = {
     "25.3.2": set(_L3VPN_MISSING),
     "25.10.3": set(_L3VPN_MISSING),
     "26.3.1": set(_L3VPN_MISSING),
     "26.7.1": set(_L3VPN_MISSING),
+    "26.7.2": _L3VPN_MISSING | _L3VPN_ADVERTISED_MISSING,
 }
 
 #: Reports added after the intent-based-ansible-lab recordings were taken.
@@ -109,9 +126,10 @@ def test_fixtures_exist() -> None:
     )
 
 
-#: Reports newer than every recording: exercised on a fake device until the
-#: fabric is recorded again. ``bgp_advertised_routes`` reads the rib-out-post,
-#: which no report read when the recordings were taken.
+#: Reports newer than most recordings, so not required of every one.
+#: ``bgp_advertised_routes`` reads the rib-out-post, which no report read when
+#: the recordings before 26.7.2 were taken; 26.7.2 replays it, the older
+#: releases exercise it on a fake device until they are recorded again.
 NOT_YET_RECORDED = frozenset({"bgp_advertised_routes"})
 
 

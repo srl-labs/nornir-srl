@@ -8,7 +8,7 @@ raising anything.
 The recordings in this directory are the real gNMI exchange of every report
 against a configured fabric, one file per node per release.
 `tests/test_release_matrix.py` replays them through the production getters, so
-every test run checks all four releases with no lab required.
+every test run checks every recorded release with no lab required.
 
 ## The lab
 
@@ -132,3 +132,35 @@ covers IS-IS.
 ```bash
 python -m tests.system.capture --release 26.3.1 --node leaf1=leaf --node dcgw1=dcgw
 ```
+
+## The 3-stage NVD recordings (26.7.2)
+
+`26.7.2/clab-3-stage-evpn-vxlan-nvd-25-leaf1.json.gz` and `...-spine1.json.gz`
+come from a third lab, a 3-stage EVPN-VXLAN fabric of four spines and six leaves
+(mixed `ixr-d2l`..`ixr-h5` types), with two ip-vrfs, eight mac-vrfs, all-active
+LAG and single-active multi-homing, IPv6 and BFD. It was configured on 25.10.4
+and upgraded to 26.7.2 by the save / swap image / redeploy procedure above. These
+are the first recordings to include `bgp_advertised_routes`, which asks for the
+same two l3vpn families under the rib-out-post and is rejected for the same
+reason as the `bgp-rib` l3vpn variants. Every report replays unchanged, and every
+path the server streams syncs on this release.
+
+```bash
+python -m tests.system.capture --release 26.7.2 \
+    --node clab-3-stage-evpn-vxlan-nvd-25-leaf1=leaf \
+    --node clab-3-stage-evpn-vxlan-nvd-25-spine1=spine
+```
+
+### Upgrading from 25.10.4 needs a hand
+
+SR Linux's own transformation does not carry a 25.10.4 config to 26.x on its
+own. The 26.x rule that deletes
+`bgp-evpn/.../routes/bridge-table/mac-ip/advertise-arp-nd-only-with-mac-table-entry`
+fires only for a config whose `srl_nokia-bgp-evpn` revision predates
+2026-03-31, but 25.10.4, a late maintenance release, ships revision 2026-06-18.
+The rule is skipped, the leaf is unknown to 26.x, and every leaf that set it
+boots with an empty config. Delete the leaf from the saved `config.json` before
+redeploying, which is all the rule would have done. Also note that
+`containerlab deploy --reconfigure` removes the lab directory, saved configs
+included: redeploy without it.
+

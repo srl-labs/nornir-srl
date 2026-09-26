@@ -91,7 +91,19 @@ def _state(release: str) -> FabricState:
 
 
 def _releases() -> List[str]:
-    return sorted({Recording.load(path).release for path in recording_paths()})
+    """The releases the intent-based-ansible-lab fabric was recorded on.
+
+    The tests below name its MACs, addresses and services, so a release
+    recorded only from another lab (26.7.2, the 3-stage NVD fabric) has none
+    of what they look for.
+    """
+    return sorted(
+        {
+            recording.release
+            for recording in map(Recording.load, recording_paths())
+            if recording.node == LEAF
+        }
+    )
 
 
 @pytest.fixture(params=_releases())
