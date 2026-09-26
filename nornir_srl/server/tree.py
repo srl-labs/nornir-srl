@@ -158,8 +158,14 @@ def join_path(*parts: Optional[str]) -> str:
     return joined
 
 
-def _as_list_node(parent: Dict[str, Any], name: str, key_names: List[str]) -> ListNode:
-    """Return the :class:`ListNode` at ``parent[name]``, converting if needed."""
+def _as_list_node(parent: Dict[str, Any], name: str, key_names: List[str], pin: bool = False) -> ListNode:
+    """Return the :class:`ListNode` at ``parent[name]``, converting if needed.
+
+    *pin* is that of the write doing the converting. A list left opaque by a
+    ``Get`` of an ON_CHANGE path is ON_CHANGE data in every entry, and none of
+    them is re-sent until it changes: promoted unpinned, all but the entry the
+    write was for would age out under a sampled path sharing the envelope.
+    """
     current = parent.get(name)
     if isinstance(current, ListNode):
         return current
@@ -173,7 +179,7 @@ def _as_list_node(parent: Dict[str, Any], name: str, key_names: List[str]) -> Li
                 continue
             if key_names and all(k in item for k in key_names):
                 item_keys = {k: item[k] for k in key_names}
-                entry = node.entry(item_keys)
+                entry = node.entry(item_keys, pin)
                 entry.update({k: v for k, v in item.items() if k not in item_keys})
             else:
                 # Key leaves absent (the target did not report them): keep the
@@ -183,7 +189,7 @@ def _as_list_node(parent: Dict[str, Any], name: str, key_names: List[str]) -> Li
         # A single (unkeyed) entry previously stored as a dict.
         if all(k in current for k in key_names):
             item_keys = {k: current[k] for k in key_names}
-            entry = node.entry(item_keys)
+            entry = node.entry(item_keys, pin)
             entry.update({k: v for k, v in current.items() if k not in item_keys})
     parent[name] = node
     return node
@@ -224,7 +230,7 @@ def _descend(
                     return None
                 node = found[1]
             else:
-                node = _as_list_node(node, name, list(keys)).entry(keys, pin)
+                node = _as_list_node(node, name, list(keys), pin).entry(keys, pin)
         else:
             if not create:
                 current = node.get(name)
@@ -268,7 +274,7 @@ def insert(
         return
     name, keys = elems[-1]
     if keys:
-        node = _as_list_node(parent, name, list(keys)).entry(keys, pin)
+        node = _as_list_node(parent, name, list(keys), pin).entry(keys, pin)
         if isinstance(value, dict):
             _merge_into(node, value, key_hints, pin)
         else:
@@ -295,7 +301,7 @@ def _set_child(
         key_names = key_hints.get(name, [])
 
     if isinstance(value, list) and key_names and _all_dicts(value):
-        node = _as_list_node(parent, name, key_names)
+        node = _as_list_node(parent, name, key_names, pin)
         for index, item in enumerate(value):
             if all(k in item for k in key_names):
                 item_keys = {k: item[k] for k in key_names}
@@ -348,7 +354,7 @@ def strip_values(value: Any) -> Any:
     return value
 
 
-def delete(root: Dict[str, Any], path: str, patterns: Sequence[str] = ()) -> None:
+def delete(root: Dict[str, Any], path: str, patterns: Sequence[str] = (), pin: bool = False) -> None:
     """Remove the node addressed by *path*, if present.
 
     Then walk back up: a list entry that held nothing but what was just
@@ -360,6 +366,9 @@ def delete(root: Dict[str, Any], path: str, patterns: Sequence[str] = ()) -> Non
     *patterns* are the paths the ON_CHANGE subscriptions ask for. An entry on
     the way up that one of them pinned, and that none of them still has data
     in, is released back to ageing (see :class:`ListNode`).
+
+    *pin* says the delete comes from an ON_CHANGE path, for the entries of a
+    list it has to promote to find the one to remove (see :func:`_as_list_node`).
     """
     elems = parse_path(path)
     if not elems:
@@ -387,7 +396,7 @@ def delete(root: Dict[str, Any], path: str, patterns: Sequence[str] = ()) -> Non
     if keys:
         current = parent.get(name)
         if isinstance(current, (ListNode, list)):
-            node = _as_list_node(parent, name, list(keys))
+            node = _as_list_node(parent, name, list(keys), pin)
             node.pop(keys)
             if not len(node):
                 parent.pop(name, None)
