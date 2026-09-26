@@ -256,6 +256,16 @@ def test_neighbours_learned_and_aged_out_are_summarized_per_interface():
     assert diff_fabric(learned, learned, at=1) == []
 
 
+def test_neighbours_on_the_management_port_are_not_changes():
+    def mgmt(*entries):
+        return _cache(*entries, interface="mgmt0.0", nis=("mgmt",))
+
+    learned = mgmt(("3fff:172:20:20::1", "1A:00:00:00:00:01"), ("fe80::1", "1A:00:00:00:00:01"))
+    for report in ("arp", "nd"):
+        assert diff_fabric(fabric(**{report: {"leaf1": learned}}), fabric(**{report: {"leaf1": mgmt()}}), at=1) == []
+        assert diff_fabric(fabric(**{report: {"leaf1": mgmt()}}), fabric(**{report: {"leaf1": learned}}), at=1) == []
+
+
 # --------------------------------------------------------------------------- #
 # route tables
 # --------------------------------------------------------------------------- #
