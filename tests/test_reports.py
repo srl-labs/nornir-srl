@@ -2763,6 +2763,101 @@ def test_get_nwi_itf_joins_subinterface_details_onto_network_instances():
     assert by_name["irb1.100"].oper == "up"
 
 
+def _vrf_with_policies(import_policy=None, export_policy=None):
+    inst: Dict[str, Any] = {
+        # Configured, but not what SR Linux uses once a policy is set.
+        "route-target": {"import-rt": [{"target": "target:9:9"}], "export-rt": [{"target": "target:9:9"}]}
+    }
+    if import_policy:
+        inst["import-policy"] = import_policy
+    if export_policy:
+        inst["export-policy"] = export_policy
+    return [{"network-instance": [{"name": "ipvrf-1", "type": "ip-vrf", "protocols": {"bgp-vpn": {"bgp-instance": [inst]}}}]}]
+
+
+_ROUTING_POLICY = [
+    {
+        "routing-policy": {
+            "extended-community-set": [
+                {"name": "rt-ipvrf-1", "member": ["target:1:1"]},
+                {"name": "ss", "member": ["target:1:99", "origin:1:1"]},
+            ],
+            "policy": [
+                {
+                    # leaf6's: keep host and local arp-nd routes out, add the RT to the rest.
+                    "name": "ipvrf-1-export-bgp",
+                    "statement": [
+                        {"name": "10", "match": {"protocol": "arp-nd"}, "action": {"policy-result": "reject"}},
+                        {"name": "15", "match": {"protocol": "host"}, "action": {"policy-result": "reject"}},
+                        {
+                            "name": "20",
+                            "action": {
+                                "policy-result": "accept",
+                                "bgp": {"extended-community": {"operation": "add", "referenced-sets": ["rt-ipvrf-1"]}},
+                            },
+                        },
+                    ],
+                },
+                {
+                    "name": "import-rt-and-ss",
+                    "statement": [
+                        {"name": "10", "match": {"bgp": {"extended-community": {"extended-community-set": "rt-ipvrf-1"}}},
+                         "action": {"policy-result": "accept"}},
+                        {"name": "20", "match": {"bgp": {"extended-community": {"extended-community-set": "ss"}}},
+                         "action": {"policy-result": "accept"}},
+                    ],
+                },
+                {"name": "no-targets", "statement": [{"name": "10", "action": {"policy-result": "accept"}}]},
+            ],
+        }
+    }
+]
+
+
+def test_get_nwi_itf_reads_the_route_targets_a_policy_sets():
+    """An export policy replaces the instance's export-rt: its RTs are what goes out.
+
+    Showing the policy's name instead made every leaf's ``evpn_service_mismatch``
+    check compare ``ipvrf-1-export-bgp`` against ``1:1``.
+    """
+    device = _FakeInterfaces(
+        {
+            "subinterface": [{"interface": []}],
+            "network-instance": _vrf_with_policies("import-rt-and-ss", "ipvrf-1-export-bgp"),
+            "routing-policy": _ROUTING_POLICY,
+        }
+    )
+
+    (instance,) = device.get_nwi_itf()["nwi_itfs"]
+
+    assert instance.export_rts == ("1:1",)
+    # Matched on by accepting statements; a member that is not a route-target is not one.
+    assert instance.import_rts == ("1:1", "1:99")
+    assert device.requested.count("/routing-policy") == 1
+
+
+def test_get_nwi_itf_names_a_policy_that_sets_no_route_target():
+    device = _FakeInterfaces(
+        {
+            "subinterface": [{"interface": []}],
+            "network-instance": _vrf_with_policies(export_policy="no-targets"),
+            "routing-policy": _ROUTING_POLICY,
+        }
+    )
+    (instance,) = device.get_nwi_itf()["nwi_itfs"]
+    assert instance.export_rts == ("no-targets",)
+    assert instance.import_rts == ("9:9",)
+
+
+def test_get_nwi_itf_reads_no_routing_policy_without_a_policy():
+    device = _FakeInterfaces(
+        {"subinterface": [{"interface": []}], "network-instance": _vrf_with_policies()}
+    )
+    (instance,) = device.get_nwi_itf()["nwi_itfs"]
+    assert instance.export_rts == ("9:9",)
+    assert "/routing-policy" not in device.requested
+
+
 def test_get_nwi_itf_reports_the_bgp_evpn_evi_of_each_instance():
     """The EVI is what a virtual ethernet-segment names to find its network-instance.
 
@@ -2851,7 +2946,8 @@ def test_get_nwi_itf_survives_an_empty_response():
     assert device.get_nwi_itf() == {"nwi_itfs": []}
 
 
-def test_get_nwi_itf_reads_route_targets_from_import_and_export_policies():
+def test_get_nwi_itf_names_the_policies_it_cannot_resolve():
+    """Policies the routing-policy does not define, or that cannot be read, are named."""
     ni_response = [
         {
             "network-instance": [
@@ -2872,13 +2968,21 @@ def test_get_nwi_itf_reads_route_targets_from_import_and_export_policies():
         }
     ]
     device = _FakeInterfaces(
-        {"subinterface": _SUBITF_RESPONSE, "network-instance": ni_response}
+        {
+            "subinterface": _SUBITF_RESPONSE,
+            "network-instance": ni_response,
+            "routing-policy": [{"routing-policy": {"policy": [{"name": "unrelated"}]}}],
+        }
     )
 
     instance = device.get_nwi_itf()["nwi_itfs"][0]
 
     assert instance.import_rts == ("import-all",)
     assert instance.export_rts == ("export-a", "export-b")
+
+    # No routing-policy to read at all: the same, rather than no report.
+    unreadable = _FakeInterfaces({"subinterface": _SUBITF_RESPONSE, "network-instance": ni_response})
+    assert unreadable.get_nwi_itf()["nwi_itfs"][0].export_rts == ("export-a", "export-b")
 
 
 def test_get_lag_keeps_the_member_name_and_the_table_shortens_it():

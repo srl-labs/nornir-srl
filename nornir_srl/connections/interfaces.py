@@ -18,15 +18,77 @@ from .down_reason import ParentReasons
 from .helpers import as_list, bgp_evpn_evis, first_payload
 
 
-def _route_targets(inst: Dict[str, Any], direction: str) -> Tuple[str, ...]:
+def _uses_vpn_policy(ni: Dict[str, Any]) -> bool:
+    """Whether a bgp-vpn instance of *ni* takes its route-targets from a policy."""
+    bgp_vpn = ((ni.get("protocols") or {}).get("bgp-vpn")) or {}
+    return any(
+        isinstance(inst, dict) and (inst.get("import-policy") or inst.get("export-policy"))
+        for inst in as_list(bgp_vpn.get("bgp-instance"))
+    )
+
+
+def _referenced_sets(node: Any) -> List[str]:
+    """Every extended-community-set named anywhere under *node*."""
+    found: List[str] = []
+    if isinstance(node, dict):
+        for key, value in node.items():
+            if key in ("extended-community-set", "referenced-sets"):
+                found.extend(str(v) for v in as_list(value) if isinstance(v, (str, int)))
+            else:
+                found.extend(_referenced_sets(value))
+    elif isinstance(node, list):
+        for value in node:
+            found.extend(_referenced_sets(value))
+    return found
+
+
+def _policy_route_targets(routing_policy: Dict[str, Any], names: List[str], direction: str) -> Tuple[str, ...]:
+    """The route-targets policies *names* give a bgp-vpn instance.
+
+    With an export policy, SR Linux advertises with whatever route-targets the
+    policy adds - the instance's own ``export-rt`` no longer applies - so they
+    are read from its accepting statements' extended-community actions. An
+    import policy takes in routes whose route-targets an accepting statement
+    matches on. A statement that rejects contributes neither way.
+    """
+    sets = {
+        str(s.get("name")): [str(m) for m in as_list(s.get("member"))]
+        for s in as_list(routing_policy.get("extended-community-set"))
+        if isinstance(s, dict)
+    }
+    policies = {
+        str(p.get("name")): p for p in as_list(routing_policy.get("policy")) if isinstance(p, dict)
+    }
+    targets = set()
+    for name in names:
+        policy = policies.get(name) or {}
+        for statement in [*as_list(policy.get("statement")), {"action": policy.get("default-action") or {}}]:
+            if not isinstance(statement, dict):
+                continue
+            action = statement.get("action") or {}
+            if str(action.get("policy-result") or "").endswith("reject"):
+                continue
+            where = (action.get("bgp") or {}) if direction == "export" else (statement.get("match") or {})
+            for set_name in _referenced_sets(where):
+                targets.update(
+                    m.replace("target:", "") for m in sets.get(set_name, []) if m.startswith("target:")
+                )
+    return tuple(sorted(targets))
+
+
+def _route_targets(
+    inst: Dict[str, Any], direction: str, routing_policy: Optional[Dict[str, Any]] = None
+) -> Tuple[str, ...]:
     """The ``import`` or ``export`` route-targets of one bgp-vpn instance.
 
-    Where a policy sets them instead of a target list, the policy's name is
-    what there is to show.
+    Where a policy sets them instead of a target list, they are read from the
+    policy in *routing_policy*; failing that - no policies read, or one that
+    names no route-target - the policy's name is what there is to show.
     """
     policy = inst.get(f"{direction}-policy")
     if policy:
-        return tuple(str(p) for p in as_list(policy))
+        names = [str(p) for p in as_list(policy)]
+        return _policy_route_targets(routing_policy or {}, names, direction) or tuple(names)
     targets = []
     for rt in as_list((inst.get("route-target") or {}).get(f"{direction}-rt")):
         target = rt.get("target") if isinstance(rt, dict) else rt
@@ -35,13 +97,15 @@ def _route_targets(inst: Dict[str, Any], direction: str) -> Tuple[str, ...]:
     return tuple(sorted(set(targets)))
 
 
-def _bgp_vpn_instances(bgp_vpn: Dict[str, Any]) -> Tuple[BgpVpnInstance, ...]:
+def _bgp_vpn_instances(
+    bgp_vpn: Dict[str, Any], routing_policy: Optional[Dict[str, Any]] = None
+) -> Tuple[BgpVpnInstance, ...]:
     """The bgp-vpn instances of a network-instance, each with its own targets."""
     return tuple(
         BgpVpnInstance(
             id=as_int(inst.get("id")) or index,
-            import_rts=_route_targets(inst, "import"),
-            export_rts=_route_targets(inst, "export"),
+            import_rts=_route_targets(inst, "import", routing_policy),
+            export_rts=_route_targets(inst, "export", routing_policy),
             rd=str((inst.get("route-distinguisher") or {}).get("rd") or ""),
         )
         for index, inst in enumerate(as_list(bgp_vpn.get("bgp-instance")), start=1)
@@ -84,6 +148,17 @@ class NetworkInstanceMixin:
         ni_list = [
             ni for ni in as_list(first_payload(resp).get("network-instance")) if isinstance(ni, dict)
         ]
+        # Route-targets a policy sets are only known from the policy itself;
+        # read once, and only when some instance has one.
+        # A failed read leaves the policies named rather than the report down.
+        routing_policy: Dict[str, Any] = {}
+        if any(_uses_vpn_policy(ni) for ni in ni_list):
+            try:
+                resp = self.get(paths=["/routing-policy"], datatype="config")
+                routing_policy = first_payload(resp).get("routing-policy") or {}
+            except Exception:  # noqa: BLE001 - the instances are still worth reporting
+                routing_policy = {}
+
         # interface -> the network-instances it is bound to, which is how an
         # irb names the ip-vrf a mac-vrf routes into.
         bound: Dict[str, List[str]] = {}
@@ -136,7 +211,7 @@ class NetworkInstanceMixin:
                     # virtual ethernet-segment names to say which
                     # network-instance it serves.
                     evis=tuple(bgp_evpn_evis(ni).values()),
-                    instances=_bgp_vpn_instances(bgp_vpn),
+                    instances=_bgp_vpn_instances(bgp_vpn, routing_policy),
                     interfaces=tuple(interfaces),
                 )
             )
