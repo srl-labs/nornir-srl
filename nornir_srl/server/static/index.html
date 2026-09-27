@@ -1,9 +1,24 @@
 <!DOCTYPE html>
-<html lang="en" data-theme="dark">
+<html lang="en">
   <head>
     <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="color-scheme" content="light dark" />
     <title>fcli - SR Linux Observability tool</title>
+    <script>
+      // Before the first paint, so the page never flashes the wrong theme: the
+      // one picked in the sidebar, else whatever the browser says the system uses.
+      (function () {
+        var mode = "system";
+        try {
+          mode = localStorage.getItem("fcli-theme") || "system";
+        } catch (_err) {}
+        var dark =
+          mode === "dark" ||
+          (mode !== "light" && window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches);
+        document.documentElement.dataset.theme = dark ? "dark" : "light";
+      })();
+    </script>
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link
@@ -18,7 +33,7 @@
   </head>
   <body>
     <div class="layout">
-      <aside class="sidebar">
+      <aside id="sidebar" class="sidebar">
         <div
           id="side-resizer"
           class="side-resizer"
@@ -65,8 +80,8 @@
         </div>
 
         <footer class="side-foot">
-          <button id="theme-toggle" class="btn btn-ghost" type="button" title="Toggle theme">
-            ◐ theme
+          <button id="theme-toggle" class="btn btn-ghost" type="button" title="Theme: follows the system">
+            ◐ auto
           </button>
           <a
             class="side-link"
@@ -81,8 +96,21 @@
         </footer>
       </aside>
 
+      <div id="side-backdrop" class="side-backdrop" hidden></div>
+
       <main class="main">
         <header class="topbar">
+          <button
+            id="menu-toggle"
+            class="btn nav-btn menu-toggle"
+            type="button"
+            title="Reports and nodes"
+            aria-label="Open reports and nodes"
+            aria-controls="sidebar"
+            aria-expanded="false"
+          >
+            ☰
+          </button>
           <div class="topbar-nav" role="group" aria-label="Page history">
             <button id="nav-back" class="btn nav-btn" type="button" title="Back" aria-label="Back" disabled>&lt;</button>
             <button id="nav-forward" class="btn nav-btn" type="button" title="Forward" aria-label="Forward" disabled>&gt;</button>

@@ -625,6 +625,9 @@ class Egress:
     #: ``interface``: the network-instance the port is in, when that is not
     #: the route's own - which is how a leaked route leaves the node.
     ni: str = ""
+    #: ``tunnel`` over VXLAN: the VNI the next-hop encapsulates with - the
+    #: ip-vrf's, for an EVPN route-type 5.
+    vni: Optional[int] = None
 
     @property
     def label(self) -> str:

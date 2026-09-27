@@ -52,6 +52,7 @@ from typing import (
     Mapping,
     Optional,
     Sequence,
+    Set,
     Tuple,
 )
 
@@ -136,6 +137,9 @@ class Sighting:
     #: ``bgp``: the route's next-hops, each with what it resolves over:
     #: ``10.1.4.16 (vxlan 192.0.2.15, 192.0.2.16)``.
     next_hops: Tuple[str, ...] = ()
+    #: The node's own system0 addresses, which name it in the underlay the
+    #: way its VTEP does.
+    system_ips: Tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -157,6 +161,9 @@ class Hop:
     #: What the walk did with the lookup.
     #: ``forwarded``: out of :attr:`egress` to :attr:`peer`, where it goes on.
     #: ``dead-end``: out of an interface with no LLDP neighbour, so it cannot.
+    #: ``handed-off``: out of an interface with no LLDP neighbour, to a
+    #: next-hop ARP or ND resolves there - a host or router beyond the fabric,
+    #: :attr:`gateway` at :attr:`mac`. The walk ends, but not blind.
     #: ``tunnel``: resolved to a tunnel - VXLAN to a VTEP, LDP or SR to a
     #: far-end PE - and goes on in the underlay towards :attr:`endpoint`.
     #: ``endpoint-reached``: the underlay delivered the tunnel endpoint; the
@@ -181,14 +188,19 @@ class Hop:
     #: address it leads to.
     tunnel: str = ""
     endpoint: str = ""
+    #: ``tunnel`` over VXLAN: the VNI it carries the packet in.
+    vni: Optional[int] = None
     #: ``endpoint-reached``: the network-instance the walk picks up again in.
     #: Chosen by name where the far end has one, else by the route-target the
     #: origin's instance exports, since a gateway need not call it the same.
     #: ``leaked``: the instance the route was leaked from, on this node.
     resumes_in: str = ""
-    #: ``neighbor``: the MAC the binding resolved to, and how it was learned.
+    #: ``neighbor``/``handed-off``: the MAC the binding resolved to, and how
+    #: it was learned.
     mac: str = ""
     origin: str = ""
+    #: ``handed-off``: the next-hop address the packet is handed to.
+    gateway: str = ""
     #: ``loop``: the steps already taken, as ``node/network-instance``.
     visited: Tuple[str, ...] = ()
 
@@ -284,6 +296,8 @@ class Entry:
     label: str = ""
     badge: str = ""
     items: Tuple[Item, ...] = ()
+    #: The node's own addresses, shown after its name: its system0 IPs.
+    addresses: str = ""
 
 
 @dataclass(frozen=True)
@@ -556,6 +570,24 @@ def lens_where(state: FabricState, target: str = "") -> List[Sighting]:
     learned - a loopback behind a CE, an EVPN RT-5 host - and each node that
     installed one says how it learned it and where it forwards.
     """
+    system = _system_ips(state)
+    return [replace(s, system_ips=system.get(s.node, ())) for s in _locate(state, target)]
+
+
+def _system_ips(state: FabricState) -> Dict[str, Tuple[str, ...]]:
+    """node -> the addresses of its system0.0 in the default instance, IPv4 first."""
+    found: Dict[str, Tuple[str, ...]] = {}
+    for node, instance in state.items("ni"):
+        if instance.name != "default":
+            continue
+        for itf in instance.interfaces:
+            if itf.name == "system0.0":
+                addresses = [p.split("/", 1)[0] for p in itf.prefixes]
+                found[node] = tuple(sorted(addresses, key=lambda a: ":" in a))
+    return found
+
+
+def _locate(state: FabricState, target: str) -> List[Sighting]:
     wanted = str(target or "").strip()
     if not wanted:
         raise ValueError("where needs a MAC or IP address to look for")
@@ -726,6 +758,7 @@ def _sighting_detail(sighting: Sighting) -> str:
 
 
 WHERE_COLUMNS: Tuple[Column, ...] = (
+    Column("System", lambda s: ", ".join(s.system_ips)),
     Column("NI", "ni"),
     Column("Found", "kind"),
     Column("Address", "address"),
@@ -803,7 +836,11 @@ def tree_where(sightings: List[Sighting]) -> List[Card]:
         kinds: Dict[str, int] = {}
         for s in found:
             kinds[s.kind] = kinds.get(s.kind, 0) + 1
-        entries = _entries(found, _sighting_item, "sighting")
+        system = {s.node: s.system_ips for s in found}
+        entries = tuple(
+            replace(entry, addresses="  ·  ".join(system.get(entry.title, ())))
+            for entry in _entries(found, _sighting_item, "sighting")
+        )
         cards.append(
             Card(
                 title=address,
@@ -860,6 +897,11 @@ def _lldp_peers(state: FabricState) -> Dict[Tuple[str, str], Tuple[str, str]]:
         if resolved:
             peers[(node, itf.name)] = (resolved, neighbor.port_id)
     return peers
+
+
+def _lldp_ports(state: FabricState) -> Set[Tuple[str, str]]:
+    """(node, interface) of every port LLDP sees anything on, in the inventory or not."""
+    return {(node, itf.name) for node, itf, _neighbor in state.sub_items("lldp", "neighbors")}
 
 
 def _neighbor_index(state: FabricState) -> Dict[Tuple[str, str], List[Tuple[str, str, str]]]:
@@ -991,6 +1033,7 @@ def lens_path(
         raise ValueError(f"'{destination}' is not an IP address")
     report = _rib_report(target)
     peers = _lldp_peers(state)
+    lldp_ports = _lldp_ports(state)
     neighbors = _neighbor_index(state)
     hops: List[Hop] = []
 
@@ -1068,6 +1111,7 @@ def lens_path(
                         egress=f"{tunnel.tunnel}:{endpoint}",
                         tunnel=tunnel.tunnel,
                         endpoint=endpoint,
+                        vni=tunnel.vni,
                     )
                 )
                 # Carry the VRF and destination along, so the walk can resume
@@ -1126,10 +1170,28 @@ def lens_path(
                 hops.append(Hop(**last, outcome="no-neighbor"))
             continue
 
-        for subinterface in egress:
+        for next_hop, out in ((nh, out) for nh in route.next_hops for out in nh.egress):
+            subinterface = out.label
             peer = peers.get((node, parent(subinterface)))
             if peer is None:
-                hops.append(Hop(**here, **matched, outcome="dead-end", egress=subinterface))
+                # No LLDP at all on the port - an irb, a CE that does not run
+                # it - means the packet leaves the fabric here, and ARP or ND
+                # on that port says to whom. A port LLDP does see something on
+                # that is not in the inventory is a switch the walk cannot
+                # follow, not a place the packet is delivered to.
+                gateway = _address(next_hop.address)
+                bound = [
+                    (mac, origin)
+                    for interface, mac, origin in neighbors.get((node, str(gateway)), [])
+                    if interface == subinterface
+                ] if gateway is not None and (node, parent(subinterface)) not in lldp_ports else []
+                for mac, origin in bound:
+                    hops.append(
+                        Hop(**here, **matched, outcome="handed-off", egress=subinterface,
+                            gateway=str(gateway), mac=mac, origin=origin)
+                    )
+                if not bound:
+                    hops.append(Hop(**here, **matched, outcome="dead-end", egress=subinterface))
                 continue
             hops.append(
                 Hop(
@@ -1155,7 +1217,11 @@ _HOP_DETAIL: Dict[str, Callable[[Hop], str]] = {
     "dead-end": lambda h: (
         f"no LLDP neighbour on {parent(h.egress)}, the path stops being traceable here"
     ),
-    "tunnel": lambda h: f"over {h.tunnel} to {h.endpoint}, continuing in default",
+    "handed-off": lambda h: (
+        f"no LLDP neighbour on {parent(h.egress)}, handed to {h.gateway} at {h.mac} "
+        f"({_resolution(h.gateway)}, {h.origin})"
+    ),
+    "tunnel": lambda h: f"over {_tunnel_name(h)} to {h.endpoint}, continuing in default",
     "endpoint-reached": lambda h: f"tunnel endpoint reached, continuing in {h.resumes_in}",
     "leaked": lambda h: f"leaked from {h.resumes_in}, continuing there",
     "delivered": lambda h: f"delivered here, {h.route_type} on {h.egress or 'this node'}",
@@ -1167,6 +1233,29 @@ _HOP_DETAIL: Dict[str, Callable[[Hop], str]] = {
     "too-long": lambda h: f"still not delivered after {MAX_HOPS} hops",
 }
 
+def _tunnel_name(h: Hop) -> str:
+    """``vxlan vni 1``, or just the tunnel type where it carries no VNI."""
+    return f"{h.tunnel} vni {h.vni}" if h.vni is not None else h.tunnel
+
+
+def _hop_egress(h: Hop) -> str:
+    """The port or tunnel a hop leaves on, a VXLAN tunnel with its VNI."""
+    return f"{h.egress} vni:{h.vni}" if h.vni is not None else h.egress
+
+
+def _hop_peer(h: Hop) -> str:
+    """Who is on the other end: the fabric node over LLDP, or the gateway ARP/ND found."""
+    if h.gateway:
+        return f"{h.gateway} {h.mac}"
+    return f"{h.peer} {h.peer_port}".strip()
+
+
+def _resolution(address: str) -> str:
+    """What resolved *address* to a MAC: ARP for IPv4, ND for IPv6."""
+    parsed = _address(address)
+    return "ND" if parsed is not None and parsed.version == 6 else "ARP"
+
+
 #: Outcomes that are about the delivered address rather than a route, so the
 #: Prefix column shows the address the walk was confirming.
 _LAST_MILE = ("local-ip", "neighbor", "no-neighbor")
@@ -1177,9 +1266,9 @@ PATH_COLUMNS: Tuple[Column, ...] = (
     Column("NI", "ni"),
     Column("Prefix", lambda h: h.prefix or (h.address if h.outcome in _LAST_MILE else "-")),
     Column("Type", lambda h: h.route_type or h.outcome),
-    Column("Next-hop", lambda h: h.mac or _joined(h.next_hops)),
-    Column("Egress", "egress"),
-    Column("Peer", lambda h: f"{h.peer} {h.peer_port}".strip()),
+    Column("Next-hop", lambda h: _joined(h.next_hops) or h.mac),
+    Column("Egress", _hop_egress),
+    Column("Peer", lambda h: _hop_peer(h)),
     Column("Detail", lambda h: _HOP_DETAIL[h.outcome](h)),
 )
 
@@ -1189,6 +1278,7 @@ _HOP_STATE = {
     "delivered": _UP,
     "local-ip": _UP,
     "neighbor": _UP,
+    "handed-off": _UP,
     "endpoint-reached": _UP,
     "dead-end": _DOWN,
     "no-route": _DOWN,
@@ -1210,8 +1300,10 @@ def _hop_item(h: Hop) -> Item:
         details.append(Detail("Egress", h.egress))
     if h.peer:
         details.append(Detail("Peer", f"{h.peer} {h.peer_port}".strip()))
+    if h.gateway:
+        details.append(Detail("Gateway", h.gateway))
     if h.tunnel:
-        details.append(Detail("Tunnel", f"{h.tunnel} to {h.endpoint}"))
+        details.append(Detail("Tunnel", f"{_tunnel_name(h)} to {h.endpoint}"))
     if h.resumes_in:
         details.append(Detail("Resumes in", h.resumes_in))
     sentence = _HOP_DETAIL[h.outcome](h)
@@ -1290,7 +1382,7 @@ def graph_path(hops: List[Hop]) -> Dict[str, Any]:
         if h.outcome == "forwarded":
             to, label = successor(h, h.peer, h.ni, h.address), h.egress
         elif h.outcome == "tunnel":
-            to, label = successor(h, h.node, "default", h.endpoint), h.egress
+            to, label = successor(h, h.node, "default", h.endpoint), _hop_egress(h)
         elif h.outcome == "endpoint-reached":
             to, label = successor(h, h.node, h.resumes_in, destination), f"into {h.resumes_in}"
         elif h.outcome == "leaked":
@@ -1316,6 +1408,29 @@ def graph_path(hops: List[Hop]) -> Dict[str, Any]:
                         "details": [_HOP_DETAIL["dead-end"](h)],
                     }
                 )
+        elif h.outcome == "handed-off":
+            # Out of the fabric, to a gateway ARP/ND knows: the end of the
+            # branch, reached. Every leaf handing to the same gateway meets in
+            # one box, as the branches of a multi-homed host do.
+            to, label = f"{h.hop + 1}:gateway/{h.gateway}", h.egress
+            box = next((stop for stop in stops if stop["id"] == to), None)
+            if box is None:
+                box = {
+                    "id": to,
+                    "hop": h.hop + 1,
+                    "node": "",
+                    "ni": "",
+                    "address": h.address,
+                    "title": h.gateway,
+                    "subtitle": h.mac,
+                    "state": _UP,
+                    "outcomes": ["handed-off"],
+                    "details": [],
+                }
+                stops.append(box)
+            line = _HOP_DETAIL["handed-off"](h)
+            if line not in box["details"]:
+                box["details"].append(line)
         else:
             continue
         if to is None:

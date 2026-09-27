@@ -829,9 +829,15 @@ TRANSCEIVERS_TABLE = Table(
 
 
 def _route_next_hop(nh: Any) -> str:
-    """A next-hop as the table names it: its address, or what it resolves through."""
-    if nh.type == "indirect" and nh.resolving_route:
-        return f"{nh.resolving_route} (indirect)"
+    """A next-hop as the table names it: its address, as SR Linux shows it.
+
+    An indirect next-hop is marked so, but still named by its own address -
+    the peer or gateway - not by the route it resolves through: that one is
+    often a subnet (``10.1.4.0/24`` for gateway ``10.1.4.16``), which reads as
+    though it were the next-hop. The ``itf`` column says where it resolved to.
+    """
+    if nh.type == "indirect":
+        return f"{nh.address} (indirect)" if nh.address else f"{nh.resolving_route} (indirect)"
     return nh.address
 
 
