@@ -116,6 +116,8 @@
     streamInfo: el("stream-info"),
     updated: el("updated"),
     themeToggle: el("theme-toggle"),
+    menuToggle: el("menu-toggle"),
+    sideBackdrop: el("side-backdrop"),
     chatOpen: el("chat-open"),
     chatClose: el("chat-close"),
     chatDrawer: el("chat-drawer"),
@@ -2379,6 +2381,9 @@
   }
 
   function selectReport(report, { fromPop = false, snap = null } = {}) {
+    // On a phone the side pane is a drawer over the page: picking something
+    // from it is done with it.
+    closeSideDrawer();
     if (state.report && !fromPop) {
       saveReportPreferences();
       syncCurrentVisit();
@@ -5895,19 +5900,79 @@
     }
   });
 
-  dom.themeToggle.addEventListener("click", () => {
-    const next = document.documentElement.dataset.theme === "dark" ? "light" : "dark";
-    document.documentElement.dataset.theme = next;
+  // ------------------------------------------------------------------ theme
+  // "system" follows the browser's prefers-color-scheme, live; "light" and
+  // "dark" pin it. index.html applies the same choice before the first paint.
+  const THEME_MODES = ["system", "light", "dark"];
+  const THEME_LABELS = { system: "◐ auto", light: "☀ light", dark: "☾ dark" };
+  const systemDark = window.matchMedia ? window.matchMedia("(prefers-color-scheme: dark)") : null;
+
+  function storedThemeMode() {
     try {
-      localStorage.setItem("fcli-theme", next);
+      const mode = localStorage.getItem("fcli-theme");
+      return THEME_MODES.includes(mode) ? mode : "system";
+    } catch (_err) {
+      return "system";
+    }
+  }
+
+  function applyTheme(mode) {
+    const dark = mode === "dark" || (mode === "system" && Boolean(systemDark && systemDark.matches));
+    const theme = dark ? "dark" : "light";
+    dom.themeToggle.textContent = THEME_LABELS[mode];
+    dom.themeToggle.title =
+      mode === "system" ? `Theme: follows the system (${theme} now) - click to pin light` : `Theme: ${mode} - click for ${mode === "light" ? "dark" : "the system's"}`;
+    if (document.documentElement.dataset.theme === theme) return;
+    document.documentElement.dataset.theme = theme;
+    // The topology bakes its colours in when it is drawn.
+    if (state.topology) renderTopology(state.topology);
+  }
+
+  dom.themeToggle.addEventListener("click", () => {
+    const mode = THEME_MODES[(THEME_MODES.indexOf(storedThemeMode()) + 1) % THEME_MODES.length];
+    try {
+      if (mode === "system") localStorage.removeItem("fcli-theme");
+      else localStorage.setItem("fcli-theme", mode);
     } catch (_err) {
       /* storage may be unavailable */
     }
+    applyTheme(mode);
   });
+  if (systemDark) {
+    systemDark.addEventListener("change", () => {
+      if (storedThemeMode() === "system") applyTheme("system");
+    });
+  }
+  applyTheme(storedThemeMode());
+
+  // ------------------------------------------------- side pane as a drawer
+  // Below the narrow breakpoint the side pane is off-canvas, opened from the
+  // topbar and closed by picking from it, the backdrop, or Escape.
+  const narrowScreen = window.matchMedia ? window.matchMedia("(max-width: 860px)") : null;
+
+  function setSideDrawer(open) {
+    document.body.classList.toggle("side-open", open);
+    dom.sideBackdrop.hidden = !open;
+    dom.menuToggle.setAttribute("aria-expanded", open ? "true" : "false");
+    dom.menuToggle.setAttribute("aria-label", open ? "Close reports and nodes" : "Open reports and nodes");
+  }
+
+  function closeSideDrawer() {
+    if (document.body.classList.contains("side-open")) setSideDrawer(false);
+  }
+
+  dom.menuToggle.addEventListener("click", () => setSideDrawer(!document.body.classList.contains("side-open")));
+  dom.sideBackdrop.addEventListener("click", closeSideDrawer);
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") closeSideDrawer();
+  });
+  // A node picked from the list filters the page behind the drawer.
+  dom.nodeList.addEventListener("click", (event) => {
+    if (narrowScreen && narrowScreen.matches && event.target.closest("li, button")) closeSideDrawer();
+  });
+  if (narrowScreen) narrowScreen.addEventListener("change", closeSideDrawer);
 
   try {
-    const stored = localStorage.getItem("fcli-theme");
-    if (stored) document.documentElement.dataset.theme = stored;
     dom.topoPortLabels.checked = Boolean(localStorage.getItem("fcli-topo-ports"));
   } catch (_err) {
     /* storage may be unavailable */

@@ -176,7 +176,21 @@ body {
   display: grid;
   grid-template-columns: var(--side-width, 270px) minmax(0, 1fr);
   height: 100vh;
+  /* The visible height on mobile, without the browser's own toolbars. */
+  height: 100dvh;
   overflow: hidden;
+}
+
+/* The drawer controls exist only below the narrow breakpoint. */
+.topbar .menu-toggle {
+  display: none;
+}
+
+.side-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 35;
+  background: rgba(0, 0, 0, 0.45);
 }
 
 .layout:has(#chat-drawer:not([hidden])) {
@@ -2656,6 +2670,9 @@ button.pill-jump:hover {
 /* ------------------------------------------------------------- Path Graph */
 
 .path-graph-wrap {
+  /* Fills the page like the other views, so the statusbar stays at the bottom. */
+  flex: 1;
+  min-height: 0;
   padding: 14px 20px 20px;
   overflow: auto;
 }
@@ -2992,22 +3009,150 @@ button.pill-jump:hover {
 /* ----------------------------------------------------------- Media Queries */
 
 @media (max-width: 860px) {
-  .layout {
-    grid-template-columns: 1fr;
-  }
+  .layout,
   .layout:has(#chat-drawer:not([hidden])) {
-    grid-template-columns: 1fr;
-    grid-template-rows: 1fr 50vh;
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: minmax(0, 1fr);
   }
+
+  /* The side pane slides in over the page instead of taking a column. */
   .sidebar {
-    display: none;
+    position: fixed;
+    inset: 0 auto 0 0;
+    width: min(86vw, 320px);
+    z-index: 40;
+    transform: translateX(-100%);
+    transition: transform var(--transition-smooth), visibility var(--transition-smooth);
+    visibility: hidden;
+    box-shadow: var(--md-elevation-4);
+    padding-bottom: env(safe-area-inset-bottom);
   }
-  .chat-drawer {
-    border-left: none;
-    border-top: 1px solid var(--border);
+  body.side-open .sidebar {
+    transform: none;
+    visibility: visible;
+  }
+  .topbar .menu-toggle {
+    display: inline-flex;
+    font-size: 16px;
   }
   .chat-resizer,
   .side-resizer {
     display: none;
+  }
+
+  /* The chat takes the screen rather than half of it: a keyboard takes the rest. */
+  .chat-drawer {
+    position: fixed;
+    inset: 0;
+    z-index: 45;
+    border-left: none;
+    padding-bottom: env(safe-area-inset-bottom);
+  }
+
+  .topbar {
+    gap: 8px;
+    padding: 8px 12px;
+    padding-top: max(8px, env(safe-area-inset-top));
+  }
+  .topbar-title h1 {
+    font-size: 16px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  #report-desc {
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .topbar-state {
+    gap: 6px;
+  }
+
+  .toolbar {
+    gap: 6px;
+    padding: 8px 12px;
+  }
+  .toolbar > .input {
+    flex: 1 1 100%;
+  }
+  .report-params {
+    flex: 1 1 100%;
+  }
+  /* One argument per row, its input taking what the label leaves. */
+  .report-params > .field {
+    flex: 1 1 100%;
+  }
+  .report-params > .field > .input {
+    flex: 1;
+  }
+
+  /* Anchored to their button, but never wider than the screen. */
+  .menu-panel {
+    max-width: calc(100vw - 24px);
+    min-width: min(220px, calc(100vw - 24px));
+    max-height: 60vh;
+  }
+
+  .table-wrap,
+  .services-tree-wrap,
+  .path-graph-wrap {
+    padding: 10px 12px 16px;
+  }
+  .dashboard-wrap {
+    padding: 14px 12px;
+  }
+  .kpi-grid {
+    grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+    gap: 12px;
+  }
+
+  .topo-bar {
+    gap: 8px;
+    padding: 8px 12px;
+  }
+  .topo-body {
+    flex-direction: column;
+  }
+  .topo-detail {
+    width: auto;
+    max-height: 45%;
+    border-left: none;
+    border-top: 1px solid var(--border);
+  }
+
+  .statusbar {
+    flex-wrap: wrap;
+    gap: 4px 12px;
+    padding: 6px 12px;
+    padding-bottom: max(6px, env(safe-area-inset-bottom));
+  }
+}
+
+@media (max-width: 520px) {
+  /* A phone held upright: the title is what matters, the rest is a tap away. */
+  #report-desc,
+  #live-label {
+    display: none;
+  }
+  .kpi-grid {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  }
+}
+
+/* Fingers, not a mouse: targets big enough to hit, and inputs at 16px so
+   iOS does not zoom the page in when one takes focus. */
+@media (pointer: coarse) {
+  .btn,
+  .input {
+    min-height: 36px;
+  }
+  .input,
+  select.input {
+    font-size: 16px;
+  }
+  .report-item {
+    padding-top: 9px;
+    padding-bottom: 9px;
   }
 }
