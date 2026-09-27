@@ -1611,7 +1611,7 @@ def test_get_rib_follows_an_indirect_next_hop_to_the_egress_interface():
     assert (next_hop.type, next_hop.resolving_route) == ("indirect", "10.1.5.0/31")
     assert next_hop.egress == (Egress("interface", "ethernet-1/3.1"),)
     row = _rib_row(out)
-    assert row["next-hop"] == ["10.1.5.0/31 (indirect)"]
+    assert row["next-hop"] == ["10.1.5.1 (indirect)"]
     assert row["itf"] == ["ethernet-1/3.1"]
 
 

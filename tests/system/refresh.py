@@ -7,6 +7,7 @@ date offline, without re-recording anything.
 
     python -m tests.system.refresh --dry-run
     python -m tests.system.refresh
+    python -m tests.system.refresh --report ipv4_rib --report ipv6_rib
 
 Use it only for a change to the flattening that you have reviewed report by
 report. A column that moves because a *getter* changed is exactly what
@@ -33,6 +34,13 @@ def main(argv: Optional[List[str]] = None) -> int:
         action="store_true",
         help="Report what would change without rewriting the recordings",
     )
+    parser.add_argument(
+        "--report",
+        action="append",
+        metavar="NAME",
+        help="Refresh only this report's tables; repeat for several. Keeps a "
+        "change to one table's rendering from rewriting every golden",
+    )
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(message)s")
 
@@ -46,6 +54,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         recording = Recording.load(path)
         updates = []
         for name, report in recording.reports.items():
+            if args.report and name not in args.report:
+                continue
             columns, rows = recording.table(name)
             if columns == report.columns and rows == report.rows:
                 continue
