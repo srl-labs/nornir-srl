@@ -4756,6 +4756,13 @@
     const name = document.createElement("span");
     name.textContent = entry.title;
     title.append(chevron, name);
+    if (entry.addresses) {
+      // The node's system IPs, after its name as the bridge-domain tree has them.
+      const ips = document.createElement("span");
+      ips.className = "bd-node-ips";
+      ips.textContent = entry.addresses;
+      title.append(ips);
+    }
     if (entry.state) {
       const badge = lensStateBadge(entry.state, entry.label || entry.state.toUpperCase());
       badge.className = `bd-node-state ${LENS_BADGE_CLASS[entry.state] || ""}`.trim();
@@ -5111,7 +5118,7 @@
 
     const summary = document.createElement("div");
     summary.className = "path-graph-summary";
-    const reached = graph.nodes.filter((n) => n.outcomes.includes("neighbor") || n.outcomes.includes("local-ip")).length;
+    const reached = graph.nodes.filter((n) => ["neighbor", "local-ip", "handed-off"].some((o) => n.outcomes.includes(o))).length;
     const stopped = graph.nodes.filter((n) => n.state === "down").length;
     const parts = [
       `to <strong>${graph.destination}</strong>`,

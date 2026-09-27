@@ -21,7 +21,7 @@ without a test of the walk that produced it noticing.
 from __future__ import annotations
 
 import json
-from dataclasses import fields, is_dataclass
+from dataclasses import fields, is_dataclass, replace
 from functools import lru_cache
 from typing import Any, List
 
@@ -59,6 +59,7 @@ from nornir_srl.records import (
     Route,
     RouteNextHop,
     RouteTable,
+    Subinterface,
     as_dict,
 )
 from nornir_srl.reports import REPORTS_BY_NAME
@@ -430,6 +431,54 @@ def _route(prefix: str, kind: str, *next_hops: RouteNextHop) -> Route:
     return Route(prefix=prefix, type=kind, active=True, next_hops=next_hops)
 
 
+def _leaf_with_a_ce(arp_on: str = "irb0.104") -> FabricState:
+    """A leaf whose VRF route leaves over an irb to a gateway beyond the fabric.
+
+    6.6.6.1/32 is learned from a CE at 10.1.4.16 behind irb0.104: no LLDP
+    runs on an irb, so only ARP there says who the packet goes to.
+    """
+    state = FabricState()
+    state.hostnames = {"leaf5": "leaf5"}
+    gateway = RouteNextHop(address="10.1.4.16", type="indirect", resolving_route="10.1.4.0/24",
+                           egress=(Egress("interface", "irb0.104"),))
+    state.reports = {
+        "ipv4_rib": {"leaf5": [RouteTable("ipvrf-1", (_route("6.6.6.1/32", "bgp-evpn", gateway),))]},
+        "ipv6_rib": {"leaf5": []},
+        "lldp": {"leaf5": []},
+        "arp": {"leaf5": [NeighborCache(arp_on, ("ipvrf-1",), (NeighborEntry("10.1.4.16", "1A:9C:0E:FF:00:41", "dynamic"),))]}
+        if arp_on else {"leaf5": []},
+        "nd": {},
+    }
+    return state
+
+
+def test_path_hands_off_to_the_gateway_arp_resolves_on_the_egress_port():
+    (hop,) = lens_path(_leaf_with_a_ce(), source="leaf5", destination="6.6.6.1", ni="ipvrf-1")
+    assert (hop.outcome, hop.egress, hop.gateway, hop.mac, hop.origin) == (
+        "handed-off", "irb0.104", "10.1.4.16", "1A:9C:0E:FF:00:41", "dynamic"
+    )
+    row = PATH.row(hop)
+    assert row["Next-hop"] == "10.1.4.16"
+    assert row["Peer"] == "10.1.4.16 1A:9C:0E:FF:00:41"
+    assert row["Detail"] == "no LLDP neighbour on irb0, handed to 10.1.4.16 at 1A:9C:0E:FF:00:41 (ARP, dynamic)"
+
+
+def test_path_still_dead_ends_without_a_binding_on_the_egress_port():
+    for arp_on in ("", "irb0.101"):
+        (hop,) = lens_path(_leaf_with_a_ce(arp_on), source="leaf5", destination="6.6.6.1", ni="ipvrf-1")
+        assert (hop.outcome, hop.gateway, hop.mac) == ("dead-end", "", ""), arp_on
+
+
+def test_path_graph_ends_a_handed_off_branch_at_its_gateway():
+    from nornir_srl.lenses import graph_path  # noqa: PLC0415
+
+    hops = lens_path(_leaf_with_a_ce(), source="leaf5", destination="6.6.6.1", ni="ipvrf-1")
+    graph = graph_path(hops)
+    (end,) = [n for n in graph["nodes"] if n["id"].startswith("2:gateway/")]
+    assert (end["title"], end["subtitle"], end["state"]) == ("10.1.4.16", "1A:9C:0E:FF:00:41", "up")
+    assert any(e["to"] == end["id"] and e["label"] == "irb0.104" for e in graph["edges"])
+
+
 def _leaf_and_dcgw() -> FabricState:
     """A leaf whose VRF route resolves over VXLAN to a DCGW that owns the VTEP.
 
@@ -465,6 +514,38 @@ def _leaf_and_dcgw() -> FabricState:
         "nd": {},
     }
     return state
+
+
+def test_a_vxlan_hop_names_the_vni_it_carries_the_packet_in():
+    state = _leaf_and_dcgw()
+    leaf_vrf = state.reports["ipv4_rib"]["leaf1"][0]
+    route = leaf_vrf.routes[0]
+    tunnel = replace(route.next_hops[0].egress[0], vni=1)
+    state.reports["ipv4_rib"]["leaf1"][0] = replace(
+        leaf_vrf, routes=(replace(route, next_hops=(replace(route.next_hops[0], egress=(tunnel,)),)),)
+    )
+    overlay = lens_path(state, source="leaf1", destination="10.200.2.23", ni="ipvrf-l3dci")[0]
+    assert (overlay.outcome, overlay.vni) == ("tunnel", 1)
+    row = PATH.row(overlay)
+    assert row["Egress"] == "vxlan:192.168.255.2 vni:1"
+    assert row["Detail"] == "over vxlan vni 1 to 192.168.255.2, continuing in default"
+
+
+def test_where_names_each_node_by_its_system_ips_too():
+    state = _leaf_and_dcgw()
+    state.reports["ni"] = {
+        "dcgw1": [NetworkInstance("default", "default", "up", interfaces=(
+            Subinterface("system0.0", "up", ("2001:db8::2/128", "192.168.255.2/32")),))],
+    }
+    sightings = lens_where(state, "192.168.255.2")
+    by_node = {s.node: s for s in sightings}
+    # IPv4 first, and a node without collected instances simply has none.
+    assert by_node["dcgw1"].system_ips == ("192.168.255.2", "2001:db8::2")
+    assert by_node["leaf1"].system_ips == ()
+    assert WHERE.row(by_node["dcgw1"])["System"] == "192.168.255.2, 2001:db8::2"
+    (card,) = tree_where(sightings)
+    addresses = {e.title: e.addresses for e in card.entries}
+    assert addresses == {"dcgw1": "192.168.255.2  ·  2001:db8::2", "leaf1": ""}
 
 
 def test_path_continues_in_vrf_after_vtep_is_reached():
@@ -888,7 +969,7 @@ def test_every_hop_outcome_has_a_detail():
     from nornir_srl.lenses import _HOP_DETAIL  # noqa: PLC0415 - the map is the test
 
     documented = {
-        "forwarded", "dead-end", "tunnel", "endpoint-reached", "leaked", "delivered",
+        "forwarded", "dead-end", "handed-off", "tunnel", "endpoint-reached", "leaked", "delivered",
         "local-ip", "neighbor", "no-neighbor", "no-route", "loop", "too-long",
     }
     assert set(_HOP_DETAIL) == documented

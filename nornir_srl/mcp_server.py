@@ -1312,7 +1312,10 @@ def trace_path(
         hop, node, ni, address: where the lookup was done and what was looked
             up - the destination, or the VTEP being chased through the underlay.
         outcome: 'forwarded' (out of egress to peer, where the walk goes on),
-            'dead-end' (no LLDP neighbour on egress, so it cannot), 'tunnel'
+            'dead-end' (no LLDP neighbour on egress, so it cannot),
+            'handed-off' (no LLDP neighbour on egress, but ARP/ND there
+            resolves the next-hop: the packet leaves the fabric to gateway at
+            mac - a CE router or a host behind an irb), 'tunnel'
             (resolved onto a tunnel - vxlan to a VTEP, ldp or sr-isis to a
             far-end gateway - continuing in the underlay towards endpoint),
             'endpoint-reached' (the underlay delivered the endpoint; the packet

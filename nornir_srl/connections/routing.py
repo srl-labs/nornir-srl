@@ -374,6 +374,7 @@ def _route_tables(
                     "tunnel",
                     str(tunnel.get("ip-prefix") or ""),
                     tunnel=str(tunnel.get("tunnel-type") or tunnel.get("type") or ""),
+                    vni=as_int((nh.get("vxlan-encapsulation") or {}).get("vni")),
                 )
             if resolving_route:
                 entry["resolving-route"] = resolving_route.get("ip-prefix")

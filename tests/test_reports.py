@@ -1673,13 +1673,15 @@ def test_get_rib_reports_the_tunnel_of_an_overlay_next_hop():
                         "next-hop-group": "319",
                     },
                 },
+                # The VNI the ip-vrf encapsulates with, as SR Linux sends it.
+                "vxlan-encapsulation": {"vni": 1, "interface": "vxlan0", "destination-mac": "1A:A4:08:FF:00:00"},
             }
         },
     )
 
     out = device.get_rib(afi="ipv4-unicast")
     assert out["ip_rib"][0].routes[0].next_hops[0].egress == (
-        Egress("tunnel", "192.168.255.2/32", tunnel="vxlan"),
+        Egress("tunnel", "192.168.255.2/32", tunnel="vxlan", vni=1),
     )
     assert _rib_row(out)["itf"] == ["vxlan:192.168.255.2/32"]
 
