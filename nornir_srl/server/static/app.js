@@ -2293,6 +2293,12 @@
     for (const [column, pattern] of snap.filters || []) {
       if (pattern) state.colFilters.set(column, pattern);
     }
+    // What a lens was asked is the page as much as its filters are: back to
+    // a where lens is back to the address it was showing.
+    state.reportParams.clear();
+    for (const [name, value] of snap.params || []) {
+      if (value) state.reportParams.set(name, value);
+    }
     if (snap.viewMode) state.viewMode = snap.viewMode;
     saveReportPreferences();
     if (snap.viewMode && state.report) {
@@ -2360,8 +2366,13 @@
     const report = state.reports.find((r) => r.name === snap.name);
     if (!report) return;
     if (state.report && state.report.name === snap.name) {
+      const asked = JSON.stringify([...state.reportParams.entries()]);
       applyNavSnap(snap);
       updateFilterUI();
+      if (JSON.stringify([...state.reportParams.entries()]) !== asked) {
+        renderReportParams();
+        connect();
+      }
       if (["bridge_domains", "services", "routers"].includes(snap.name)) {
         if (dom.viewModeBtn) {
           dom.viewModeBtn.hidden = false;
@@ -4722,6 +4733,27 @@
     return row;
   }
 
+  // A jump to the report holding the rows an item was made of, filtered to
+  // them on its node: the irb, the bridge-table entry, the RIB lookup.
+  function lensLinkButton(link) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "bd-report-jump-btn";
+    button.textContent = link.label;
+    const report = state.reports.find((r) => r.name === link.report);
+    button.title = `Open ${report ? report.title : link.report}${link.node ? ` on ${link.node}` : ""}`;
+    if (!report) button.disabled = true;
+    button.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      const filters = {};
+      for (const [column, value] of link.match || []) filters[column] = exactMatchPattern([value]);
+      const params = (link.params || []).length ? Object.fromEntries(link.params) : null;
+      jumpToFilteredReport(link.report, link.nis || [], link.node ? [link.node] : [], filters, params);
+    });
+    return button;
+  }
+
   function lensItem(item) {
     const block = document.createElement("div");
     block.className = "bd-vrf";
@@ -4732,6 +4764,11 @@
     title.textContent = item.title;
     header.append(title);
     if (item.state) header.append(lensStateBadge(item.state, item.label || item.state.toUpperCase()));
+    if ((item.links || []).length) {
+      const group = reportJumpGroup(item.links.map(lensLinkButton));
+      group.classList.add("lens-links");
+      header.append(group);
+    }
     block.append(header);
     const details = document.createElement("div");
     details.className = "bd-details";

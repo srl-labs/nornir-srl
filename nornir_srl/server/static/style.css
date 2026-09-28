@@ -1448,6 +1448,12 @@ th.filtered::after {
   flex-shrink: 0;
 }
 
+.bd-report-jump-group.lens-links {
+  flex-wrap: wrap;
+  flex-shrink: 1;
+  justify-content: flex-end;
+}
+
 .bd-report-jump-btn {
   background: var(--accent-soft);
   color: var(--accent);

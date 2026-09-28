@@ -171,6 +171,37 @@ def test_where_resolves_an_ip_through_arp(state: FabricState):
     assert arp[0].node == LEAF
     assert ":" in arp[0].mac, "the binding does not report the MAC it resolved to"
     assert arp[0].address == "100.64.1.16"
+    assert not arp[0].bridge_ni, "a routed port's binding has no bridge table behind it"
+
+
+def test_where_follows_an_irb_binding_to_the_port_its_mac_is_on(state: FabricState):
+    """An irb names the gateway; the mac-vrf behind it names the host's port."""
+    (arp,) = _of_kind(lens_where(state, "10.0.1.2"), "arp")
+    assert arp.interface == "irb1.101"
+    assert (arp.bridge_ni, arp.learned_on) == ("subnet-1", "lag1.100")
+    assert arp.segments == ("ES-01",) and arp.esi
+    assert "learned on lag1.100 in subnet-1, segment ES-01" in WHERE.row(arp)["Detail"]
+
+
+def test_where_says_what_a_remote_irb_binding_sits_behind(state: FabricState):
+    (arp,) = _of_kind(lens_where(state, "10.0.1.4"), "arp")
+    assert arp.bridge_ni == "subnet-1"
+    assert not arp.learned_on
+    assert arp.esi, "the MAC is behind a remote segment, which the binding does not say"
+    assert f"in subnet-1 behind segment {arp.esi}" in WHERE.row(arp)["Detail"]
+
+
+def test_where_links_a_binding_to_the_reports_it_was_made_of(state: FabricState):
+    (card,) = [c for c in tree_where(lens_where(state, "10.0.1.2")) if c.title == "10.0.1.2"]
+    (item,) = [i for e in card.entries for i in e.items if i.title.startswith("arp")]
+    links = {link.label: link for link in item.links}
+    assert list(links) == ["IRB", "ARP", "MAC", "ES", "IP-RIB"]
+    assert links["IRB"].match == (("name", "irb1.101"),)
+    assert links["MAC"].nis == ("subnet-1",)
+    assert links["ES"].node == LEAF, "a segment the node has is looked up on that node"
+    assert links["IP-RIB"].report == "ipv4_rib"
+    assert links["IP-RIB"].params == (("address", "10.0.1.2"),)
+    assert all(link.report in REPORTS_BY_NAME for link in item.links)
 
 
 def test_where_finds_an_address_a_node_has_configured(state: FabricState):

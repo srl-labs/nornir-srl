@@ -110,7 +110,8 @@ class Sighting:
     #: binding or a local entry was learned on, the VTEP a remote one came
     #: from, or the segment it is behind. Exactly one of the three is set for
     #: anything that was found, except that a local entry learned on a port of
-    #: an ethernet-segment also carries that segment's ESI.
+    #: an ethernet-segment also carries that segment's ESI, and an ARP or ND
+    #: binding also carries what its MAC sits behind in the bridge table.
     interface: str = ""
     vtep: str = ""
     esi: str = ""
@@ -123,6 +124,13 @@ class Sighting:
     #: ``arp``/``neighbor``: the MAC the binding resolved to, and when it goes.
     mac: str = ""
     expiry: str = ""
+    #: ``arp``/``neighbor``: the bridge table on the same node that has the
+    #: MAC - the mac-vrf behind the irb - and the subinterface it was learned
+    #: on there. Learned over the overlay instead, :attr:`vtep` or :attr:`esi`
+    #: says what it sits behind; on a port of an ethernet-segment, :attr:`esi`
+    #: and :attr:`segments` name that segment.
+    bridge_ni: str = ""
+    learned_on: str = ""
     #: ``remote``: the overlay interface it was learned over, and the VNI.
     overlay: str = ""
     vni: Optional[int] = None
@@ -274,6 +282,20 @@ class Detail:
 
 
 @dataclass(frozen=True)
+class Link:
+    """A jump from an item to the report that holds the rows behind it."""
+
+    label: str
+    report: str
+    node: str = ""
+    nis: Tuple[str, ...] = ()
+    #: (column, value) pairs a row must match exactly.
+    match: Tuple[Tuple[str, str], ...] = ()
+    #: (name, value) pairs the report is asked: the address a RIB looks up.
+    params: Tuple[Tuple[str, str], ...] = ()
+
+
+@dataclass(frozen=True)
 class Item:
     """One record, under the node that reports it."""
 
@@ -283,6 +305,7 @@ class Item:
     #: incident's severity is drawn in the colour of down without being one.
     label: str = ""
     details: Tuple[Detail, ...] = ()
+    links: Tuple[Link, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -514,6 +537,44 @@ def _port_segments(state: FabricState) -> Dict[Tuple[str, str], EthernetSegment]
     }
 
 
+def _mac_behind(
+    state: FabricState,
+    ports: Mapping[Tuple[str, str], EthernetSegment],
+    segments: Mapping[str, Tuple[str, ...]],
+    node: str,
+    nis: Iterable[str],
+    mac: str,
+) -> Dict[str, Any]:
+    """Where a binding's MAC sits in a bridge table of the binding's own node.
+
+    An irb is in an ip-vrf and a mac-vrf at once; the mac-vrf's bridge table
+    says which port the host is really on - and whether that port is part of
+    an ethernet-segment - or which VTEP or segment it sits behind.
+    """
+    wanted = set(nis)
+    if not mac or not wanted:
+        return {}
+    for table_node, table, entry in state.sub_items("mac", "entries"):
+        if table_node != node or table.ni not in wanted or _mac(entry.address) != mac:
+            continue
+        if entry.local:
+            port = str(entry.interface or "")
+            segment = ports.get((node, parent(port)))
+            return dict(
+                bridge_ni=table.ni,
+                learned_on=port,
+                esi=segment.esi if segment else "",
+                segments=(segment.name,) if segment else (),
+            )
+        return dict(
+            bridge_ni=table.ni,
+            vtep=entry.vtep or entry.far_end,
+            esi=entry.esi,
+            segments=segments.get(entry.esi, ()) if entry.esi else (),
+        )
+    return {}
+
+
 def _next_hop_text(hop: RouteNextHop) -> str:
     """A route's next-hop, with the tunnels or interfaces it leaves by."""
     tunnels = [e.value.split("/", 1)[0] for e in hop.egress if e.kind == "tunnel"]
@@ -598,6 +659,9 @@ def _locate(state: FabricState, target: str) -> List[Sighting]:
     if not mac and address is None:
         raise ValueError(f"'{wanted}' is neither a MAC nor an IP address")
 
+    segments = _es_names(state)
+    ports = _port_segments(state)
+
     # An IP is first of all somebody's own: a loopback, a system address, the
     # gateway of an irb. Beyond that it is a way of naming a MAC: resolve it
     # through ARP or ND, report the bindings that did so, and carry on with
@@ -635,6 +699,7 @@ def _locate(state: FabricState, target: str) -> List[Sighting]:
                     origin=text(entry.origin),
                     mac=bound or entry.mac,
                     expiry=countdown(entry.expires_in) if ages_out else "",
+                    **_mac_behind(state, ports, segments, node, cache.nis, bound),
                 )
             )
         sightings.extend(_bgp_host_routes(state, address))
@@ -647,8 +712,6 @@ def _locate(state: FabricState, target: str) -> List[Sighting]:
                 )
             return sightings
 
-    segments = _es_names(state)
-    ports = _port_segments(state)
     # Network-instance -> the sightings learned locally in it, by position.
     local: Dict[str, List[int]] = {}
     for node, table, entry in state.sub_items("mac", "entries"):
@@ -720,11 +783,29 @@ def _locate(state: FabricState, target: str) -> List[Sighting]:
     return sightings
 
 
+def _behind_text(sighting: Sighting) -> str:
+    """Where a binding's MAC is in the bridge table, as the tail of a Detail."""
+    if not sighting.bridge_ni:
+        return ""
+    segment = ""
+    if sighting.esi:
+        names = ", ".join(sighting.segments)
+        segment = f"segment {names} ({sighting.esi})" if names else f"segment {sighting.esi}"
+    if sighting.learned_on:
+        return f"; learned on {sighting.learned_on} in {sighting.bridge_ni}" + (
+            f", {segment}" if segment else ""
+        )
+    if sighting.vtep:
+        return f"; in {sighting.bridge_ni} behind VTEP {sighting.vtep}"
+    return f"; in {sighting.bridge_ni} behind {segment}" if segment else f"; in {sighting.bridge_ni}"
+
+
 def _sighting_detail(sighting: Sighting) -> str:
     """What a reader wants to know about a sighting beyond where it is."""
     if sighting.kind in ("arp", "neighbor"):
         detail = f"{sighting.mac or '?'}, {sighting.origin}"
-        return detail + (f", expires {sighting.expiry}" if sighting.expiry else "")
+        detail += f", expires {sighting.expiry}" if sighting.expiry else ""
+        return detail + _behind_text(sighting)
     if sighting.kind == "not-found":
         if _mac(sighting.address):
             return f"no node reports it in any bridge table ({sighting.searched} searched)"
@@ -787,6 +868,12 @@ def _sighting_item(s: Sighting) -> Item:
         details.append(Detail("Prefix", s.prefix))
     if s.interface:
         details.append(Detail("Interface", s.interface))
+    if s.mac:
+        details.append(Detail("MAC", s.mac))
+    if s.bridge_ni:
+        details.append(Detail("Bridge table", s.bridge_ni))
+    if s.learned_on:
+        details.append(Detail("Learned on", s.learned_on))
     if s.vtep:
         details.append(Detail("VTEP", s.vtep))
     if s.esi:
@@ -794,8 +881,6 @@ def _sighting_item(s: Sighting) -> Item:
         details.append(Detail("Segment", tuple(s.segments) or "not local", "" if s.segments else _WARN))
     if s.overlay:
         details.append(Detail("Overlay", f"{s.overlay} vni {s.vni}" if s.vni is not None else s.overlay))
-    if s.mac:
-        details.append(Detail("MAC", s.mac))
     if s.origin:
         details.append(Detail("Learned by" if s.kind == "bgp" else "Origin", s.origin))
     if s.next_hops:
@@ -820,7 +905,49 @@ def _sighting_item(s: Sighting) -> Item:
         title=f"{s.kind} in {s.ni}" if s.ni else s.kind,
         state=_SIGHTING_STATE.get(s.kind, ""),
         details=tuple(details),
+        links=_sighting_links(s),
     )
+
+
+def _sighting_links(s: Sighting) -> Tuple[Link, ...]:
+    """The reports that hold the rows a sighting was made of, on its node."""
+    if not s.node:
+        return ()
+    links: List[Link] = []
+    nis = tuple(ni.strip() for ni in s.ni.split(",") if ni.strip())
+    ip = _address(s.address)
+    if s.interface.startswith("irb"):
+        links.append(Link("IRB", "irb", s.node, match=(("name", s.interface),)))
+    if s.kind in ("arp", "neighbor"):
+        family = "IPv4" if s.kind == "arp" else "IPv6"
+        links.append(
+            Link(
+                "ARP" if s.kind == "arp" else "ND",
+                "arp" if s.kind == "arp" else "nd",
+                s.node,
+                match=(("interface", s.interface), (family, s.address)),
+            )
+        )
+    mac = s.mac if s.kind in ("arp", "neighbor") else s.address if _mac(s.address) else ""
+    bridge = s.bridge_ni if s.kind in ("arp", "neighbor") else s.ni
+    if mac and bridge:
+        links.append(Link("MAC", "mac", s.node, nis=(bridge,), match=(("mac", mac),)))
+    if s.esi:
+        # A segment the node has itself is named there; one only behind a
+        # remote VTEP is found by its ESI wherever it is configured.
+        local = s.kind in ("local", "multihomed", "duplicate") or bool(s.learned_on)
+        links.append(Link("ES", "es", s.node if local else "", match=(("esi", s.esi),)))
+    if ip is not None and nis:
+        links.append(
+            Link(
+                "IP-RIB",
+                _rib_report(ip),
+                s.node,
+                nis=nis,
+                params=(("address", str(ip)),),
+            )
+        )
+    return tuple(links)
 
 
 def tree_where(sightings: List[Sighting]) -> List[Card]:
@@ -2007,6 +2134,7 @@ __all__ = [
     "Detail",
     "Entry",
     "Item",
+    "Link",
     "coerce_lens_params",
     "Hop",
     "Interface",
