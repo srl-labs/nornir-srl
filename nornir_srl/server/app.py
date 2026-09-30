@@ -10,7 +10,7 @@ import json
 import logging
 import threading
 from pathlib import Path
-from typing import Any, AsyncIterator, Awaitable, Callable, Dict, Optional, Sequence
+from typing import Any, AsyncIterator, Awaitable, Callable, Dict, List, Optional, Sequence
 
 import anyio
 from nornir.core import Nornir
@@ -36,6 +36,9 @@ STATIC_DIR = Path(__file__).parent / "static"
 DEFAULT_REFRESH = 2.0
 #: Keep-alive comment interval so proxies do not drop an idle SSE stream.
 SSE_HEARTBEAT = 20.0
+#: How often a stream says how far its first answer is, while that is still
+#: being worked out - a BGP RIB can take a while on a large fabric.
+PROGRESS_INTERVAL = 0.5
 
 _SSE_HEADERS = {
     "Cache-Control": "no-cache, no-transform",
@@ -76,6 +79,12 @@ def parse_kv(values: Optional[str]) -> Optional[Dict[str, str]]:
     return parsed or None
 
 
+def parse_nodes(value: Optional[str]) -> Optional[List[str]]:
+    """The ``node`` query argument: the nodes a request is only about, or None."""
+    names = [n.strip() for n in (value or "").split(",") if n.strip()]
+    return names or None
+
+
 def table_digest(table: Dict[str, Any]) -> str:
     """Fingerprint the parts of a rendered table the browser actually shows."""
     material = json.dumps(
@@ -92,6 +101,7 @@ async def table_events(
     render: Callable[[], Dict[str, Any]],
     interval: float,
     is_disconnected: Callable[[], Awaitable[bool]],
+    progress: Optional[Callable[[], Dict[str, Any]]] = None,
 ) -> AsyncIterator[bytes]:
     """Yield server-sent events of what *render* makes of the state, until the
     client goes away.
@@ -99,6 +109,11 @@ async def table_events(
     A table is only pushed when it actually changed, so an idle fabric costs
     nothing but the periodic keep-alive comment. *render* is a report's table
     or a lens's answer; *name* is only for the log.
+
+    Until the first table is out, a ``progress`` event every
+    :data:`PROGRESS_INTERVAL` says the query is still running: the seconds it
+    has taken, and what *progress* knows of how many nodes have answered. A
+    slow first answer then reads as work in progress rather than as nothing.
     """
     loop = asyncio.get_running_loop()
     last_digest = ""
@@ -106,7 +121,22 @@ async def table_events(
     try:
         while not await is_disconnected() and not store.stopping:
             try:
-                table = await anyio.to_thread.run_sync(render)
+                task = asyncio.ensure_future(anyio.to_thread.run_sync(render))
+                started = loop.time()
+                while not last_digest:
+                    done, _pending = await asyncio.wait({task}, timeout=PROGRESS_INTERVAL)
+                    if done:
+                        break
+                    if store.stopping or await is_disconnected():
+                        return
+                    status: Dict[str, Any] = {"elapsed": round(loop.time() - started, 1)}
+                    if progress is not None:
+                        try:
+                            status.update(progress())
+                        except Exception:  # noqa: BLE001 - the elapsed time still says it
+                            pass
+                    yield f"event: progress\ndata: {json.dumps(status)}\n\n".encode()
+                table = await task
             except (asyncio.CancelledError, GeneratorExit):
                 break
             except ValueError as exc:
@@ -374,7 +404,18 @@ def create_app(
             return lambda: store.lens_table(lens, inv_filter, params)
         report = streamable_report(name)
         params = coerce_params(report, request.query_params)
-        return lambda: store.table(report, inv_filter, params)
+        hosts = parse_nodes(request.query_params.get("node"))
+        return lambda: store.table(report, inv_filter, params, hosts)
+
+    def progress_of(request: Request) -> Callable[[], Dict[str, Any]]:
+        """How far the nodes are with what the named report or lens reads."""
+        name = request.path_params["name"]
+        inv_filter = parse_kv(request.query_params.get("inv_filter"))
+        lens = LENSES_BY_NAME.get(name)
+        if lens is not None and lens.on(SERVER):
+            return lambda: store.progress(list(lens.requires), inv_filter)
+        hosts = parse_nodes(request.query_params.get("node"))
+        return lambda: store.progress([name], inv_filter, hosts)
 
     async def report_once(request: Request) -> Response:
         try:
@@ -408,6 +449,7 @@ def create_app(
                 render,
                 interval,
                 request.is_disconnected,
+                progress_of(request),
             ),
             media_type="text/event-stream",
             headers=_SSE_HEADERS,

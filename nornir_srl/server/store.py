@@ -68,6 +68,10 @@ class FabricStore:
         #: against the live device, so its result is cached; re-asserting the
         #: paths themselves is cheap and happens on every render.
         self._specs: Dict[Tuple[str, str], List[SubscriptionSpec]] = {}
+        #: (node, report) pairs whose activation has run to the end - the
+        #: paths discovered and read once, or the attempt failed. Knowing the
+        #: paths is not enough: the first Gets behind them are the slow part.
+        self._activated: Set[Tuple[str, str]] = set()
         #: Why a node could not serve a report, and when that was decided.
         self._activation_errors: Dict[Tuple[str, str], Tuple[float, str]] = {}
         #: Centralized table cache per (report_name, inv_filter, report params)
@@ -244,6 +248,7 @@ class FabricStore:
                 del self._specs[key]
             for key in [k for k in self._activation_errors if k[0] == name]:
                 del self._activation_errors[key]
+            self._activated = {k for k in self._activated if k[0] != name}
             self._table_cache.clear()
             self._last_state_change = time.time()
         if stream is not None:
@@ -407,9 +412,21 @@ class FabricStore:
         """The inventory nodes *inv_filter* selects, whether or not they answer."""
         return self._targets(inv_filter)
 
-    def _targets(self, inv_filter: Optional[Dict[str, str]]) -> List[str]:
+    def _targets(
+        self, inv_filter: Optional[Dict[str, str]], hosts: Optional[Sequence[str]] = None
+    ) -> List[str]:
+        """The inventory the (filtered) request is about, cut down to *hosts* if named.
+
+        *hosts* is how a request about one node - the routes one peer sent it -
+        asks only that node, rather than every node for a table then filtered
+        to it in the browser.
+        """
         target = self.nornir.filter(**inv_filter) if inv_filter else self.nornir
-        return list(target.inventory.hosts)
+        names = list(target.inventory.hosts)
+        if hosts:
+            wanted = set(hosts)
+            names = [n for n in names if n in wanted]
+        return names
 
     def _streams_for(self, names: List[str]) -> List[HostStream]:
         with self._lock:
@@ -471,6 +488,8 @@ class FabricStore:
                 with self._lock:
                     self._specs[key] = specs
             stream.ensure_paths(specs)
+            with self._lock:
+                self._activated.add(key)
         except Exception as exc:  # noqa: BLE001 - reported per node in the UI
             logger.warning(
                 "%s: activating report '%s' failed: %s", name, report.name, exc
@@ -480,6 +499,25 @@ class FabricStore:
             )
             with self._lock:
                 self._activation_errors[key] = (time.time(), str(exc))
+                self._activated.add(key)
+
+    def progress(
+        self,
+        reports: Sequence[str],
+        inv_filter: Optional[Dict[str, str]] = None,
+        hosts: Optional[Sequence[str]] = None,
+    ) -> Dict[str, int]:
+        """How far the nodes are in answering *reports* for the first time.
+
+        ``ready`` of ``total`` (node, report) pairs have been activated: their
+        paths found and read once, or given up on. What a stream reports while
+        the first render of a slow report - a BGP RIB - is still running.
+        """
+        names = self._targets(inv_filter, hosts)
+        with self._lock:
+            nodes = [n for n in names if n in self._streams]
+            done = sum(1 for n in nodes for r in reports if (n, r) in self._activated)
+        return {"ready": done, "total": len(nodes) * len(reports), "nodes": len(nodes)}
 
     def _discover(self, report: ReportSpec, stream: HostStream) -> List[SubscriptionSpec]:
         """Determine which gNMI paths a report needs on this node."""
@@ -510,6 +548,7 @@ class FabricStore:
         report: ReportSpec,
         inv_filter: Optional[Dict[str, str]] = None,
         params: Optional[Dict[str, Any]] = None,
+        hosts: Optional[Sequence[str]] = None,
     ) -> Dict[str, Any]:
         """Render *report* across the (filtered) inventory from streamed state.
 
@@ -530,13 +569,14 @@ class FabricStore:
                 "render_ms": 0.0,
                 "oldest_update": None,
             }
-        names = self._targets(inv_filter)
+        names = self._targets(inv_filter, hosts)
         self._heal_connections(names)
         self.activate(report, names)
 
         inv_key = tuple(sorted(inv_filter.items())) if inv_filter else None
         param_key = tuple(sorted((params or {}).items())) or None
-        cache_key = (report.name, inv_key, param_key)
+        host_key = tuple(sorted(hosts)) if hosts else None
+        cache_key = (report.name, inv_key, param_key, host_key)
         now = time.time()
         with self._lock:
             cached = self._table_cache.get(cache_key)

@@ -1560,6 +1560,57 @@ async def test_stream_reports_a_render_failure_as_an_error_event(store, monkeypa
     assert events[0][1]["error"] == "render exploded"
 
 
+@pytest.mark.anyio
+async def test_stream_says_a_slow_first_answer_is_still_running(store, monkeypatch):
+    """A BGP RIB can take seconds to read the first time; the browser is told it runs."""
+    import nornir_srl.server.app as app_module  # noqa: PLC0415
+
+    monkeypatch.setattr(app_module, "PROGRESS_INTERVAL", 0.05)
+    fabric_store, _devices = store
+    report = get_report("lldp")
+
+    def slow_render():
+        time.sleep(0.3)
+        return fabric_store.table(report)
+
+    asked = {"n": 0}
+
+    def progress():
+        asked["n"] += 1
+        return {"ready": 1, "total": 2, "nodes": 2}
+
+    events = []
+
+    async def is_disconnected():
+        # Leave once the first table and one more tick are through.
+        return len([k for k, _ in events if k == "table"]) >= 1
+
+    async for chunk in table_events(fabric_store, report.name, slow_render, 0.01, is_disconnected, progress):
+        text = chunk.decode()
+        if text.startswith(":"):
+            continue
+        kind = text.split("\n", 1)[0].removeprefix("event: ")
+        events.append((kind, json.loads(text.split("data: ", 1)[1].strip())))
+
+    kinds = [kind for kind, _ in events]
+    assert kinds[-1] == "table" and kinds.count("table") == 1
+    ticks = [data for kind, data in events if kind == "progress"]
+    assert ticks, "no progress while the first render ran"
+    assert all(kind == "progress" for kind in kinds[:-1])
+    assert ticks[0]["ready"] == 1 and ticks[0]["total"] == 2
+    assert ticks[-1]["elapsed"] >= ticks[0]["elapsed"] > 0
+
+
+def test_progress_counts_a_node_once_its_activation_has_run(store):
+    fabric_store, _devices = store
+    report = get_report("lldp")
+    before = fabric_store.progress([report.name])
+    assert before["ready"] == 0 and before["total"] == before["nodes"] > 0
+    fabric_store.table(report)
+    after = fabric_store.progress([report.name])
+    assert after["ready"] == after["total"]
+
+
 async def _collect(fabric_store, report, stop_after, render=None):
     """Drive table_events for *stop_after* ticks and parse what it yielded."""
     ticks = {"n": 0}
@@ -1580,6 +1631,30 @@ async def _collect(fabric_store, report, stop_after, render=None):
         data = text.split("data: ", 1)[1].strip()
         events.append((kind, json.loads(data)))
     return events
+
+
+def test_a_report_about_one_node_asks_only_that_node(store):
+    """The routes one peer sent a node are that node's: the others are not read."""
+    fabric_store, _devices = store
+    report = get_report("lldp")
+
+    table = fabric_store.table(report, hosts=["leaf1"])
+
+    assert table["nodes"] == 1
+    assert {row["Node"] for row in table["rows"]} <= {"leaf1"}
+    assert fabric_store.progress([report.name], hosts=["leaf1"]) == {"ready": 1, "total": 1, "nodes": 1}
+    # spine1 was never asked for it.
+    assert ("spine1", report.name) not in fabric_store._activated
+    # And the whole inventory is still one request away, not a cached cut.
+    assert fabric_store.table(report)["nodes"] == 2
+
+
+def test_the_node_argument_scopes_a_report_endpoint(client):
+    test_client, _devices = client
+    one = test_client.get("/api/report/lldp?node=leaf1").json()
+    both = test_client.get("/api/report/lldp").json()
+    assert (one["nodes"], both["nodes"]) == (1, 2)
+    assert test_client.get("/api/report/lldp?node=leaf1,spine1").json()["nodes"] == 2
 
 
 def test_bridge_domains_report_endpoint(client):

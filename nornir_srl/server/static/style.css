@@ -622,6 +622,104 @@ body {
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--err) 30%, transparent);
 }
 
+/* A query still working out its first answer: amber, and breathing. */
+.dot.busy {
+  background: var(--warn);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--warn) 30%, transparent);
+  animation: pulse-live 1s ease-in-out infinite;
+}
+
+/* A page asked about some nodes only: say so, in the accent colour. */
+.btn.scope-chip {
+  background: var(--accent-soft);
+  border-color: rgba(var(--accent-rgb), 0.45);
+  color: var(--accent);
+  border-radius: var(--radius-full);
+  font-family: var(--font-mono);
+}
+
+.btn.scope-chip:hover {
+  background: var(--accent-hover);
+}
+
+/* ---------------------------------------------------------- Query progress */
+
+.query-progress {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 20px 6px;
+  border-bottom: 1px solid var(--border);
+  background: var(--panel);
+  color: var(--muted);
+  font-size: 12.5px;
+  z-index: 3;
+}
+
+.query-progress strong {
+  color: var(--text);
+  font-weight: 600;
+}
+
+/* An indeterminate bar along the top edge: something is moving. */
+.query-progress-bar {
+  position: absolute;
+  inset: 0 0 auto 0;
+  height: 2px;
+  overflow: hidden;
+  background: rgba(var(--accent-rgb), 0.15);
+}
+
+.query-progress-bar span {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 30%;
+  background: var(--accent);
+  animation: query-slide 1.2s ease-in-out infinite;
+}
+
+@keyframes query-slide {
+  from { left: -30%; }
+  to { left: 100%; }
+}
+
+.spinner {
+  width: 12px;
+  height: 12px;
+  flex: none;
+  border: 2px solid rgba(var(--accent-rgb), 0.25);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+/* What is on screen is the previous answer until the first new one lands. */
+.main.is-querying .table-wrap,
+.main.is-querying .services-tree-wrap,
+.main.is-querying .path-graph-wrap {
+  opacity: 0.45;
+  transition: opacity var(--transition-base);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .query-progress-bar span,
+  .spinner,
+  .dot.busy {
+    animation: none;
+  }
+  .query-progress-bar span {
+    left: 0;
+    width: 100%;
+    opacity: 0.5;
+  }
+}
+
 /* ----------------------------------------------------------------- Toolbar */
 
 .toolbar {

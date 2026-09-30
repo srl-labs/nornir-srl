@@ -55,9 +55,13 @@
     desc: el("report-desc"),
     liveDot: el("live-dot"),
     liveLabel: el("live-label"),
+    queryProgress: el("query-progress"),
+    queryProgressLabel: el("query-progress-label"),
+    main: document.querySelector(".main"),
     globalSearch: el("global-search"),
     invFilter: el("inv-filter"),
     reportParams: el("report-params"),
+    scopeChip: el("scope-chip"),
     clearFiltersBtn: el("clear-filters-btn"),
     filterBadge: el("filter-badge"),
     refresh: el("refresh"),
@@ -162,6 +166,11 @@
   };
 
   const state = {
+    // The stream whose first answer is still being worked out; see startQuery.
+    query: null,
+    // The nodes the server is asked about, when a page is about one node only
+    // (the routes one peer exchanged with it); empty is the whole inventory.
+    scopeNodes: [],
     reports: [],
     report: null,
     columns: [],
@@ -360,7 +369,18 @@
     return specs.filter((spec) => spec.required && !state.reportParams.get(spec.name));
   }
 
+  // The chip saying a page is about some nodes only, and letting it be about
+  // all of them again.
+  function renderScope() {
+    const nodes = state.scopeNodes;
+    dom.scopeChip.hidden = !nodes.length;
+    if (!nodes.length) return;
+    dom.scopeChip.textContent = `only ${nodes.join(", ")} ✕`;
+    dom.scopeChip.title = `Only ${nodes.join(", ")} ${nodes.length === 1 ? "is" : "are"} asked. Click to ask every node.`;
+  }
+
   function renderReportParams() {
+    renderScope();
     dom.reportParams.replaceChildren();
     const specs = (state.report && state.report.params) || [];
     dom.reportParams.hidden = !specs.length;
@@ -536,6 +556,15 @@
     const initial = state.reports.find((r) => r.name === wanted) || state.reports[0];
     if (initial) {
       selectReport(initial);
+      const scoped = query ? (new URLSearchParams(query).get("node") || "").split(",").filter(Boolean) : [];
+      if (scoped.length) {
+        state.scopeNodes = scoped;
+        renderReportParams();
+        if (!(initial.params || []).length) {
+          connect();
+          syncCurrentVisit();
+        }
+      }
       if (query && (initial.params || []).length) {
         const given = new URLSearchParams(query);
         for (const spec of initial.params) {
@@ -2277,6 +2306,7 @@
       title: state.report.title,
       filters: [...state.colFilters.entries()],
       params: [...state.reportParams.entries()],
+      scope: [...state.scopeNodes],
       viewMode: state.viewMode,
     };
   }
@@ -2285,7 +2315,7 @@
     const viewMode = ["bridge_domains", "services", "routers"].includes(snap.name)
       ? snap.viewMode
       : "";
-    return JSON.stringify({ name: snap.name, filters: snap.filters, viewMode });
+    return JSON.stringify({ name: snap.name, filters: snap.filters, scope: snap.scope || [], viewMode });
   }
 
   function applyNavSnap(snap) {
@@ -2299,6 +2329,7 @@
     for (const [name, value] of snap.params || []) {
       if (value) state.reportParams.set(name, value);
     }
+    state.scopeNodes = [...(snap.scope || [])];
     if (snap.viewMode) state.viewMode = snap.viewMode;
     saveReportPreferences();
     if (snap.viewMode && state.report) {
@@ -2324,6 +2355,7 @@
   function pageUrl(snap) {
     const params = new URLSearchParams();
     for (const [name, value] of snap.params || []) params.set(name, value);
+    if ((snap.scope || []).length) params.set("node", snap.scope.join(","));
     const query = params.toString();
     return "#" + snap.name + (query ? "?" + query : "");
   }
@@ -2395,6 +2427,8 @@
     // On a phone the side pane is a drawer over the page: picking something
     // from it is done with it.
     closeSideDrawer();
+    // Whatever was being queried is not what is being looked at any more.
+    endQuery();
     if (state.report && !fromPop) {
       saveReportPreferences();
       syncCurrentVisit();
@@ -2444,6 +2478,8 @@
     }
 
     loadReportPreferences();
+    // Opened from the list, a report is about the whole inventory again.
+    state.scopeNodes = [];
     if (snap) {
       state.pendingFilters = null;
       applyNavSnap(snap);
@@ -2486,6 +2522,11 @@
       // A lens answers a question asked now; there is nothing to keep and
       // compare a later answer against.
       dom.compareBtn.hidden = isLens(report);
+      // Another report's rows are not a stale version of this one's: they go,
+      // and the page waits for this report's first answer instead.
+      state.columns = [];
+      state.rows = [];
+      state.errors = [];
       state.tree = null;
       state.records = null;
       state.graph = null;
@@ -2541,11 +2582,67 @@
     dom.liveLabel.textContent = label;
   }
 
+  // ------------------------------------------------------ query progress
+  // From opening a stream to its first table, which for a BGP RIB can take a
+  // while: a strip under the toolbar says the query runs, for how long, and -
+  // from the server's progress events - how many nodes have answered. What is
+  // still on screen from before is dimmed, as it is not the answer yet.
+  let queryTimer = null;
+
+  function startQuery() {
+    endQuery();
+    state.query = { since: performance.now(), status: null };
+    dom.queryProgress.hidden = false;
+    setLive("busy", "querying");
+    dom.empty.textContent = "Waiting for the first answer from the fabric…";
+    // Nothing on screen yet - a report just opened, or the page came from a
+    // panel that hid the table: draw the empty view, so it says it waits.
+    // Rows still there are the previous answer, dimmed until the new one lands.
+    if (!state.rows.length) renderBody();
+    dom.main.classList.toggle("is-querying", state.rows.length > 0);
+    // Not "0 rows": nothing has been answered yet.
+    if (!state.rows.length) dom.rowCount.textContent = "querying…";
+    renderQuery();
+    queryTimer = setInterval(renderQuery, 250);
+  }
+
+  function updateQuery(status) {
+    if (!state.query) return;
+    state.query.status = status;
+    renderQuery();
+  }
+
+  function endQuery() {
+    if (queryTimer) clearInterval(queryTimer);
+    queryTimer = null;
+    state.query = null;
+    dom.queryProgress.hidden = true;
+    dom.main.classList.remove("is-querying");
+    dom.empty.textContent = "No data.";
+  }
+
+  function renderQuery() {
+    if (!state.query) return;
+    const seconds = (performance.now() - state.query.since) / 1000;
+    const status = state.query.status || {};
+    const parts = [];
+    const title = document.createElement("strong");
+    title.textContent = state.report ? state.report.title : "report";
+    parts.push("Querying ", title, ` · ${seconds.toFixed(seconds < 10 ? 1 : 0)} s`);
+    if (status.total) {
+      const unit = status.total === status.nodes ? "nodes" : "node reports";
+      parts.push(` · ${status.ready} of ${status.total} ${unit} answered`);
+    }
+    if (seconds > 15) parts.push(" · large tables take a while on the first read");
+    dom.queryProgressLabel.replaceChildren(...parts);
+  }
+
   function connect() {
     if (state.source) {
       state.source.close();
       state.source = null;
     }
+    endQuery();
     if (!state.report || isPanelReport(state.report.name) || state.paused) return;
     // A comparison is a verdict on two renderings; a stream pushing a third
     // over it would present as live something that is not.
@@ -2569,8 +2666,17 @@
       `/api/stream/${encodeURIComponent(state.report.name)}?${params}`
     );
     state.source = source;
-    setLive("live", "connecting");
+    startQuery();
+    source.addEventListener("progress", (event) => {
+      if (state.source !== source) return;
+      try {
+        updateQuery(JSON.parse(event.data));
+      } catch (_err) {
+        /* a malformed progress event only costs the counts */
+      }
+    });
     source.addEventListener("table", (event) => {
+      if (state.source === source) endQuery();
       setLive("live", "live");
       ingest(JSON.parse(event.data));
     });
@@ -2586,6 +2692,7 @@
       // does not offer - is closed for good rather than retried, and the
       // browser keeps the reason from us: ask for it once, the same way.
       if (source.readyState === EventSource.CLOSED) {
+        if (state.source === source) endQuery();
         setLive("error", "refused");
         explainRefusal(source, params);
         return;
@@ -2852,6 +2959,7 @@
     for (const [name, value] of state.reportParams) params.set(name, value);
     const inv = dom.invFilter.value.trim();
     if (inv) params.set("inv_filter", inv);
+    if (state.scopeNodes.length) params.set("node", state.scopeNodes.join(","));
     return params;
   }
 
@@ -3177,6 +3285,8 @@
     for (const [column, pattern] of Object.entries(state.pendingFilters.filters || {})) {
       if (pattern) state.colFilters.set(column, pattern);
     }
+    // A jump about one node asks only that node, not the whole fabric.
+    state.scopeNodes = [...(state.pendingFilters.scope || [])];
     // A jump can ask the report something too, not only filter what it says.
     if (state.pendingFilters.params) {
       state.reportParams.clear();
@@ -3216,20 +3326,21 @@
     return `(?:^|[^0-9])${e}(?=$|[^0-9])`;
   }
 
-  function jumpToFilteredReport(reportName, niNames, nodeNames, extraFilters, params) {
+  function jumpToFilteredReport(reportName, niNames, nodeNames, extraFilters, params, scope) {
     const filters = {};
     const ni = tokenMatchPattern(niNames);
     const nodes = exactMatchPattern(nodeNames);
     if (ni) filters.NI = ni;
     if (nodes) filters.Node = nodes;
     Object.assign(filters, extraFilters || {});
-    state.pendingFilters = { report: reportName, filters, params: params || null };
+    state.pendingFilters = { report: reportName, filters, params: params || null, scope: scope || [] };
 
     if (state.report && state.report.name === reportName) {
       syncCurrentVisit();
+      const before = state.scopeNodes.join(",");
       applyPendingFilters();
       updateFilterUI();
-      if (params) {
+      if (params || state.scopeNodes.join(",") !== before) {
         renderReportParams();
         connect();
       }
@@ -3280,7 +3391,9 @@
    * with it holds them: *direction* ``received`` or ``advertised``.
    */
   function jumpToPeerRoutes(direction, nodeName, niName, peerAddress, family) {
-    jumpToFilteredReport(`bgp_${direction}_routes`, [niName], [nodeName], {}, { peer: peerAddress, family });
+    // One peer of one node: the server is asked about that node alone, rather
+    // than reading every node's RIB for a table filtered down in the browser.
+    jumpToFilteredReport(`bgp_${direction}_routes`, [niName], [nodeName], {}, { peer: peerAddress, family }, [nodeName]);
   }
 
   /**
@@ -5935,6 +6048,13 @@
         renderBody();
       }
     }
+  });
+
+  dom.scopeChip.addEventListener("click", () => {
+    state.scopeNodes = [];
+    renderScope();
+    syncCurrentVisit();
+    connect();
   });
 
   // ------------------------------------------------------------------ theme

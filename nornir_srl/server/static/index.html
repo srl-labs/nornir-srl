@@ -144,6 +144,8 @@
             autocomplete="off"
             title="Nornir inventory filter: key=value pairs, comma separated"
           />
+          <!-- The nodes the server is asked about, when a page is about one only. -->
+          <button id="scope-chip" class="btn scope-chip" type="button" hidden></button>
           <!-- Arguments the selected report declares, e.g. the RIB LPM address -->
           <div id="report-params" class="report-params" hidden></div>
           <button id="clear-filters-btn" class="btn" type="button" hidden>
@@ -205,6 +207,14 @@
             <div id="export-menu" class="menu-panel" hidden></div>
           </div>
         </section>
+
+        <!-- While a report's first answer is still being worked out: a BGP RIB
+             can take a while, and a blank page would say nothing. -->
+        <div id="query-progress" class="query-progress" role="status" aria-live="polite" hidden>
+          <div class="query-progress-bar" aria-hidden="true"><span></span></div>
+          <span class="spinner" aria-hidden="true"></span>
+          <span id="query-progress-label"></span>
+        </div>
 
         <!-- Shown in place of the live table while a comparison is on screen. -->
         <section id="diff-bar" class="diff-bar" hidden>
