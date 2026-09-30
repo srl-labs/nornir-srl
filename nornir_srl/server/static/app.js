@@ -769,6 +769,25 @@
     return node;
   }
 
+  // Router and bridge glyphs from Red Hat Ansible's networking-icons
+  // (github.com/network-automation/networking-icons, Apache-2.0). They are
+  // single knockout paths, so they fill with currentColor and follow the theme.
+  const SERVICE_ICON_PATHS = {
+    router: "M128,0C57.3,0,0,57.3,0,128c0,70.7,57.3,128,128,128s128-57.3,128-128C256,57.3,198.7,0,128,0z M117.3,144.5 l0,29.1c0,3.2-2.6,5.8-5.8,5.8c-3.2,0-5.8-2.6-5.8-5.8v0l0-15L74.2,190c-2.3,2.3-6,2.3-8.2,0c-1.1-1.1-1.7-2.6-1.7-4.1 c0-1.5,0.6-3,1.7-4.2l31.5-31.5h-15c-3.2,0-5.8-2.6-5.8-5.8c0-3.2,2.6-5.8,5.8-5.8h29.1c1.5,0,3,0.7,4.1,1.8 C116.7,141.4,117.3,142.9,117.3,144.5L117.3,144.5z M120,120c-2.3,2.3-6,2.3-8.2,0L75.6,83.9v16.5c0,3.2-2.6,5.8-5.8,5.8 c-3.2,0-5.8-2.6-5.8-5.8l0-30.6c0-1.5,0.6-3,1.7-4.1c1.1-1.1,2.6-1.7,4.1-1.7l30.6,0c3.2,0,5.8,2.6,5.8,5.8s-2.6,5.8-5.8,5.8H83.9 l36.2,36.2C122.3,114.1,122.3,117.8,120,120z M138.1,112.3l0-29.1c0-3.2,2.7-5.9,5.9-5.9c3.2,0,5.9,3,5.9,5.9h0.2v14.9L182,66 c2.3-2.3,5.8-2.2,8,0c2.3,2.3,2.3,6,0,8.3l-32.1,32.2h15c3.2,0,5.8,2.5,5.8,5.7c0,3.2-2.6,5.8-5.8,5.8l-29.1,0c-1.5,0-3-0.6-4.1-1.7 C138.7,115.2,138.1,113.8,138.1,112.3L138.1,112.3z M192,186.2c0,1.5-0.6,3-1.7,4.1c-1.1,1.1-2.6,1.7-4.1,1.7l-30.6,0 c-3.2,0-5.8-2.6-5.8-5.8c0-3.2,2.6-5.8,5.8-5.8h16.5l-36.8-36.8c-1.1-1.1-1.7-2.6-1.7-4.1s0.6-3,1.7-4.1c2.3-2.3,6-2.3,8.2,0 l36.8,36.8v-16.5c0-3.2,2.6-5.8,5.8-5.8c3.2,0,5.8,2.6,5.8,5.8V186.2z",
+    bridge: "M208.7,0H47.3C21.3,0,0,21.3,0,47.3v161.5c0,26,21.3,47.3,47.3,47.3h161.5c26,0,47.3-21.3,47.3-47.3V47.3 C256,21.3,234.7,0,208.7,0z M76.8,174.2H64v-49.3c3.7,5.2,8,9.9,12.8,14.1V174.2z M192,174.2h-12.8V139c4.8-4.2,9.1-8.9,12.8-14.1 V174.2z M128,144.3c-34.8,0-63.1-27.9-64-62.5h12.8c0.9,27.5,23.5,49.7,51.2,49.7s50.3-22.1,51.2-49.7H192 C191.1,116.4,162.8,144.3,128,144.3z",
+  };
+
+  // Lens cards name their icon with the emoji the CLI prints; these two map
+  // onto the drawn glyphs, anything else stays text.
+  const SERVICE_ICON_EMOJI = { "🔀": "router", "🌉": "bridge" };
+
+  /** A router or bridge-domain glyph, sized by the surrounding font. */
+  function serviceIcon(kind) {
+    const svg = svgEl("svg", { class: "service-icon", viewBox: "0 0 256 256", "aria-hidden": "true" });
+    svg.append(svgEl("path", { d: SERVICE_ICON_PATHS[kind], fill: "currentColor" }));
+    return svg;
+  }
+
   const ROLE_LABELS = {
     client: "Client",
     segment: "Ethernet segment",
@@ -3877,7 +3896,7 @@
 
       const icon = document.createElement("span");
       icon.className = "bd-icon";
-      icon.textContent = "🌉";
+      icon.append(serviceIcon("bridge"));
 
       const title = document.createElement("span");
       title.className = "bd-title";
@@ -4236,7 +4255,7 @@
 
       const icon = document.createElement("span");
       icon.className = "bd-icon";
-      icon.textContent = "🔀";
+      icon.append(serviceIcon("router"));
 
       const title = document.createElement("span");
       title.className = "bd-title";
@@ -4773,7 +4792,7 @@
       if (routerRows.length > 0) {
         const bdHeader = document.createElement("div");
         bdHeader.className = "services-section-header";
-        bdHeader.textContent = "🌉 Bridge Domains";
+        bdHeader.append(serviceIcon("bridge"), "Bridge Domains");
         dom.servicesTreeView.append(bdHeader);
       }
       renderBridgeDomainsCards(bdRows);
@@ -4783,7 +4802,7 @@
       if (bdRows.length > 0) {
         const rtHeader = document.createElement("div");
         rtHeader.className = "services-section-header";
-        rtHeader.textContent = "🔀 Routers";
+        rtHeader.append(serviceIcon("router"), "Routers");
         dom.servicesTreeView.append(rtHeader);
       }
       renderRoutersCards(routerRows);
@@ -4988,7 +5007,9 @@
     chevron.textContent = "▼";
     const icon = document.createElement("span");
     icon.className = "bd-icon";
-    icon.textContent = card.icon || "🔎";
+    const glyph = SERVICE_ICON_EMOJI[card.icon];
+    if (glyph) icon.append(serviceIcon(glyph));
+    else icon.textContent = card.icon || "🔎";
     const title = document.createElement("span");
     title.className = "bd-title";
     title.textContent = card.title;

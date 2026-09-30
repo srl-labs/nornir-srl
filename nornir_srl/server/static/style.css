@@ -1587,6 +1587,16 @@ th.filtered::after {
 
 .bd-icon {
   font-size: 16px;
+  display: inline-flex;
+  align-items: center;
+}
+
+/* Router / bridge glyphs: sized to the text around them, coloured by it. */
+.service-icon {
+  width: 1em;
+  height: 1em;
+  flex: none;
+  color: var(--accent);
 }
 
 .bd-title {
