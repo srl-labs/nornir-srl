@@ -1282,3 +1282,20 @@ def test_an_incident_is_labelled_by_its_severity_not_by_the_colour_it_is_drawn_i
     (card,) = tree_incidents(correlate([finding], FabricState()))
     assert (card.state, card.label) == ("down", "ERROR")
     assert card.entries[0].label == "ERROR" and card.entries[0].items[0].label == "ERROR"
+
+
+def test_a_minute_of_changes_lists_the_one_that_made_it_red_first():
+    """A minute holds several readings; its error must not sit below the later ones."""
+    from nornir_srl.changes import ABSENT, Change
+    from nornir_srl.lenses import tree_changes
+
+    at = 1_700_000_000.0 - 1_700_000_000.0 % 60
+    changes = [
+        Change(at + 30, "leaf1", "interface", "ethernet-1/1.1", "unknown", "up", "ok"),
+        Change(at + 30, "leaf1", "ni-itf", "vrf-1 ethernet-1/1.1", ABSENT, "member", "info"),
+        Change(at + 10, "leaf1", "bgp", "default/10.0.0.1", "established", "active", "error"),
+    ]
+    (card,) = tree_changes(changes)
+    (entry,) = card.entries
+    assert card.state == entry.state == "down"
+    assert [item.label for item in entry.items] == ["ERROR", "OK", ""]

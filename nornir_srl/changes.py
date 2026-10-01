@@ -26,7 +26,7 @@ from __future__ import annotations
 
 import ipaddress
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import (
     Any,
     Callable,
@@ -117,6 +117,11 @@ class Change:
 def change_order(change: Change) -> Tuple[Any, ...]:
     """Newest first, and within one reading the worst first."""
     return (-change.at, _SEVERITY_ORDER.get(change.severity, 9), change.node, change.kind, change.subject)
+
+
+def worst_first(change: Change) -> Tuple[Any, ...]:
+    """The worst first, and within one severity the newest first."""
+    return (_SEVERITY_ORDER.get(change.severity, 9), -change.at, change.node, change.kind, change.subject)
 
 
 # --------------------------------------------------------------------------- #
@@ -403,8 +408,36 @@ def diff_fabric(
     changes += _diff_routes(old_rib, new_rib, important, at)
     changes += _diff_watched(old_watched, new_watched, at)
     changes += changes_learned
+    changes = _fold_instances(changes)
     changes.sort(key=change_order)
     return changes
+
+
+def _fold_instances(changes: List[Change]) -> List[Change]:
+    """A network-instance created or deleted as one change, not one per member.
+
+    Its subinterfaces joining or leaving and its route-targets appearing or
+    going are that same change, and a fabric adding a hundred services at
+    once would otherwise read as thousands.
+    """
+    whole = {(c.node, c.subject) for c in changes if c.kind == "ni" and ABSENT in (c.before, c.after)}
+    if not whole:
+        return changes
+    members: Dict[Tuple[str, str], int] = {}
+    kept = []
+    for change in changes:
+        instance = (change.node, change.subject.rsplit(" ", 1)[0])
+        if change.kind == "ni-itf" and instance in whole:
+            members[instance] = members.get(instance, 0) + 1
+            continue
+        if change.kind == "ni-rt" and (change.node, change.subject) in whole:
+            continue
+        kept.append(change)
+    for n, change in enumerate(kept):
+        count = members.get((change.node, change.subject), 0) if change.kind == "ni" else 0
+        if count:
+            kept[n] = replace(change, detail=f"{change.detail}, {count} subinterface{'' if count == 1 else 's'}")
+    return kept
 
 
 # --------------------------------------------------------------------------- #
@@ -612,11 +645,17 @@ def _compare_count(key: Tuple[str, str, str], before: str, after: str, at: float
 
 def _severity(kind: str, before: str, after: str) -> str:
     was_good, is_good = before in _GOOD, after in _GOOD
-    if kind in ("es-df", "ni-rt"):
+    if kind == "es-df":
         return WARNING
     if kind == "ni-itf":
         # A service losing a member is worth a look; gaining one is news.
         return WARNING if after == ABSENT else INFO
+    if kind == "ni" and after == ABSENT:
+        # Deleted is a configuration change rather than a failure: a service
+        # that stops working while it is there goes down, and that is an error.
+        return WARNING
+    if kind == "ni-rt":
+        return WARNING if before != ABSENT and after != ABSENT else INFO
     if kind == "lldp":
         return WARNING if after == ABSENT or before != ABSENT else INFO
     if is_good and not was_good:
@@ -642,6 +681,10 @@ def _describe(kind: str, before: str, after: str) -> str:
         return f"designated forwarder changed from {before} to {after}"
     if kind == "ni-itf":
         return "joined the network-instance" if before == ABSENT else "left the network-instance"
+    if kind == "ni" and before == ABSENT:
+        return f"created, {after}"
+    if kind == "ni" and after == ABSENT:
+        return "deleted"
     if kind == "ni-rt" and before != ABSENT and after != ABSENT:
         return f"route-targets changed from {before} to {after}"
     if before == ABSENT:
@@ -832,4 +875,5 @@ __all__ = [
     "settled_findings",
     "observe",
     "parse_since",
+    "worst_first",
 ]

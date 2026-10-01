@@ -730,7 +730,10 @@ body {
   padding: 10px 20px;
   border-bottom: 1px solid var(--border);
   background: var(--panel);
-  z-index: 4;
+  /* Its menus open over the table below, but a z-index makes the toolbar a
+     stacking context of its own: it has to sit above the grid's sticky header
+     cells (5, 7) for them to, and below the sidebar and chat drawer. */
+  z-index: 8;
 }
 
 .field {

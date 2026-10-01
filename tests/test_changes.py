@@ -152,11 +152,24 @@ def test_a_service_going_down_losing_a_member_or_changing_route_targets():
         ("leaf1", "ni-rt", "macvrf-1", rt.format(100), rt.format(200), WARNING),
     ]
 
-    created = fabric(ni={"leaf1": [service("up", ("ethernet-1/1.100",)), service("up", (), name="ipvrf-1")]})
-    assert ("leaf1", "ni", "ipvrf-1", ABSENT, "up", OK) in summary(diff_fabric(after, created, at=2))
     assert ("leaf1", "ni-itf", "macvrf-1 ethernet-1/2.100", ABSENT, "member", INFO) in summary(
-        diff_fabric(after, before, at=3)
+        diff_fabric(after, before, at=2)
     )
+
+
+def test_a_service_created_or_deleted_is_one_change_and_deleted_is_not_a_failure():
+    vrf = NetworkInstance(
+        "ipvrf-1",
+        "ip-vrf",
+        "up",
+        interfaces=(Subinterface("irb0.1", "up"), Subinterface("ethernet-1/1.1", "up")),
+        instances=(BgpVpnInstance(1, ("target:65000:1",), ("target:65000:1",)),),
+    )
+    without, with_vrf = fabric(ni={"leaf1": []}), fabric(ni={"leaf1": [vrf]})
+    (created,) = diff_fabric(without, with_vrf, at=1)
+    assert (created.kind, created.severity, created.detail) == ("ni", OK, "created, up, 2 subinterfaces")
+    (deleted,) = diff_fabric(with_vrf, without, at=2)
+    assert (deleted.kind, deleted.severity, deleted.detail) == ("ni", WARNING, "deleted, 2 subinterfaces")
 
 
 def test_findings_raised_and_cleared():
