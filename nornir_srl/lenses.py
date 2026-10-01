@@ -67,7 +67,7 @@ from .checks import (
     underlay_hosts,
 )
 from .acks import mark as mark_acknowledged
-from .changes import parse_since
+from .changes import parse_since, worst_first
 from .checks import REQUIRED_REPORTS, run_checks
 from .incidents import correlate
 from .records import BgpVpnInstance, EthernetSegment, NeighborCache, NeighborEntry, Route, RouteNextHop, as_dict
@@ -1928,7 +1928,11 @@ CHANGE_COLUMNS: Tuple[Column, ...] = (
 
 
 def tree_changes(changes: List[Any]) -> List[Card]:
-    """One card per minute, newest first; the nodes that changed in it inside."""
+    """One card per minute, newest first; the nodes that changed in it inside.
+
+    A minute holds several readings, so a node's changes are listed worst
+    first: an error is the reason the card is red, and is where it starts.
+    """
     buckets: Dict[str, List[Any]] = {}
     for change in changes:
         buckets.setdefault(change.time[:5], []).append(change)
@@ -1943,7 +1947,7 @@ def tree_changes(changes: List[Any]) -> List[Card]:
                 label=_severity_label(_severity_of(_worst(_TONE.get(c.severity, "") for c in members))),
                 badge=_count(len(members), "change"),
                 entries=_entries(
-                    members,
+                    sorted(members, key=worst_first),
                     lambda c: Item(
                         title=f"{c.kind} {c.subject}",
                         state=_TONE.get(c.severity, ""),

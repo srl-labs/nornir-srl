@@ -26,7 +26,7 @@ from __future__ import annotations
 
 import ipaddress
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import (
     Any,
     Callable,
@@ -87,7 +87,8 @@ class Change:
     node: str
     #: What kind of thing changed: ``bgp``, ``bgp-routes``, ``interface``,
     #: ``lldp``, ``bfd``, ``isis``, ``ospf``, ``es``, ``es-df``, ``mac``,
-    #: ``vxlan``, ``routes``, ``hardware``, ``optic``, ``node`` or ``finding``.
+    #: ``vxlan``, ``routes``, ``ni``, ``ni-itf``, ``ni-rt``, ``hardware``,
+    #: ``optic``, ``node`` or ``finding``.
     kind: str
     #: Which one, on that node: a peer, a port, a MAC in a network-instance.
     subject: str
@@ -116,6 +117,11 @@ class Change:
 def change_order(change: Change) -> Tuple[Any, ...]:
     """Newest first, and within one reading the worst first."""
     return (-change.at, _SEVERITY_ORDER.get(change.severity, 9), change.node, change.kind, change.subject)
+
+
+def worst_first(change: Change) -> Tuple[Any, ...]:
+    """The worst first, and within one severity the newest first."""
+    return (_SEVERITY_ORDER.get(change.severity, 9), -change.at, change.node, change.kind, change.subject)
 
 
 # --------------------------------------------------------------------------- #
@@ -176,6 +182,24 @@ def _segments(state: FabricState, node_ok: Callable[[str], bool]) -> Iterator[Tu
         yield ("es", node, segment.name), text(segment.oper) or "unknown"
         for association in segment.associations:
             yield ("es-df", node, f"{segment.name}/{association.ni}"), association.designated or "none"
+
+
+def _instances(state: FabricState, node_ok: Callable[[str], bool]) -> Iterator[Tuple[Tuple[str, str, str], str]]:
+    """The services: each network-instance's state, the subinterfaces in it, its route-targets.
+
+    A member is only there or not; whether it is up is the ``interface``
+    observation's to report.
+    """
+    for node, instance in state.items("ni"):
+        if not node_ok(node) or not instance.name:
+            continue
+        yield ("ni", node, instance.name), text(instance.oper) or "unknown"
+        for itf in instance.interfaces:
+            if itf.name and not out_of_band(itf.name):
+                yield ("ni-itf", node, f"{instance.name} {itf.name}"), "member"
+        if instance.import_rts or instance.export_rts:
+            rts = f"import {','.join(instance.import_rts) or '-'} export {','.join(instance.export_rts) or '-'}"
+            yield ("ni-rt", node, instance.name), rts
 
 
 def _macs(state: FabricState, node_ok: Callable[[str], bool]) -> Iterator[Tuple[Tuple[str, str, str], str]]:
@@ -293,6 +317,7 @@ _OBSERVERS: Tuple[Tuple[Tuple[str, ...], Callable[..., Iterator[Tuple[Tuple[str,
     (("isis",), _isis),
     (("ospf",), _ospf),
     (("es",), _segments),
+    (("ni",), _instances),
     (("mac",), _macs),
     (("vxlan",), _vxlan),
     (("ipv4_rib", "ipv6_rib"), _routes),
@@ -383,8 +408,36 @@ def diff_fabric(
     changes += _diff_routes(old_rib, new_rib, important, at)
     changes += _diff_watched(old_watched, new_watched, at)
     changes += changes_learned
+    changes = _fold_instances(changes)
     changes.sort(key=change_order)
     return changes
+
+
+def _fold_instances(changes: List[Change]) -> List[Change]:
+    """A network-instance created or deleted as one change, not one per member.
+
+    Its subinterfaces joining or leaving and its route-targets appearing or
+    going are that same change, and a fabric adding a hundred services at
+    once would otherwise read as thousands.
+    """
+    whole = {(c.node, c.subject) for c in changes if c.kind == "ni" and ABSENT in (c.before, c.after)}
+    if not whole:
+        return changes
+    members: Dict[Tuple[str, str], int] = {}
+    kept = []
+    for change in changes:
+        instance = (change.node, change.subject.rsplit(" ", 1)[0])
+        if change.kind == "ni-itf" and instance in whole:
+            members[instance] = members.get(instance, 0) + 1
+            continue
+        if change.kind == "ni-rt" and (change.node, change.subject) in whole:
+            continue
+        kept.append(change)
+    for n, change in enumerate(kept):
+        count = members.get((change.node, change.subject), 0) if change.kind == "ni" else 0
+        if count:
+            kept[n] = replace(change, detail=f"{change.detail}, {count} subinterface{'' if count == 1 else 's'}")
+    return kept
 
 
 # --------------------------------------------------------------------------- #
@@ -594,6 +647,15 @@ def _severity(kind: str, before: str, after: str) -> str:
     was_good, is_good = before in _GOOD, after in _GOOD
     if kind == "es-df":
         return WARNING
+    if kind == "ni-itf":
+        # A service losing a member is worth a look; gaining one is news.
+        return WARNING if after == ABSENT else INFO
+    if kind == "ni" and after == ABSENT:
+        # Deleted is a configuration change rather than a failure: a service
+        # that stops working while it is there goes down, and that is an error.
+        return WARNING
+    if kind == "ni-rt":
+        return WARNING if before != ABSENT and after != ABSENT else INFO
     if kind == "lldp":
         return WARNING if after == ABSENT or before != ABSENT else INFO
     if is_good and not was_good:
@@ -617,6 +679,14 @@ def _describe(kind: str, before: str, after: str) -> str:
         return f"neighbour changed from {before} to {after}"
     if kind == "es-df":
         return f"designated forwarder changed from {before} to {after}"
+    if kind == "ni-itf":
+        return "joined the network-instance" if before == ABSENT else "left the network-instance"
+    if kind == "ni" and before == ABSENT:
+        return f"created, {after}"
+    if kind == "ni" and after == ABSENT:
+        return "deleted"
+    if kind == "ni-rt" and before != ABSENT and after != ABSENT:
+        return f"route-targets changed from {before} to {after}"
     if before == ABSENT:
         return f"appeared, {after}"
     if after == ABSENT:
@@ -805,4 +875,5 @@ __all__ = [
     "settled_findings",
     "observe",
     "parse_since",
+    "worst_first",
 ]

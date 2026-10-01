@@ -1197,9 +1197,10 @@ def changes_since_baseline(watch_prefixes: Optional[str] = None) -> str:
 
     Returns {"baseline_at": ..., "changes": [...]}, each change with:
         time, node, kind ('bgp', 'bgp-routes', 'interface', 'lldp', 'bfd',
-            'isis', 'ospf', 'es', 'es-df', 'mac', 'routes', 'hardware',
-            'optic', 'arp', 'nd', 'routes', 'route' or 'finding'), subject (the
-            peer, port, MAC, address, route table or prefix, or finding),
+            'isis', 'ospf', 'es', 'es-df', 'ni', 'ni-itf', 'ni-rt', 'mac',
+            'routes', 'hardware', 'optic', 'arp', 'nd', 'route' or 'finding'),
+            subject (the peer, port, network-instance, MAC, address, route
+            table or prefix, or finding),
         before, after (empty where it did not exist on that side),
         severity ('error' something stopped working, 'warning', 'ok' something
             recovered, 'info' something new or gone that was not working
