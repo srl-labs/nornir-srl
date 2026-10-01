@@ -31,7 +31,10 @@ from nornir_srl.records import (
     LldpInterface,
     LldpNeighbor,
     MacEntry,
+    BgpVpnInstance,
     Neighbor,
+    NetworkInstance,
+    Subinterface,
     SubinterfaceState,
 )
 
@@ -128,6 +131,32 @@ def test_a_designated_forwarder_that_moves_is_a_warning():
 
     (change,) = diff_fabric(segment("192.0.2.11"), segment("192.0.2.12"), at=1)
     assert (change.kind, change.severity) == ("es-df", WARNING)
+
+
+def test_a_service_going_down_losing_a_member_or_changing_route_targets():
+    def service(oper: str, members: tuple, rt: str = "target:65000:100", name: str = "macvrf-1") -> NetworkInstance:
+        return NetworkInstance(
+            name,
+            "mac-vrf",
+            oper,
+            interfaces=tuple(Subinterface(m, "up") for m in members),
+            instances=(BgpVpnInstance(1, (rt,), (rt,)),),
+        )
+
+    before = fabric(ni={"leaf1": [service("up", ("ethernet-1/1.100", "ethernet-1/2.100", "mgmt0.0"))]})
+    after = fabric(ni={"leaf1": [service("down", ("ethernet-1/1.100",), rt="target:65000:200")]})
+    rt = "import target:65000:{0} export target:65000:{0}"
+    assert summary(diff_fabric(before, after, at=1)) == [
+        ("leaf1", "ni", "macvrf-1", "up", "down", ERROR),
+        ("leaf1", "ni-itf", "macvrf-1 ethernet-1/2.100", "member", ABSENT, WARNING),
+        ("leaf1", "ni-rt", "macvrf-1", rt.format(100), rt.format(200), WARNING),
+    ]
+
+    created = fabric(ni={"leaf1": [service("up", ("ethernet-1/1.100",)), service("up", (), name="ipvrf-1")]})
+    assert ("leaf1", "ni", "ipvrf-1", ABSENT, "up", OK) in summary(diff_fabric(after, created, at=2))
+    assert ("leaf1", "ni-itf", "macvrf-1 ethernet-1/2.100", ABSENT, "member", INFO) in summary(
+        diff_fabric(after, before, at=3)
+    )
 
 
 def test_findings_raised_and_cleared():

@@ -45,6 +45,9 @@ The server reads the fabric every `--watch-interval` seconds (15 by default; `0`
 | `bgp`, `bfd`, `isis`, `ospf`, `interface`, `es`, `hardware`, `optic` | the state changes, or the entry appears or disappears |
 | `lldp` | a neighbour appears, is lost, or is replaced on a port |
 | `es-df` | the designated forwarder of a segment moves |
+| `ni` | a network-instance (a bridge domain or router) changes state, or is created or deleted |
+| `ni-itf` | a subinterface joins a network-instance (info) or leaves it (a warning); its up/down is the `interface` kind's |
+| `ni-rt` | a network-instance's import or export route-targets change (a warning) |
 | `mac` | a MAC moves between ports, VTEPs or segments (learning and ageing out are not news) |
 | `arp`, `nd` | an address answers from another MAC or interface: a duplicate address, a spoof or a moved host, recorded as a warning (learning and ageing out are not news) |
 | `bgp-routes` | a session's received count halves, or goes to or from zero |

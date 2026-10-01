@@ -87,7 +87,8 @@ class Change:
     node: str
     #: What kind of thing changed: ``bgp``, ``bgp-routes``, ``interface``,
     #: ``lldp``, ``bfd``, ``isis``, ``ospf``, ``es``, ``es-df``, ``mac``,
-    #: ``vxlan``, ``routes``, ``hardware``, ``optic``, ``node`` or ``finding``.
+    #: ``vxlan``, ``routes``, ``ni``, ``ni-itf``, ``ni-rt``, ``hardware``,
+    #: ``optic``, ``node`` or ``finding``.
     kind: str
     #: Which one, on that node: a peer, a port, a MAC in a network-instance.
     subject: str
@@ -176,6 +177,24 @@ def _segments(state: FabricState, node_ok: Callable[[str], bool]) -> Iterator[Tu
         yield ("es", node, segment.name), text(segment.oper) or "unknown"
         for association in segment.associations:
             yield ("es-df", node, f"{segment.name}/{association.ni}"), association.designated or "none"
+
+
+def _instances(state: FabricState, node_ok: Callable[[str], bool]) -> Iterator[Tuple[Tuple[str, str, str], str]]:
+    """The services: each network-instance's state, the subinterfaces in it, its route-targets.
+
+    A member is only there or not; whether it is up is the ``interface``
+    observation's to report.
+    """
+    for node, instance in state.items("ni"):
+        if not node_ok(node) or not instance.name:
+            continue
+        yield ("ni", node, instance.name), text(instance.oper) or "unknown"
+        for itf in instance.interfaces:
+            if itf.name and not out_of_band(itf.name):
+                yield ("ni-itf", node, f"{instance.name} {itf.name}"), "member"
+        if instance.import_rts or instance.export_rts:
+            rts = f"import {','.join(instance.import_rts) or '-'} export {','.join(instance.export_rts) or '-'}"
+            yield ("ni-rt", node, instance.name), rts
 
 
 def _macs(state: FabricState, node_ok: Callable[[str], bool]) -> Iterator[Tuple[Tuple[str, str, str], str]]:
@@ -293,6 +312,7 @@ _OBSERVERS: Tuple[Tuple[Tuple[str, ...], Callable[..., Iterator[Tuple[Tuple[str,
     (("isis",), _isis),
     (("ospf",), _ospf),
     (("es",), _segments),
+    (("ni",), _instances),
     (("mac",), _macs),
     (("vxlan",), _vxlan),
     (("ipv4_rib", "ipv6_rib"), _routes),
@@ -592,8 +612,11 @@ def _compare_count(key: Tuple[str, str, str], before: str, after: str, at: float
 
 def _severity(kind: str, before: str, after: str) -> str:
     was_good, is_good = before in _GOOD, after in _GOOD
-    if kind == "es-df":
+    if kind in ("es-df", "ni-rt"):
         return WARNING
+    if kind == "ni-itf":
+        # A service losing a member is worth a look; gaining one is news.
+        return WARNING if after == ABSENT else INFO
     if kind == "lldp":
         return WARNING if after == ABSENT or before != ABSENT else INFO
     if is_good and not was_good:
@@ -617,6 +640,10 @@ def _describe(kind: str, before: str, after: str) -> str:
         return f"neighbour changed from {before} to {after}"
     if kind == "es-df":
         return f"designated forwarder changed from {before} to {after}"
+    if kind == "ni-itf":
+        return "joined the network-instance" if before == ABSENT else "left the network-instance"
+    if kind == "ni-rt" and before != ABSENT and after != ABSENT:
+        return f"route-targets changed from {before} to {after}"
     if before == ABSENT:
         return f"appeared, {after}"
     if after == ABSENT:
