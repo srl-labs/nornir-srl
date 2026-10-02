@@ -71,6 +71,28 @@ def test_a_session_going_down_is_on_the_timeline_and_in_the_drift(watched):
     assert [c.severity for c in store.timeline.changes() if c.kind == "bgp"][0] == OK
 
 
+def test_the_drift_is_dated_by_when_the_timeline_saw_it(fabric):  # noqa: F811
+    nornir, devices = fabric
+    store = FabricStore(nornir, resync_interval=0, restart_debounce=0.02)
+    store.start()
+    now = [1000.0]
+    watcher = Watcher(store, store.timeline, interval=0, clock=lambda: now[0])
+    try:
+        watcher.tick()
+        watcher.tick()
+        now[0] = 1100.0
+        devices["leaf1"].push(BGP_NEIGHBOR, [("session-state", "active")])
+        assert wait_for(lambda: _session_state(store, "leaf1") == "active")
+        watcher.tick()
+        now[0] = 1900.0
+        watcher.tick()
+
+        (drifted,) = [c for c in store.timeline.drift() if c.kind == "bgp"]
+        assert drifted.at == 1100.0, "when it went down, not the latest reading"
+    finally:
+        store.stop()
+
+
 def test_the_changes_lens_answers_from_the_timeline(watched):
     store, watcher, devices = watched
     watcher.tick()

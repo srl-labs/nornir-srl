@@ -21,7 +21,7 @@ import logging
 import threading
 import time
 from collections import deque
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Deque, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
@@ -185,7 +185,14 @@ class Timeline:
         return chosen
 
     def drift(self, nodes: Optional[Iterable[str]] = None) -> List[Change]:
-        """How the latest reading differs from the baseline, worst first."""
+        """How the latest reading differs from the baseline, worst first.
+
+        A comparison of two readings says what differs but not since when, so
+        each difference is dated by the timeline: the last change to the same
+        thing after the baseline was taken, which is when it came to read as it
+        does now. One the timeline has no record of - aged out, or summarized
+        under another subject - keeps the time of the latest reading.
+        """
         baseline, latest = self.baseline, self.latest
         if baseline is None or latest is None or baseline is latest:
             return []
@@ -199,6 +206,15 @@ class Timeline:
         if nodes is not None:
             wanted = set(nodes)
             changes = [c for c in changes if c.node in wanted]
+        last: Dict[Tuple[str, str, str], float] = {}
+        with self._lock:
+            for change in self._changes:
+                if change.at >= baseline.at:
+                    key = (change.node, change.kind, change.subject)
+                    last[key] = max(last.get(key, change.at), change.at)
+        changes = [
+            replace(c, at=last.get((c.node, c.kind, c.subject), c.at)) for c in changes
+        ]
         changes.sort(key=change_order)
         return changes
 

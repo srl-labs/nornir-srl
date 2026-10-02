@@ -110,6 +110,15 @@ def test_a_port_going_down_and_an_lldp_neighbour_lost():
     ]
 
 
+def test_a_deleted_subinterface_is_a_warning_not_an_error():
+    def reading(*subifs) -> FabricState:
+        return fabric(subif={"leaf1": [Interface("ethernet-1/1", subifs)]})
+
+    up = SubinterfaceState("ethernet-1/1.0", oper="up")
+    (deleted,) = diff_fabric(reading(up), reading(), at=1)
+    assert (deleted.kind, deleted.before, deleted.after, deleted.severity) == ("interface", "up", ABSENT, WARNING)
+
+
 def test_a_mac_that_moves_is_news_one_that_ages_out_is_not():
     def table(*entries):
         return fabric(mac={"leaf1": [BridgeTable("macvrf-1", tuple(entries))]})

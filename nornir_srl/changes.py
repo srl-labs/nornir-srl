@@ -654,6 +654,10 @@ def _severity(kind: str, before: str, after: str) -> str:
         # Deleted is a configuration change rather than a failure: a service
         # that stops working while it is there goes down, and that is an error.
         return WARNING
+    if kind == "interface" and after == ABSENT:
+        # Deleted, like a network-instance, is a configuration change: a port
+        # that fails while it is configured goes down, and that is an error.
+        return WARNING
     if kind == "ni-rt":
         return WARNING if before != ABSENT and after != ABSENT else INFO
     if kind == "lldp":
@@ -661,9 +665,9 @@ def _severity(kind: str, before: str, after: str) -> str:
     if is_good and not was_good:
         return OK
     if was_good and not is_good:
-        # A port or session that was removed from the configuration is gone
-        # rather than failed, but from here the two look alike: a failure is
-        # the reading that gets it looked at.
+        # A session that was removed from the configuration is gone rather
+        # than failed, but from here the two look alike: a failure is the
+        # reading that gets it looked at.
         return ERROR
     if before == ABSENT or after == ABSENT:
         return INFO

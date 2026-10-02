@@ -3416,9 +3416,39 @@
   }
 
   /**
+   * The BGP RIB report of each family the peers table counts, and the column
+   * that names the peer in it. EVPN has no single RIB report - it is split by
+   * route type - so its active routes are the peer's received routes instead.
+   */
+  const ACTIVE_ROUTES_REPORTS = {
+    "ipv4-unicast": ["bgp_rib_ipv4", "neighbor"],
+    "ipv6-unicast": ["bgp_rib_ipv6", "neighbor"],
+    "l3vpn-ipv4-unicast": ["bgp_rib_l3vpn_v4", "neighbor"],
+    "l3vpn-ipv6-unicast": ["bgp_rib_l3vpn_v6", "neighbor"],
+  };
+
+  /** The routes from a peer in one family that the node uses. */
+  function jumpToPeerActiveRoutes(nodeName, niName, peerAddress, family) {
+    // An unnumbered peer is fe80::1%ethernet-1/1.0; match it with or without
+    // the interface it is scoped to.
+    const address = peerAddress.split("%")[0];
+    const peer = `^${escapeRegex(address)}(%\\S*)?$`;
+    const target = ACTIVE_ROUTES_REPORTS[family];
+    if (!target) {
+      jumpToFilteredReport("bgp_received_routes", [niName], [nodeName],
+        { peer, st: BGP_RIB_USED_FILTER }, { peer: peerAddress, family }, [nodeName]);
+      return;
+    }
+    const [report, column] = target;
+    jumpToFilteredReport(report, [niName], [nodeName],
+      { [column]: peer, st: BGP_RIB_USED_FILTER }, null, [nodeName]);
+  }
+
+  /**
    * A BGP peers 'Rx/Act/Tx' cell with its Rx count linked to the routes the
-   * peer sent and its Tx count to the ones sent to it, or null for a cell
-   * that is not one. A count of 0 has no routes behind it and stays text.
+   * peer sent, its Act count to the ones of those in use in the family's RIB
+   * report and its Tx count to the ones sent to it, or null for a cell that
+   * is not one. A count of 0 has no routes behind it and stays text.
    */
   function peerRoutesCell(row, column, value) {
     const peer = String(row.peer ?? "").trim();
@@ -3426,7 +3456,7 @@
     const counts = /^(\d+)\/(\d+)\/(\d+)$/.exec(String(value));
     if (!peer || !row.Node || !family || !counts) return null;
     const [, rx, act, tx] = counts;
-    const part = (count, direction, title) => {
+    const part = (count, title, jump) => {
       if (count === "0") return document.createTextNode(count);
       const link = document.createElement("a");
       link.className = "vrf-link";
@@ -3435,15 +3465,20 @@
       link.title = title;
       link.addEventListener("click", (event) => {
         event.preventDefault();
-        jumpToPeerRoutes(direction, row.Node, row.NI, peer, family);
+        jump();
       });
       return link;
     };
     const cell = document.createDocumentFragment();
     cell.append(
-      part(rx, "received", `Show the ${family} routes ${peer} sent to ${row.Node}`),
-      document.createTextNode(`/${act}/`),
-      part(tx, "advertised", `Show the ${family} routes ${row.Node} sent to ${peer}`)
+      part(rx, `Show the ${family} routes ${peer} sent to ${row.Node}`,
+        () => jumpToPeerRoutes("received", row.Node, row.NI, peer, family)),
+      document.createTextNode("/"),
+      part(act, `Show the active ${family} routes ${row.Node} has from ${peer}`,
+        () => jumpToPeerActiveRoutes(row.Node, row.NI, peer, family)),
+      document.createTextNode("/"),
+      part(tx, `Show the ${family} routes ${row.Node} sent to ${peer}`,
+        () => jumpToPeerRoutes("advertised", row.Node, row.NI, peer, family))
     );
     return cell;
   }
