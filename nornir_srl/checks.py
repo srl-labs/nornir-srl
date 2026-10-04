@@ -954,7 +954,9 @@ def check_bgp_peer_mismatch(state: FabricState) -> List[Finding]:
                     )
                 )
                 continue
-            if peer.peer_as is not None and back.local_as is not None and peer.peer_as != back.local_as:
+            # A dynamic neighbour's peer AS is what the far end said it is,
+            # not what this end expects: nothing configured to compare.
+            if not peer.dynamic and peer.peer_as is not None and back.local_as is not None and peer.peer_as != back.local_as:
                 findings.append(
                     Finding(
                         check="bgp_peer_mismatch",
@@ -968,6 +970,11 @@ def check_bgp_peer_mismatch(state: FabricState) -> List[Finding]:
             if pair in reported:
                 continue
             reported.add(pair)
+            # Families and BFD are what each end negotiated: a session still
+            # opening - or refused, and trying again - has negotiated
+            # nothing yet, and reads as everything on one end only.
+            if _text(peer.state) != "established" or _text(back.state) != "established":
+                continue
             here, there = _enabled_families(peer), _enabled_families(back)
             for family in sorted(here ^ there):
                 which, other = (node, far) if family in here else (far, node)

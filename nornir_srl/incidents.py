@@ -538,8 +538,25 @@ PATTERN_MIN = 3
 _PLACES = {"link": "links", "port": "ports", "session": "sessions", "node": "nodes", "underlay": "node pairs"}
 
 
-def _template(detail: str) -> str:
+#: The states a BGP session passes through while it keeps trying and failing.
+#: A session refused for a wrong AS cycles active, connect, opensent,
+#: openconfirm and back every few seconds; which one a reading catches it in
+#: is chance, not a different cause.
+_BGP_TRYING = re.compile(r"\bsession is (?:idle|connect|active|opensent|openconfirm)\b")
+
+
+#: Checks whose detail says more than what kind of wrong it is, folded on
+#: the part that does. A BGP session down names its peer-group and the
+#: peer's AS after that, which a dynamic neighbour only knows once its
+#: handshake gets that far: the same down session reads 'peer-group fabric,
+#: AS 4200000004' in one reading and 'peer-group -, AS ?' in the next.
+_CAUSE_ONLY = {"bgp_down": lambda detail: detail.split(",", 1)[0]}
+
+
+def _template(detail: str, check: str = "") -> str:
     """A finding's detail with its names and numbers taken out: what kind of wrong it is."""
+    detail = _CAUSE_ONLY.get(check, lambda d: d)(detail)
+    detail = _BGP_TRYING.sub("session is not established", detail)
     return re.sub(r"\S*\d\S*", "#", detail)
 
 
@@ -556,7 +573,7 @@ def _patterns(incidents: List[Incident]) -> List[Incident]:
         if incident.kind in ("finding", "platform", "segment"):
             key = ("", incident.id, "")
         else:
-            key = (incident.root.check, _template(incident.root.detail), incident.root.severity)
+            key = (incident.root.check, _template(incident.root.detail, incident.root.check), incident.root.severity)
         by_cause.setdefault(key, []).append(incident)
     folded: List[Incident] = []
     for (check, template, _severity), members in by_cause.items():

@@ -155,6 +155,29 @@ def test_the_same_cause_in_many_places_folds_into_one_pattern():
     assert [i.kind for i in correlate(findings[:2], fabric(lldp=lldp))] == ["link", "link"]
 
 
+def test_bgp_sessions_down_fold_whatever_state_or_peer_details_a_reading_catches():
+    """A dynamic session refused for a wrong AS keeps retrying: one reading
+    catches it active with no peer-group or AS learned yet, the next in
+    opensent with both. Those are one cause, folded into one card every time."""
+    lldp: Dict[str, List[LldpInterface]] = {}
+    details = (
+        "session is active, peer-group -, AS ?",
+        "session is opensent, peer-group fabric, AS 4200000002",
+        "session is connect, peer-group fabric, AS ?",
+        "session is openconfirm, peer-group fabric, AS 4200000004",
+    )
+    findings = []
+    for n, detail in enumerate(details, start=1):
+        leaf = f"leaf{n}"
+        lldp.update(cabled("spine1", f"ethernet-1/{n}", leaf, "ethernet-1/49"))
+        findings.append(Finding("bgp_down", "error", "spine1", f"default/fe80::{n}%ethernet-1/{n}.0", detail))
+    (pattern,) = correlate(findings, fabric(lldp=lldp))
+    assert pattern.kind == "pattern"
+    assert pattern.title == "BGP session down on 4 links"
+    # Each session's own detail is still what its finding says.
+    assert {f.detail for f in pattern.findings} == set(details)
+
+
 def test_no_finding_is_lost_by_being_grouped():
     findings = [
         itf_down("leaf1", "ethernet-1/1.0"),

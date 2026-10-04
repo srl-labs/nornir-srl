@@ -933,3 +933,22 @@ def test_igp_peer_mismatch_finds_the_igp_on_one_end_of_a_link_only():
     # A far end that runs no IS-IS at all is not one configured wrong on this link.
     state.reports["isis"] = {"leaf1": state.reports["isis"]["leaf1"]}
     assert run("igp_peer_mismatch", state) == []
+
+
+def test_bgp_peer_mismatch_says_nothing_about_a_session_still_opening():
+    """Families and BFD are negotiated: a session that has not come up - a
+    dynamic one refused and retrying - has none yet on either end."""
+    state = _bgp_fabric(
+        _session("10.0.0.0", 65001, 65100, families=("ipv4-unicast", "evpn"), bfd=True, state="opensent"),
+        _session("10.0.0.1", 65100, 65001, families=(), state="active"),
+    )
+    assert run("bgp_peer_mismatch", state) == []
+
+
+def test_bgp_peer_mismatch_compares_no_as_a_dynamic_neighbour_only_learned():
+    """A dynamic neighbour's peer AS is what the far end announced."""
+    state = _bgp_fabric(
+        _session("10.0.0.0", 65001, 65999, state="active", dynamic=True),
+        _session("10.0.0.1", 65100, 65001, state="active"),
+    )
+    assert run("bgp_peer_mismatch", state) == []
