@@ -583,7 +583,9 @@ class Watcher:
         # Every reading is taken down - the answers are in memory already -
         # and written every persist_every readings, and on a clean stop.
         recorder = Recorder() if history is not None else None
-        keep = settling or (self.readings + 1) % self.persist_every == 0
+        # Not before settling: until this run has compared with the reading
+        # the previous run kept, that reading is not to be replaced.
+        keep = settling or (self._settled and (self.readings + 1) % self.persist_every == 0)
         reading = self.capture(recorder)
         state, findings, now = reading.state, reading.findings, reading.at
         if self.timeline.learn_cabling(state) and store.cabling_file is not None:
@@ -613,7 +615,7 @@ class Watcher:
             # not something that happened.
             self._raised = {(f.check, f.node, f.subject): f for f in findings}
             self._settle(reading)
-        if recorder is not None:
+        if recorder is not None and self._settled:
             if keep:
                 self._keep(LAST_READING, reading, recorder)
                 self._unkept = None
