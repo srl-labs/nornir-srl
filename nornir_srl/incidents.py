@@ -33,7 +33,8 @@ from __future__ import annotations
 
 import ipaddress
 import re
-from dataclasses import dataclass
+import time
+from dataclasses import dataclass, replace
 from typing import Any, Dict, FrozenSet, Iterable, List, Optional, Sequence, Set, Tuple
 
 from .aliases import resolve
@@ -140,6 +141,14 @@ class Incident:
     #: (:mod:`nornir_srl.acks`): it is known, and kept out of the counts and
     #: colours that exist to draw the eye.
     acknowledged: bool = False
+    #: When the oldest of its findings was raised, and the newest: since when
+    #: it has been wrong, and when it last got worse. ``None`` where nothing
+    #: keeps a timeline - the one-shot surfaces.
+    first_seen: Optional[float] = None
+    last_seen: Optional[float] = None
+    #: The oldest finding was already there when watching began, so
+    #: *first_seen* is only when that was: it has been wrong since before.
+    since_before: bool = False
 
     @property
     def findings(self) -> Tuple[Finding, ...]:
@@ -420,10 +429,36 @@ def correlate(findings: Sequence[Finding], state: FabricState) -> List[Incident]
         groups.setdefault(("node", node), [])
 
     incidents = _patterns([_incident(anchor, members, fabric) for anchor, members in groups.items()])
+    incidents = _dated(incidents, state)
     incidents.sort(
         key=lambda i: (_SEVERITY_ORDER.get(i.severity, 9), -len(i.findings), i.node, i.title)
     )
     return incidents
+
+
+def _dated(incidents: List[Incident], state: FabricState) -> List[Incident]:
+    """*incidents* with when their findings were raised, where a timeline says.
+
+    A finding the timeline has not raised yet - it has been there one
+    reading, and is raised on the second - is from now.
+    """
+    history = state.history
+    raised_at = getattr(history, "raised_at", None)
+    if raised_at is None:
+        return incidents
+    known = raised_at()
+    now = time.time()
+    dated = []
+    for incident in incidents:
+        times = [known.get((f.check, f.node, f.subject), (now, False)) for f in incident.findings]
+        if not times:
+            dated.append(incident)
+            continue
+        first = min(times, key=lambda t: t[0])
+        dated.append(
+            replace(incident, first_seen=first[0], last_seen=max(t[0] for t in times), since_before=first[1])
+        )
+    return dated
 
 
 def _incident(anchor: Anchor, members: List[Finding], fabric: _Fabric) -> Incident:

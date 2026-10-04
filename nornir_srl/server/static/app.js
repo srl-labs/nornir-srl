@@ -5410,6 +5410,14 @@
     // The label, where the lens gives one: an incident's colour is that of
     // down, but what it is is an error, not something reported down.
     if (card.state || card.label) top.append(lensStateBadge(card.state, card.label || card.state.toUpperCase()));
+    if (card.when) {
+      // Since when, and when last: an incident's first and newest finding.
+      const when = document.createElement("span");
+      when.className = "bd-when";
+      when.textContent = `🕒 ${card.when}`;
+      when.title = "When its oldest finding was raised, and its newest";
+      top.append(when);
+    }
     if (card.badge) {
       const badge = document.createElement("span");
       badge.className = "bd-badge-count";

@@ -3515,3 +3515,17 @@ button.pill-jump:hover {
 .cdiff-new .cdiff-word {
   background: color-mix(in srgb, var(--ok) 32%, transparent);
 }
+
+/* ------------------------------------------------- Incident cards: since when */
+
+.bd-when {
+  margin-left: auto;
+  font-size: 11px;
+  font-family: var(--font-mono);
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.bd-when + .bd-badge-count {
+  margin-left: 10px;
+}

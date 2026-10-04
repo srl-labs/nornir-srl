@@ -41,6 +41,7 @@ from __future__ import annotations
 
 import ipaddress
 import re
+import time
 from dataclasses import dataclass, replace
 from typing import (
     Any,
@@ -341,6 +342,9 @@ class Card:
     key: str = ""
     #: The action the card offers on it: ``ack`` or ``unack``.
     action: str = ""
+    #: When, in a few words: since when an incident has been there and when
+    #: it last got worse.
+    when: str = ""
 
 
 def _entries(
@@ -1835,9 +1839,37 @@ def lens_incidents(state: FabricState) -> List[Any]:
     return mark_acknowledged(correlate(run_checks(state), state), state.acknowledged)
 
 
+def _clock(at: Optional[float]) -> str:
+    """A time as the timeline reads it: the time of day, the date too when not today."""
+    if at is None:
+        return ""
+    when = time.localtime(at)
+    if time.strftime("%Y-%m-%d", when) == time.strftime("%Y-%m-%d"):
+        return time.strftime("%H:%M:%S", when)
+    return time.strftime("%Y-%m-%d %H:%M", when)
+
+
+def incident_first(incident: Any) -> str:
+    """Since when an incident has been wrong: ``14:02:11``, or ``before 09:30`` if it was there when watching began."""
+    first = _clock(getattr(incident, "first_seen", None))
+    return f"before {first}" if first and getattr(incident, "since_before", False) else first
+
+
+def incident_when(incident: Any) -> str:
+    """``first 14:02:11 · last 14:05:40``; one time where both are the same."""
+    first, last = incident_first(incident), _clock(getattr(incident, "last_seen", None))
+    if not first:
+        return ""
+    if not last or last == first or getattr(incident, "last_seen", None) == getattr(incident, "first_seen", None):
+        return f"since {first}"
+    return f"first {first} · last {last}"
+
+
 INCIDENT_COLUMNS: Tuple[Column, ...] = (
     Column("Severity", "severity"),
     Column("Incident", "title"),
+    Column("First", incident_first),
+    Column("Last", lambda i: _clock(getattr(i, "last_seen", None))),
     Column("Root cause", lambda i: i.root.check),
     Column(
         "Scope",
@@ -1889,6 +1921,7 @@ def tree_incidents(incidents: List[Any]) -> List[Card]:
                 entries=entries,
                 key=incident.id,
                 action="unack" if acked else "ack",
+                when=incident_when(incident),
             )
         )
     return cards

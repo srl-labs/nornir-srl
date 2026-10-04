@@ -154,6 +154,10 @@ class Timeline:
         #: it, so a link that went down is still drawn, down; replaced when
         #: another neighbour shows up on the same port.
         self.cabling: Dict[str, Dict[str, Tuple[str, str]]] = {}
+        #: When each finding still raised was raised, by (check, node,
+        #: subject), and whether that is only when watching began: a finding
+        #: already there then has been there since before it.
+        self._raised_at: Dict[Tuple[str, str, str], Tuple[float, bool]] = {}
         if history is not None:
             self._load_history(capacity)
 
@@ -170,6 +174,7 @@ class Timeline:
         with self._lock:
             for change in reversed(kept):
                 self._changes.append(change)
+                self._note_finding(change)
             for prefix in watched:
                 try:
                     self._watched.add(normalize_prefix(prefix))
@@ -257,11 +262,34 @@ class Timeline:
         with self._lock:
             return dict(self.cabling.get(node, {}))
 
+    def _note_finding(self, change: Change) -> None:
+        """Follow a finding raised or cleared into :attr:`_raised_at`. Call with the lock held."""
+        if change.kind != "finding":
+            return
+        check, _, subject = change.subject.partition(" ")
+        key = (check, change.node, subject)
+        if change.after:
+            self._raised_at[key] = (change.at, False)
+        else:
+            self._raised_at.pop(key, None)
+
+    def mark_present(self, findings: Iterable[Finding], since: float) -> None:
+        """*findings*, there when watching began at *since*: raised before it, not at it."""
+        with self._lock:
+            for f in findings:
+                self._raised_at.setdefault((f.check, f.node, f.subject), (since, True))
+
+    def raised_at(self) -> Dict[Tuple[str, str, str], Tuple[float, bool]]:
+        """When each finding still raised was raised, and whether only 'before' that is known."""
+        with self._lock:
+            return dict(self._raised_at)
+
     def record(self, changes: Iterable[Change]) -> None:
         ordered = sorted(changes, key=lambda c: c.at)
         with self._lock:
             for change in ordered:
                 self._changes.append(change)
+                self._note_finding(change)
         if ordered:
             self._persist("the changes", lambda: self.history.add_changes(ordered))
 
@@ -472,6 +500,11 @@ class TimelineView:
         """Every cable ever seen on the nodes in view, as (far system name, port)."""
         return {node: self._timeline.cables(node) for node in self._nodes}
 
+    def raised_at(self) -> Dict[Tuple[str, str, str], Tuple[float, bool]]:
+        """When each finding on the nodes in view was raised; see :meth:`Timeline.raised_at`."""
+        wanted = set(self._nodes)
+        return {key: when for key, when in self._timeline.raised_at().items() if key[1] in wanted}
+
     def config_diff(self, node: str, commit: Optional[int] = None, against: Optional[int] = None) -> List[Any]:
         """What *commit* changed in *node*'s configuration, as :class:`~nornir_srl.lenses.ConfigLine` records.
 
@@ -660,6 +693,9 @@ class Watcher:
             # What is wrong when the timeline starts is where it starts from,
             # not something that happened.
             self._raised = {(f.check, f.node, f.subject): f for f in findings}
+            # Nor does anyone know since when: since before watching began.
+            # A finding the history saw raised keeps the time it was raised.
+            self.timeline.mark_present(findings, self._watching_since())
             self._settle(reading)
         if recorder is not None and self._settled:
             if keep:
@@ -691,6 +727,12 @@ class Watcher:
                 name, reading.at, kept, nodes=len(reading.state.hostnames), findings=len(reading.findings), note=note
             ),
         )
+
+    def _watching_since(self) -> float:
+        """When this fabric was first watched: the history's oldest change, or this start."""
+        with self.timeline._lock:
+            oldest = self.timeline._changes[0].at if self.timeline._changes else self.timeline.started
+        return min(oldest, self.timeline.started)
 
     def _settle(self, reading: Reading) -> None:
         """The first reading after the warm-up: catch up with what happened while stopped.

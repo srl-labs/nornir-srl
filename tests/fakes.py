@@ -453,5 +453,6 @@ HEALTH_RESPONSES: Dict[str, List[Dict[str, Any]]] = {
         "/platform/fan-tray[id=*]",
         "/platform/power-supply[id=*]",
         "/interface[name=*]/transceiver",
+        "/platform/resource-monitoring/datapath",
     )
 }

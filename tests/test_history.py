@@ -447,3 +447,108 @@ def test_the_config_diff_lens_answers_from_the_kept_configurations(served, histo
     links = [link for card in changes["tree"] for entry in card["entries"] for item in entry["items"] for link in item["links"]]
     assert {"report": "config_diff", "node": "leaf1"}.items() <= links[0].items()
     assert dict(links[0]["params"]) == {"host": "leaf1", "commit": "2"}
+
+
+# --------------------------------------------------------------------------- #
+# since when: incidents dated by their findings
+# --------------------------------------------------------------------------- #
+
+
+def _raised(at: float, node: str, check: str, subject: str) -> Change:
+    return Change(at, node, "finding", f"{check} {subject}", "", "error", "error", "x")
+
+
+def _cleared(at: float, node: str, check: str, subject: str) -> Change:
+    return Change(at, node, "finding", f"{check} {subject}", "error", "", "ok", "cleared: x")
+
+
+def test_the_timeline_knows_when_each_finding_still_raised_was_raised(history):
+    timeline = Timeline(history=history)
+    timeline.record([_raised(100.0, "leaf1", "bgp_down", "default/10.0.0.1"), _raised(110.0, "leaf2", "itf_down", "ethernet-1/1.0")])
+    timeline.record([_cleared(120.0, "leaf2", "itf_down", "ethernet-1/1.0")])
+    assert timeline.raised_at() == {("bgp_down", "leaf1", "default/10.0.0.1"): (100.0, False)}
+    # Present when watching began: since before then, unless it was raised.
+    from nornir_srl.checks import Finding
+
+    timeline.mark_present(
+        [Finding("bgp_down", "error", "leaf1", "default/10.0.0.1", "x"), Finding("bfd_down", "error", "spine1", "s", "x")],
+        since=50.0,
+    )
+    assert timeline.raised_at()[("bgp_down", "leaf1", "default/10.0.0.1")] == (100.0, False)
+    assert timeline.raised_at()[("bfd_down", "spine1", "s")] == (50.0, True)
+    # A restart reads the raised findings back from the history.
+    assert Timeline(history=history).raised_at() == {("bgp_down", "leaf1", "default/10.0.0.1"): (100.0, False)}
+
+
+def test_an_incident_is_first_seen_with_its_oldest_finding_and_last_with_its_newest():
+    from nornir_srl.checks import Finding
+    from nornir_srl.fabric import FabricState
+    from nornir_srl.incidents import correlate
+    from nornir_srl.lenses import INCIDENT_COLUMNS, incident_when
+
+    class History:
+        def raised_at(self):
+            return {
+                ("bgp_down", "spine1", f"default/10.0.0.{n}"): (1000.0 + n * 60, n == 1) for n in range(1, 4)
+            }
+
+    state = FabricState()
+    state.history = History()
+    findings = [Finding("bgp_down", "error", "spine1", f"default/10.0.0.{n}", "session is active") for n in range(1, 5)]
+    (incident,) = [i for i in correlate(findings, state) if i.kind == "pattern"] or correlate(findings, state)[:1]
+    assert incident.first_seen == 1060.0 and incident.since_before
+    # The fourth has been there one reading and is not raised yet: it is from now.
+    assert incident.last_seen > 1180.0
+    assert incident_when(incident).startswith("first before ")
+    row = {c.name: c.of(incident) for c in INCIDENT_COLUMNS}
+    assert row["First"].startswith("before ") and row["Last"]
+
+
+def test_a_one_shot_surface_dates_no_incident():
+    from nornir_srl.checks import Finding
+    from nornir_srl.fabric import FabricState
+    from nornir_srl.incidents import correlate
+
+    (incident,) = correlate([Finding("itf_down", "error", "leaf1", "ethernet-1/1.0", "down")], FabricState())
+    assert (incident.first_seen, incident.last_seen) == (None, None)
+
+
+def test_the_incidents_lens_says_since_when(served):
+    from nornir_srl.lenses import get_lens
+
+    store, devices = served
+    watcher = Watcher(store, store.timeline, interval=0)
+    store.watcher = watcher
+    watcher.tick()
+    watcher.tick()
+    before = {row["Incident"]: row for row in store.lens_table(get_lens("incidents"), None, {})["rows"]}
+    # Whatever was wrong when watching began has been wrong since before then.
+    assert all(row["First"].startswith("before ") for row in before.values())
+
+    devices["leaf1"].push(
+        "network-instance[name=default]/protocols/bgp/neighbor[peer-address=192.168.1.1]",
+        [("session-state", "idle")],
+    )
+    assert wait_for(
+        lambda: any(
+            p.state == "idle"
+            for _n, _e, p in store.fabric_state(None, ("bgp_peers",), history=False).sub_items("bgp_peers", "neighbors")
+        )
+    )
+    watcher.tick()
+    watcher.tick()
+    from nornir_srl.checks import run_checks
+    from nornir_srl.incidents import correlate
+
+    state = store.fabric_state(None)
+    (incident,) = [i for i in correlate(run_checks(state), state) if any(f.check == "bgp_down" for f in i.findings)]
+    # The session went down after watching began: it has a time of its own,
+    # and is the newest thing in whichever incident holds it.
+    session = next(f for f in incident.findings if f.check == "bgp_down")
+    at, before = store.timeline.raised_at()[(session.check, session.node, session.subject)]
+    assert not before and at >= store.timeline.started
+    assert incident.last_seen == at and incident.first_seen <= at
+    from nornir_srl.lenses import incident_when, tree_incidents
+
+    (card,) = tree_incidents([incident])
+    assert card.when == incident_when(incident) and card.when
