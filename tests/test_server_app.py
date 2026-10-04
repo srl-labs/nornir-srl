@@ -1298,12 +1298,16 @@ def test_reports_endpoint_describes_the_arguments_a_report_takes(client):
             "kind": "address",
             "required": False,
             "choices": [],
+            "suggestions": [],
         }
     ]
     assert by_name["lldp"]["params"] == []
     # A parameter of fixed values says which.
     severity = next(p for p in by_name["changes"]["params"] if p["name"] == "severity")
     assert (severity["kind"], severity["choices"]) == ("choices", ["error", "warning", "ok", "info"])
+    # A free-text parameter can offer presets, each saying what it means.
+    since = next(p for p in by_name["changes"]["params"] if p["name"] == "since")
+    assert {"value": "baseline", "label": "drift from the baseline"} in since["suggestions"]
 
 
 def test_unknown_report_is_a_404(client):

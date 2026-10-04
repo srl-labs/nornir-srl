@@ -181,6 +181,9 @@ class ParamSpec:
     #: For ``choices``: the values it takes, any number of them, given
     #: comma-separated; none chosen means all of them.
     choices: Tuple[str, ...] = ()
+    #: For ``text``: values a surface offers to pick, as (value, what it
+    #: means); anything else can still be typed.
+    suggestions: Tuple[Tuple[str, str], ...] = ()
 
     def as_dict(self) -> Dict[str, Any]:
         return {
@@ -191,6 +194,7 @@ class ParamSpec:
             "kind": self.kind,
             "required": self.required,
             "choices": list(self.choices),
+            "suggestions": [{"value": value, "label": label} for value, label in self.suggestions],
         }
 
     def coerce(self, value: Any) -> Optional[str]:

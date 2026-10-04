@@ -1901,6 +1901,9 @@ def tree_incidents(incidents: List[Any]) -> List[Card]:
 #: What ``since`` is set to, to compare against the baseline rather than the
 #: timeline.
 BASELINE = "baseline"
+#: What ``since`` takes for everything the timeline holds: the same as nothing,
+#: but a value a surface can offer to pick.
+ALL = "all"
 
 
 def lens_changes(state: FabricState, since: str = "", kind: str = "", severity: str = "") -> List[Any]:
@@ -1913,8 +1916,11 @@ def lens_changes(state: FabricState, since: str = "", kind: str = "", severity: 
     history = state.history
     if history is None:
         return []
-    if str(since).strip().lower() == BASELINE:
+    when = str(since or "").strip().lower()
+    if when == BASELINE:
         changes = history.drift()
+    elif when == ALL:
+        changes = history.changes()
     else:
         changes = history.changes(since=parse_since(since))
     kinds = {k for k in str(kind or "").split(",") if k}
@@ -2116,8 +2122,20 @@ LENSES: Tuple[LensSpec, ...] = (
             ParamSpec(
                 name="since",
                 label="Since",
-                placeholder="15m, 2h or baseline",
-                help="How far back to look, or 'baseline' for the drift from the baseline",
+                placeholder="15m, 2h, baseline...",
+                help=(
+                    "How far back to look: a span like 90s, 15m, 2h or 1d (a bare number is "
+                    "minutes), 'baseline' for the drift from the baseline, or 'all' (or "
+                    "nothing) for everything the timeline holds"
+                ),
+                suggestions=(
+                    ("15m", "last 15 minutes"),
+                    ("1h", "last hour"),
+                    ("6h", "last 6 hours"),
+                    ("1d", "last day"),
+                    ("baseline", "drift from the baseline"),
+                    ("all", "everything the timeline holds"),
+                ),
             ),
             ParamSpec(
                 name="kind",

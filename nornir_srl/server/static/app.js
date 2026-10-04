@@ -418,6 +418,20 @@
         input.autocomplete = "off";
         input.spellcheck = false;
         input.value = state.reportParams.get(spec.name) || "";
+        if ((spec.suggestions || []).length) {
+          // Presets to pick, with what each means; anything else can still
+          // be typed.
+          const list = document.createElement("datalist");
+          list.id = `param-${spec.name}-suggestions`;
+          for (const suggestion of spec.suggestions) {
+            const option = document.createElement("option");
+            option.value = suggestion.value;
+            option.label = suggestion.label;
+            list.append(option);
+          }
+          input.setAttribute("list", list.id);
+          field.append(list);
+        }
       }
 
       input.addEventListener("change", () => {
@@ -5860,9 +5874,8 @@
       dom.servicesTreeView.hidden = true;
       dom.pathGraphView.hidden = false;
       renderPathGraph(state.graph);
-      if (state.rows.length) {
-        dom.rowCount.textContent = `${state.graph ? state.graph.nodes.length : 0} lookup(s), ${state.rows.length} row(s)`;
-      }
+      // Written for an empty answer too, or the count of the last one stays.
+      dom.rowCount.textContent = `${state.graph ? state.graph.nodes.length : 0} lookup(s), ${state.rows.length} row(s)`;
       return;
     }
     dom.pathGraphView.hidden = true;
@@ -5871,9 +5884,8 @@
       dom.tableWrap.hidden = true;
       dom.servicesTreeView.hidden = false;
       renderLensTree(state.tree || []);
-      if (state.rows.length) {
-        dom.rowCount.textContent = `${state.tree ? state.tree.length : 0} card(s), ${state.rows.length} row(s)`;
-      }
+      // Written for an empty answer too, or the count of the last one stays.
+      dom.rowCount.textContent = `${state.tree ? state.tree.length : 0} card(s), ${state.rows.length} row(s)`;
       return;
     }
 

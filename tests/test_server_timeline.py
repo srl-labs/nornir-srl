@@ -309,6 +309,9 @@ def test_the_changes_lens_narrows_down_to_kinds_and_severities(watched):
     titles = [item["title"] for card in bgp["tree"] for entry in card["entries"] for item in entry["items"]]
     assert titles and all(title.startswith("bgp ") for title in titles)
 
+    # 'all' is everything the timeline holds, as an empty since is.
+    assert store.lens_table(lens, None, {"since": "all"})["rows"] == store.lens_table(lens, None, {})["rows"]
+
     errors = store.lens_table(lens, None, {"since": "15m", "kind": "bgp,finding", "severity": "error"})
     assert errors["rows"] and {row["Severity"] for row in errors["rows"]} == {"error"}
     assert {row["Kind"] for row in errors["rows"]} <= {"bgp", "finding"}

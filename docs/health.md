@@ -60,6 +60,8 @@ The server reads the fabric every `--watch-interval` seconds (15 by default; `0`
 
 Severity reads as `error` (something stopped working), `warning`, `ok` (something recovered) or `info`.
 
+**Since** takes a time span (`90s`, `15m`, `2h`, `1d`; a bare number is minutes), `baseline` for the drift from the baseline rather than a window, or `all` (or nothing) for everything the timeline holds; the field offers these as presets and takes anything else typed. A span reaches as far back as the timeline holds in memory, the newest 5000 changes; `fcli history` and `GET /api/history` read further back, from the history on disk.
+
 The Changes lens takes **Kind** and **Severity** next to **Since**, each a list of checkboxes: ticking `bgp` and `config`, or `error`, narrows the cards and the table alike, and the choice is kept in the URL (`#changes?since=2h&kind=bgp,config`). Nothing ticked shows everything. The table's column filters only narrow the table.
 
 The **flapping** check reads the timeline. Three or more transitions of one session, port, adjacency or MAC within 10 minutes is a finding, and a MAC moving back and forth between two ports is what a loop looks like.
