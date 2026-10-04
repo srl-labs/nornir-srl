@@ -154,13 +154,16 @@ def containerlab_nodes(hosts: Any) -> Set[str]:
 
 
 def collect_fabric_state(
-    target: "Nornir", reports: Sequence[str]
+    target: "Nornir", reports: Sequence[str], recorder: Optional[Any] = None
 ) -> FabricState:
     """Run *reports* over a Nornir inventory and return what they answered.
 
     One pass over the fabric per report, each threaded the way a single report
     is. A node that fails one report is still present in the others, so a
     reading that joins several degrades rather than disappearing.
+
+    A *recorder* (:class:`nornir_srl.server.readings.Recorder`) writes down
+    every Get, so the reading can be kept and read back later.
     """
     from nornir.core.task import Result, Task  # noqa: PLC0415 - optional at import
 
@@ -177,6 +180,11 @@ def collect_fabric_state(
 
         def task_func(task: "Task", spec=spec) -> "Result":
             device = task.host.get_connection(CONNECTION_NAME, task.nornir.config)
+            if recorder is not None:
+                from .server.readings import TapConnection  # noqa: PLC0415 - import cycle
+
+                calls = recorder.for_report(task.host.name, spec.name, getattr(device, "capabilities", None))
+                device = TapConnection(device, calls)
             return Result(host=task.host, result=spec.getter(device))
 
         result = target.run(task=task_func, name=spec.resource, raise_on_error=False)

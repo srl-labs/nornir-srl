@@ -182,8 +182,18 @@ def _cli_commands():
 
 
 #: Commands that are neither a report nor a lens: they run the fabric, or run
-#: over a report, rather than reading one.
-NON_REPORT_COMMANDS = {"server", "diff", "summary"}
+#: over a report, rather than reading one, or read the history the server keeps.
+NON_REPORT_COMMANDS = {
+    "server",
+    "diff",
+    "summary",
+    "history",
+    "baseline",
+    "baselines",
+    "drift",
+    "config_history",
+    "running_config",
+}
 
 
 def test_cli_exposes_exactly_the_cli_reports():
