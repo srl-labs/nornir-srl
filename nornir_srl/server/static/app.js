@@ -182,6 +182,7 @@
     colFilters: new Map(),
     colWidths: new Map(),
     reportParams: new Map(), // the selected report's own arguments, e.g. the RIB LPM address
+    collapsedGroups: loadCollapsedGroups(), // sidebar categories folded away, kept per browser
     networkInstances: [], // the fabric's instances, for an argument that is one of them
     tree: null, // a lens's answer as cards, alongside its rows
     records: null, // a lens's answer as the objects it found
@@ -665,6 +666,25 @@
     }
   }
 
+  // Folded sidebar groups are a per-browser convenience: kept when the
+  // browser lets us, and an empty set when it does not.
+  function loadCollapsedGroups() {
+    try {
+      const raw = JSON.parse(localStorage.getItem("fcli-collapsed-groups") || "[]");
+      return new Set(Array.isArray(raw) ? raw : []);
+    } catch (_err) {
+      return new Set();
+    }
+  }
+
+  function saveCollapsedGroups() {
+    try {
+      localStorage.setItem("fcli-collapsed-groups", JSON.stringify([...state.collapsedGroups]));
+    } catch (_err) {
+      /* storage unavailable: folding lasts as long as the page */
+    }
+  }
+
   function renderReportList() {
     const needle = dom.reportSearch.value.trim().toLowerCase();
     const groups = new Map();
@@ -678,9 +698,43 @@
     for (const [category, reports] of groups) {
       const section = document.createElement("div");
       section.className = "report-group";
+      // A search shows every match, folded group or not: what is searched
+      // for is what is wanted.
+      const collapsed = !needle && state.collapsedGroups.has(category);
+      section.classList.toggle("is-collapsed", collapsed);
       const heading = document.createElement("h3");
-      heading.textContent = category;
+      const toggle = document.createElement("button");
+      toggle.type = "button";
+      toggle.className = "report-group-toggle";
+      toggle.setAttribute("aria-expanded", collapsed ? "false" : "true");
+      toggle.title = collapsed ? `Show the ${category} reports` : `Hide the ${category} reports`;
+      const chevron = document.createElement("span");
+      chevron.className = "report-group-chevron";
+      chevron.setAttribute("aria-hidden", "true");
+      chevron.textContent = "▾";
+      const label = document.createElement("span");
+      label.textContent = category;
+      toggle.append(chevron, label);
+      if (collapsed) {
+        const count = document.createElement("span");
+        count.className = "report-group-count";
+        count.textContent = String(reports.length);
+        const current = reports.some((r) => state.report && state.report.name === r.name);
+        if (current) count.classList.add("has-current");
+        toggle.append(count);
+      }
+      toggle.addEventListener("click", () => {
+        if (state.collapsedGroups.has(category)) state.collapsedGroups.delete(category);
+        else state.collapsedGroups.add(category);
+        saveCollapsedGroups();
+        renderReportList();
+      });
+      heading.append(toggle);
       section.append(heading);
+      if (collapsed) {
+        dom.reportList.append(section);
+        continue;
+      }
       for (const report of reports) {
         const button = document.createElement("button");
         button.type = "button";
@@ -2539,6 +2593,9 @@
       syncCurrentVisit();
     }
     state.report = report;
+    // A report opened from a link, the URL or history is never hidden in a
+    // folded group: its group opens.
+    if (report.category && state.collapsedGroups.delete(report.category)) saveCollapsedGroups();
     // A comparison belongs to the report it was made of.
     state.diff = null;
     state.snapshots = [];

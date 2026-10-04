@@ -1106,7 +1106,7 @@ def _bgp_rib_variants() -> List[ReportSpec]:
             description=description,
             getter=_bound_bgp_rib("evpn", route_type),
             table=_bgp_rib_table_for("evpn", route_type),
-            category="BGP RIB",
+            category="BGP",
             surfaces=STREAMING,
         )
         for route_type, label, description in evpn
@@ -1119,7 +1119,7 @@ def _bgp_rib_variants() -> List[ReportSpec]:
             description=f"{noun} routes in the BGP RIB-in-post.",
             getter=_bound_bgp_rib(route_fam),
             table=_bgp_rib_table_for(route_fam),
-            category="BGP RIB",
+            category="BGP",
             surfaces=STREAMING,
         )
         for suffix, route_fam, label, noun in families
@@ -1435,7 +1435,7 @@ REPORTS: List[ReportSpec] = [
         description="Routes in the BGP RIB-in-post with their path attributes.",
         getter=_bgp_rib,
         table=_bgp_rib_table_for(),
-        category="BGP RIB",
+        category="BGP",
         surfaces=INTERACTIVE,
     ),
     *_bgp_rib_variants(),
@@ -1447,7 +1447,7 @@ REPORTS: List[ReportSpec] = [
             description=description,
             getter=_peer_rib(rib),
             table=table,
-            category="BGP RIB",
+            category="BGP",
             surfaces=STREAMING,
             params=(
                 ParamSpec(
