@@ -9,7 +9,7 @@ from pygnmi.client import gNMIException
 
 from nornir_srl.checks import Finding
 from nornir_srl.connections import srlinux
-from nornir_srl.connections.srlinux import NodeUnreachable, SrLinux, _connect_failure, _probe, _unreachable
+from nornir_srl.connections.srlinux import NodeUnreachable, SrLinux, TlsFailed, _connect_failure, _probe, _unreachable
 from nornir_srl.fabric import FabricState
 from nornir_srl.incidents import correlate
 
@@ -40,6 +40,7 @@ def test_a_certificate_that_could_not_be_fetched_is_said_as_what_went_wrong(caus
 def test_a_real_tls_failure_is_still_one():
     clearer = _connect_failure(_certificate_error(ssl.SSLError(1, "[SSL: WRONG_VERSION_NUMBER] wrong version number")), "leaf1", 57400)
     assert not isinstance(clearer, NodeUnreachable)
+    assert isinstance(clearer, TlsFailed)
     assert str(clearer).startswith("TLS handshake with leaf1 on gNMI port 57400 failed")
 
 
@@ -105,3 +106,21 @@ def test_an_unreachable_node_s_incident_says_why():
     (incident,) = correlate(findings, state)
     assert incident.root.check == "node_unreachable"
     assert incident.root.detail == "no report could be collected: not reachable: no route to spine1 on gNMI port 57400 (No route to host)"
+
+
+def test_nornir_s_traceback_for_a_node_it_cannot_connect_to_is_left_out(caplog):
+    """The one-line reason says it all; a traceback is kept for anything else, and when debugging."""
+    import logging
+
+    task_log = logging.getLogger("nornir.core.task")
+    tb = "Traceback (most recent call last):\n  ...\n{}"
+    with caplog.at_level(logging.ERROR, logger="nornir.core.task"):
+        logging.getLogger("nornir_srl").setLevel(logging.ERROR)
+        task_log.error("Host %r: task %r failed with traceback:\n%s", "leaf1", "lldp", tb.format("nornir_srl.connections.srlinux.NodeUnreachable: not reachable: x"))
+        task_log.error("Host %r: task %r failed with traceback:\n%s", "leaf1", "lldp", tb.format("nornir_srl.connections.srlinux.TlsFailed: TLS handshake with x failed"))
+        task_log.error("Host %r: task %r failed with traceback:\n%s", "leaf1", "lldp", tb.format("KeyError: 'bgp'"))
+    assert [r.getMessage().splitlines()[-1] for r in caplog.records] == ["KeyError: 'bgp'"]
+    caplog.clear()
+    with caplog.at_level(logging.DEBUG, logger="nornir_srl"):
+        task_log.error("Host %r: task %r failed with traceback:\n%s", "leaf1", "lldp", tb.format("nornir_srl.connections.srlinux.NodeUnreachable: not reachable: x"))
+    assert len([r for r in caplog.records if r.name == "nornir.core.task"]) == 1

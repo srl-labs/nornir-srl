@@ -53,6 +53,33 @@ class NodeUnreachable(ConnectionError):
     """A node that could not be connected to at all: nothing answered, or it refused."""
 
 
+class TlsFailed(ConnectionError):
+    """A node that answered, and could not agree on TLS: not a gNMI port, or a bad certificate."""
+
+
+class _QuietUnreachable(logging.Filter):
+    """Nornir's traceback for a task on a node that cannot be connected to, unless debugging.
+
+    Nornir logs every failed task with its full traceback. For a node that
+    is down or unreachable that is thirty lines saying what the one line
+    fcli prints already says; at ``-l DEBUG`` it is kept, where a traceback
+    is what was asked for.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if logging.getLogger("nornir_srl").isEnabledFor(logging.DEBUG):
+            return True
+        message = record.getMessage()
+        return not any(name in message for name in _QUIET_FAILURES)
+
+
+#: The failures whose one-line reason says it all.
+_QUIET_FAILURES = (f"{__name__}.NodeUnreachable: ", f"{__name__}.TlsFailed: ")
+
+
+logging.getLogger("nornir.core.task").addFilter(_QuietUnreachable())
+
+
 #: How long a node has to accept a TCP connection on its gNMI port before it
 #: is reported as not responding. Without it, an address that drops packets
 #: takes the operating system's connect timeout - over two minutes - to fail.
@@ -72,7 +99,7 @@ def _unreachable(cause: BaseException, host: Any, port: Any) -> Exception:
     """What a failed connection to *host* says it was, in words about the node."""
     where = f"{host} on gNMI port {port}"
     if isinstance(cause, ssl.SSLError):
-        return ConnectionError(f"TLS handshake with {where} failed: {cause}")
+        return TlsFailed(f"TLS handshake with {where} failed: {cause}")
     if isinstance(cause, ConnectionRefusedError):
         return NodeUnreachable(f"not reachable: {where} refused the connection - is gNMI enabled and listening there?")
     if isinstance(cause, (socket.timeout, TimeoutError)):
