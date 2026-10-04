@@ -3308,3 +3308,35 @@ button.pill-jump:hover {
     padding-bottom: 9px;
   }
 }
+
+/* ---------------------------------------------- Parameters with fixed values */
+
+.choices-param {
+  position: relative;
+}
+
+.choices-btn {
+  min-width: 72px;
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  justify-content: flex-start;
+}
+
+.choices-btn.is-active {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.choices-menu {
+  max-height: 60vh;
+  overflow-y: auto;
+  min-width: 180px;
+}
+
+.choices-all {
+  width: 100%;
+  text-align: left;
+  margin-bottom: 4px;
+}

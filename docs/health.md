@@ -60,6 +60,8 @@ The server reads the fabric every `--watch-interval` seconds (15 by default; `0`
 
 Severity reads as `error` (something stopped working), `warning`, `ok` (something recovered) or `info`.
 
+The Changes lens takes **Kind** and **Severity** next to **Since**, each a list of checkboxes: ticking `bgp` and `config`, or `error`, narrows the cards and the table alike, and the choice is kept in the URL (`#changes?since=2h&kind=bgp,config`). Nothing ticked shows everything. The table's column filters only narrow the table.
+
 The **flapping** check reads the timeline. Three or more transitions of one session, port, adjacency or MAC within 10 minutes is a finding, and a MAC moving back and forth between two ports is what a loop looks like.
 
 Most changes are seen on the next reading. Ports, services, routes, ethernet segments, and LLDP and BGP neighbours are streamed ON_CHANGE, so the device reports a change or a delete as it happens. What is sampled - the counters, BFD sessions, ARP and ND caches - never reports a delete. An entry that disappears there is only noticed once the stream's stale-entry sweep drops it: up to three sample intervals of its path, and at least 45 s.

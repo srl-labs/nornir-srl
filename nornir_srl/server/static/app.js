@@ -387,6 +387,10 @@
     const specs = (state.report && state.report.params) || [];
     dom.reportParams.hidden = !specs.length;
     for (const spec of specs) {
+      if (spec.kind === "choices") {
+        dom.reportParams.append(choicesParam(spec));
+        continue;
+      }
       const field = document.createElement("label");
       field.className = "field";
 
@@ -428,6 +432,86 @@
       dom.reportParams.append(field);
     }
     if (specs.some((spec) => spec.kind === "ni")) refreshInstanceOptions();
+  }
+
+  // A parameter that takes any number of fixed values - the kinds of change,
+  // their severities - as a dropdown of checkboxes. None ticked means all of
+  // them; the button says what is chosen.
+  function choicesParam(spec) {
+    const field = document.createElement("div");
+    field.className = "field menu choices-param";
+    const name = document.createElement("span");
+    name.className = "muted";
+    name.textContent = spec.label;
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "btn choices-btn";
+    if (spec.help) button.title = spec.help;
+    const panel = document.createElement("div");
+    panel.className = "menu-panel choices-menu";
+    panel.hidden = true;
+
+    const chosen = () =>
+      new Set((state.reportParams.get(spec.name) || "").split(",").filter(Boolean));
+    const caption = () => {
+      const picked = [...chosen()];
+      button.textContent = picked.length
+        ? picked.length <= 2
+          ? picked.join(", ")
+          : `${picked.length} of ${spec.choices.length}`
+        : spec.placeholder || "all";
+      button.classList.toggle("is-active", picked.length > 0);
+    };
+    const apply = (picked) => {
+      if (picked.size) state.reportParams.set(spec.name, spec.choices.filter((c) => picked.has(c)).join(","));
+      else state.reportParams.delete(spec.name);
+      caption();
+      updateFilterUI();
+      connect();
+      syncCurrentVisit();
+    };
+
+    const draw = () => {
+      panel.replaceChildren();
+      const picked = chosen();
+      const all = document.createElement("button");
+      all.type = "button";
+      all.className = "btn btn-ghost choices-all";
+      all.textContent = picked.size ? "Show all" : "All shown - tick to narrow";
+      all.disabled = !picked.size;
+      all.addEventListener("click", () => {
+        apply(new Set());
+        draw();
+      });
+      panel.append(all);
+      for (const choice of spec.choices) {
+        const label = document.createElement("label");
+        const box = document.createElement("input");
+        box.type = "checkbox";
+        box.checked = picked.has(choice);
+        box.addEventListener("change", () => {
+          const now = chosen();
+          if (box.checked) now.add(choice);
+          else now.delete(choice);
+          apply(now);
+          all.textContent = now.size ? "Show all" : "All shown - tick to narrow";
+          all.disabled = !now.size;
+        });
+        label.append(box, document.createTextNode(choice));
+        panel.append(label);
+      }
+    };
+
+    button.addEventListener("click", () => {
+      const opening = panel.hidden;
+      // One open at a time.
+      for (const other of dom.reportParams.querySelectorAll(".choices-menu")) other.hidden = true;
+      panel.hidden = !opening;
+      if (opening) draw();
+    });
+    caption();
+    field.append(name, button, panel);
+    return field;
   }
 
   // A network-instance is chosen from the ones the fabric has rather than
@@ -6194,6 +6278,9 @@
     }
     if (!dom.exportMenu.hidden && !event.target.closest(".menu")) {
       dom.exportMenu.hidden = true;
+    }
+    if (!event.target.closest(".choices-param")) {
+      for (const panel of dom.reportParams.querySelectorAll(".choices-menu")) panel.hidden = true;
     }
     if (dom.baselineMenu && !dom.baselineMenu.hidden && !event.target.closest("#baseline-wrap")) {
       dom.baselineMenu.hidden = true;

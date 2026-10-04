@@ -51,6 +51,37 @@ WATCH_REPORTS: Tuple[str, ...] = tuple(
     dict.fromkeys(REQUIRED_REPORTS + ("mac", "arp", "nd", "config_commits"))
 )
 
+#: Every kind of change the timeline records, grouped the way they read:
+#: sessions and adjacencies, ports and platform, routes, services, and what
+#: people and fcli itself did.
+CHANGE_KINDS: Tuple[str, ...] = (
+    "bgp",
+    "bgp-routes",
+    "bfd",
+    "isis",
+    "ospf",
+    "interface",
+    "lldp",
+    "optic",
+    "hardware",
+    "node",
+    "route",
+    "routes",
+    "ni",
+    "ni-itf",
+    "ni-rt",
+    "es",
+    "es-df",
+    "vxlan",
+    "mac",
+    "arp",
+    "nd",
+    "config",
+    "finding",
+    "ack",
+    "server",
+)
+
 #: A change that means something stopped working.
 ERROR = "error"
 #: One that is worth reading: legitimate at times, a fault at others.
@@ -919,6 +950,7 @@ def as_row(change: Change) -> Mapping[str, Any]:
 
 __all__ = [
     "ABSENT",
+    "CHANGE_KINDS",
     "Change",
     "ERROR",
     "FLAP_KINDS",

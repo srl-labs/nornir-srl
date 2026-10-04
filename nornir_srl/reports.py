@@ -174,6 +174,9 @@ class ParamSpec:
     #: True where nothing can be answered without it: a report renders in full
     #: without any of its parameters, but a lens is a question about something.
     required: bool = False
+    #: For ``choices``: the values it takes, any number of them, given
+    #: comma-separated; none chosen means all of them.
+    choices: Tuple[str, ...] = ()
 
     def as_dict(self) -> Dict[str, Any]:
         return {
@@ -183,6 +186,7 @@ class ParamSpec:
             "help": self.help,
             "kind": self.kind,
             "required": self.required,
+            "choices": list(self.choices),
         }
 
     def coerce(self, value: Any) -> Optional[str]:
@@ -201,6 +205,14 @@ class ParamSpec:
                 raise ValueError(
                     f"{self.label}: '{text}' is not an IP address"
                 ) from None
+        if self.kind == "choices":
+            chosen = [part.strip().lower() for part in text.split(",") if part.strip()]
+            unknown = [part for part in chosen if part not in self.choices]
+            if unknown:
+                raise ValueError(
+                    f"{self.label}: {', '.join(unknown)} is not one of {', '.join(self.choices)}"
+                )
+            return ",".join(dict.fromkeys(chosen)) or None
         return text
 
 

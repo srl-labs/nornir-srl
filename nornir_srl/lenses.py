@@ -67,7 +67,7 @@ from .checks import (
     underlay_hosts,
 )
 from .acks import mark as mark_acknowledged
-from .changes import parse_since, worst_first
+from .changes import CHANGE_KINDS, parse_since, worst_first
 from .checks import REQUIRED_REPORTS, run_checks
 from .incidents import correlate
 from .records import BgpVpnInstance, EthernetSegment, NeighborCache, NeighborEntry, Route, RouteNextHop, as_dict
@@ -1903,18 +1903,27 @@ def tree_incidents(incidents: List[Any]) -> List[Card]:
 BASELINE = "baseline"
 
 
-def lens_changes(state: FabricState, since: str = "") -> List[Any]:
+def lens_changes(state: FabricState, since: str = "", kind: str = "", severity: str = "") -> List[Any]:
     """What changed lately, or how the fabric has drifted from its baseline.
 
     Answered from :attr:`FabricState.history`, which only the live server
-    keeps: everywhere else there is no past to answer from.
+    keeps: everywhere else there is no past to answer from. *kind* and
+    *severity* narrow it down, each comma-separated, none meaning all.
     """
     history = state.history
     if history is None:
         return []
     if str(since).strip().lower() == BASELINE:
-        return history.drift()
-    return history.changes(since=parse_since(since))
+        changes = history.drift()
+    else:
+        changes = history.changes(since=parse_since(since))
+    kinds = {k for k in str(kind or "").split(",") if k}
+    severities = {s for s in str(severity or "").split(",") if s}
+    return [
+        c
+        for c in changes
+        if (not kinds or c.kind in kinds) and (not severities or c.severity in severities)
+    ]
 
 
 CHANGE_COLUMNS: Tuple[Column, ...] = (
@@ -2107,6 +2116,22 @@ LENSES: Tuple[LensSpec, ...] = (
                 label="Since",
                 placeholder="15m, 2h or baseline",
                 help="How far back to look, or 'baseline' for the drift from the baseline",
+            ),
+            ParamSpec(
+                name="kind",
+                label="Kind",
+                placeholder="all",
+                help="Only these kinds of change: bgp, interface, config, finding, ...",
+                kind="choices",
+                choices=CHANGE_KINDS,
+            ),
+            ParamSpec(
+                name="severity",
+                label="Severity",
+                placeholder="all",
+                help="Only changes of these severities",
+                kind="choices",
+                choices=("error", "warning", "ok", "info"),
             ),
         ),
         mcp_name="recent_changes",

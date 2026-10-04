@@ -1297,9 +1297,13 @@ def test_reports_endpoint_describes_the_arguments_a_report_takes(client):
             "help": "Longest prefix matching this address, per node and route table",
             "kind": "address",
             "required": False,
+            "choices": [],
         }
     ]
     assert by_name["lldp"]["params"] == []
+    # A parameter of fixed values says which.
+    severity = next(p for p in by_name["changes"]["params"] if p["name"] == "severity")
+    assert (severity["kind"], severity["choices"]) == ("choices", ["error", "warning", "ok", "info"])
 
 
 def test_unknown_report_is_a_404(client):

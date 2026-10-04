@@ -287,3 +287,38 @@ def test_watched_prefixes_over_the_api(fabric, tmp_path):  # noqa: F811 - the fi
         assert client.post("/api/watch", json={"prefix": "not-a-prefix"}).status_code == 400
         assert client.post("/api/unwatch", json={"prefix": "10.1.4.16"}).json()["watched"] == ["6.6.6.0/24"]
         assert client.post("/api/unwatch", json={"prefix": "10.1.4.16"}).status_code == 404
+
+
+def test_the_changes_lens_narrows_down_to_kinds_and_severities(watched):
+    store, watcher, devices = watched
+    watcher.tick()
+    watcher.tick()
+    devices["leaf1"].push(BGP_NEIGHBOR, [("session-state", "idle")])
+    assert wait_for(lambda: _session_state(store, "leaf1") == "idle")
+    watcher.tick()
+    watcher.tick()
+
+    lens = get_lens("changes")
+    everything = store.lens_table(lens, None, {"since": "15m"})
+    kinds = {row["Kind"] for row in everything["rows"]}
+    assert {"bgp", "finding"} <= kinds
+
+    bgp = store.lens_table(lens, None, {"since": "15m", "kind": "bgp"})
+    assert bgp["rows"] and {row["Kind"] for row in bgp["rows"]} == {"bgp"}
+    # The cards are drawn from the same narrowed changes as the rows.
+    titles = [item["title"] for card in bgp["tree"] for entry in card["entries"] for item in entry["items"]]
+    assert titles and all(title.startswith("bgp ") for title in titles)
+
+    errors = store.lens_table(lens, None, {"since": "15m", "kind": "bgp,finding", "severity": "error"})
+    assert errors["rows"] and {row["Severity"] for row in errors["rows"]} == {"error"}
+    assert {row["Kind"] for row in errors["rows"]} <= {"bgp", "finding"}
+
+
+def test_a_kind_of_change_that_does_not_exist_is_refused():
+    from nornir_srl.lenses import coerce_lens_params
+
+    lens = get_lens("changes")
+    assert coerce_lens_params(lens, {"kind": "BGP, config,bgp"}) == {"kind": "bgp,config"}
+    with pytest.raises(ValueError, match="bogus is not one of"):
+        coerce_lens_params(lens, {"kind": "bgp,bogus"})
+    assert coerce_lens_params(lens, {"kind": " , "}) == {}
