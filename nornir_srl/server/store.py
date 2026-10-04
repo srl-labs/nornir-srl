@@ -13,23 +13,36 @@ from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
 from nornir.core import Nornir
 
 from ..checks import CHECKS_COLUMNS, CHECKS_REPORT, FabricState, Finding, REQUIRED_REPORTS, run_checks
+from .. import configs
 from ..acks import AckStore, finding_key, mark as mark_acknowledged
 from ..changes import INFO, WATCHED_ROUTE_REPORTS, Change
 from ..incidents import Incident, correlate, locate
 from ..connections.down_reason import STANDBY_STATE, is_intent
 from ..connections.srlinux import CONNECTION_NAME
 from ..fabric import containerlab_nodes
+from ..history import DEFAULT_RETENTION_DAYS, HistoryStore
 from ..connections.layer2 import stamp_underlay_sites
 from ..lenses import LensSpec
 from ..records import as_dict
 from ..reports import ReportSpec, SubscriptionSpec, get_report, reading_reports, subscription_mode
 from ..rows import cell, clean_columns, flatten, merge_fields, sub_item_keys
 from .devices import CachedDevice, DirectDevice, RecordingDevice
+from .readings import NOT_RECORDED, Recorder, TapDevice, TapDirectDevice
 from .stream import HostStream
 from .timeline import Reading, Timeline, Watcher
 from .topology import annotate_aliasing, annotate_health, build_topology, node_facts
 
 logger = logging.getLogger(__name__)
+
+
+def _baseline_name(name: Optional[str]) -> str:
+    """A baseline's name as it is kept: letters, digits, ``.``, ``_`` and ``-``."""
+    import re  # noqa: PLC0415
+
+    cleaned = re.sub(r"[^A-Za-z0-9._-]+", "-", (name or "").strip()).strip("-.")[:60]
+    if cleaned.startswith("__"):
+        raise ValueError(f"'{name}' is a name fcli keeps for itself")
+    return cleaned or "baseline"
 
 
 class FabricStore:
@@ -49,6 +62,8 @@ class FabricStore:
         watch_interval: float = 0.0,
         cabling_file: Optional[Path] = None,
         ack_file: Optional[Path] = None,
+        history: Optional[HistoryStore] = None,
+        retention_days: float = DEFAULT_RETENTION_DAYS,
     ) -> None:
         self.nornir = nornir
         self.topo_name = topo_name
@@ -92,7 +107,9 @@ class FabricStore:
         self._stopped = False
         self._resync_thread: Optional[threading.Thread] = None
         #: What the fabric was, as the watcher read it every watch_interval.
-        self.timeline = Timeline()
+        self.timeline = Timeline(history=history, retention_days=retention_days)
+        #: Where the timeline, the baselines and the configurations are kept.
+        self.history = history
         #: The findings someone acknowledged, shared by everyone on this server.
         self.acks = AckStore(ack_file)
         #: Where the cables LLDP showed are kept across restarts, if anywhere.
@@ -669,12 +686,16 @@ class FabricStore:
         report: ReportSpec,
         name: str,
         params: Optional[Dict[str, Any]] = None,
+        recorder: Optional[Recorder] = None,
     ) -> Tuple[str, Optional[List[Any]], Optional[str]]:
         """What *report*'s getter makes of one node, before it becomes a table.
 
         The items are ``None`` rather than empty when there was nothing to ask:
         a node that is going away as the store shuts down has no state, which
         is not the same as having none.
+
+        With a *recorder*, every Get the getter makes is written down, which
+        is how a reading is kept to be read back later.
         """
         with self._lock:
             stream = self._streams.get(name)
@@ -686,7 +707,12 @@ class FabricStore:
         if self._stop.is_set():
             return name, None, None
         try:
-            result = report.getter(CachedDevice(stream), **(params or {}))
+            device = (
+                CachedDevice(stream)
+                if recorder is None or report.name in NOT_RECORDED
+                else TapDevice(stream, recorder.for_report(name, report.name, getattr(stream.device, "capabilities", None)))
+            )
+            result = report.getter(device, **(params or {}))
         except Exception as exc:  # noqa: BLE001 - reported per node in the UI
             logger.debug(
                 "%s: report '%s' failed: %s", name, report.name, exc, exc_info=exc
@@ -718,6 +744,7 @@ class FabricStore:
         reports: Sequence[str] = reading_reports(REQUIRED_REPORTS),
         history: bool = True,
         watched: Sequence[str] = (),
+        recorder: Optional[Recorder] = None,
     ) -> FabricState:
         """Collect what the sanity checks read, across the filtered inventory.
 
@@ -731,6 +758,9 @@ class FabricStore:
 
         *watched* prefixes are looked up one by one on every node, wherever
         they are installed; see :meth:`_watched_routes`.
+
+        A *recorder* writes down every Get the reading made; see
+        :mod:`nornir_srl.server.readings`.
         """
         names = self._targets(inv_filter)
         self._heal_connections(names)
@@ -750,7 +780,7 @@ class FabricStore:
                 logger.warning("activating report '%s' for checks failed: %s", report_name, exc)
             payloads: Dict[str, Any] = {}
             collected = self._pool.map(
-                lambda n, s=spec: self._host_payload(s, n), names
+                lambda n, s=spec: self._host_payload(s, n, recorder=recorder), names
             )
             for node, items, error in collected:
                 if error is not None:
@@ -759,14 +789,16 @@ class FabricStore:
                     payloads[node] = items
             state.reports[key] = payloads
         if watched:
-            self._watched_routes(state, names, watched)
+            self._watched_routes(state, names, watched, recorder)
         if history:
             state.changes = self.timeline.recent(nodes=names)
             state.history = self.timeline.scoped(names)
         state.acknowledged = self.acks.keys()
         return state
 
-    def _watched_routes(self, state: FabricState, names: List[str], prefixes: Sequence[str]) -> None:
+    def _watched_routes(
+        self, state: FabricState, names: List[str], prefixes: Sequence[str], recorder: Optional[Recorder] = None
+    ) -> None:
         """Look *prefixes* up on every node in *names*, into *state*.
 
         A reading holds the underlay's route table and only the size of the
@@ -784,8 +816,12 @@ class FabricStore:
                     stream = self._streams.get(name)
                 if stream is None:
                     return name, None, self._connect_errors.get(name, "not connected")
+                device: Any = DirectDevice(stream)
+                if recorder is not None:
+                    device = TapDirectDevice(stream, recorder.for_report(name, report))
+                    recorder.bound(name, report, {"afi": afi, "prefixes": list(wanted)})
                 try:
-                    return name, DirectDevice(stream).get_routes(afi, wanted)["ip_rib"], None
+                    return name, device.get_routes(afi, wanted)["ip_rib"], None
                 except Exception as exc:  # noqa: BLE001 - one node's answer, not the reading's
                     return name, None, str(exc)
 
@@ -961,13 +997,118 @@ class FabricStore:
         with self._lock:
             self._table_cache.clear()
 
-    def set_baseline(self) -> Dict[str, Any]:
-        """Keep the fabric as it is now as what it is compared against."""
-        reading = self.timeline.latest
-        if reading is None or self.watch_interval <= 0:
-            reading = self.health()
-        self.timeline.set_baseline(reading)
+    def set_baseline(self, name: Optional[str] = None, note: str = "") -> Dict[str, Any]:
+        """Keep the fabric as it is now as what it is compared against.
+
+        With a history, the baseline is read afresh with its gNMI data written
+        down, kept under *name* (``baseline`` if none is given) and compared
+        against after a restart, until another is set or this one deleted.
+        """
+        if self.history is None:
+            reading = self.timeline.latest
+            if reading is None or self.watch_interval <= 0:
+                reading = self.health()
+            self.timeline.set_baseline(reading)
+            return self.timeline.status()
+        name = _baseline_name(name)
+        recorder = Recorder()
+        reading = self.watcher.capture(recorder)
+        self.watcher._keep(name, reading, recorder, note=note)
+        self.history.set_meta("baseline", name)
+        self.timeline.set_baseline(reading, name)
         return self.timeline.status()
+
+    def baselines(self) -> Dict[str, Any]:
+        """The baselines kept, and which one the fabric is compared against."""
+        kept = self.history.readings() if self.history is not None else []
+        return {
+            "active": self.timeline.baseline_name,
+            "baseline_at": self.timeline.baseline.at if self.timeline.baseline else None,
+            "persistent": self.history is not None,
+            "baselines": [r.as_dict() for r in kept],
+        }
+
+    def use_baseline(self, name: Optional[str]) -> Dict[str, Any]:
+        """Compare against the baseline kept under *name*; ``None`` for the latest reading, not kept."""
+        if name is None:
+            if self.history is not None:
+                self.history.set_meta("baseline", None)
+            self.timeline.set_baseline(self.timeline.latest or self.health(), None)
+            return self.baselines()
+        if self.history is None:
+            raise KeyError("baselines are not kept: the server runs without a history")
+        reading = self.watcher.load(name)
+        if reading is None:
+            raise KeyError(f"no baseline '{name}'")
+        self.history.set_meta("baseline", name)
+        self.timeline.set_baseline(reading, name)
+        return self.baselines()
+
+    def delete_baseline(self, name: str) -> Dict[str, Any]:
+        """Forget the baseline kept under *name*; the fabric is compared against the latest reading if it was in use."""
+        if self.history is None or not self.history.delete_reading(name):
+            raise KeyError(f"no baseline '{name}'")
+        if self.timeline.baseline_name == name:
+            self.timeline.set_baseline(self.timeline.latest or self.health(), None)
+        return self.baselines()
+
+    # ------------------------------------------------------------------ #
+    # configurations
+    # ------------------------------------------------------------------ #
+
+    def running_config(self, name: str, salt: str = "") -> Dict[str, Any]:
+        """*name*'s running configuration as it is now, normalized and redacted.
+
+        A Get of its own rather than a cached answer: what is asked for is
+        the configuration a commit just made.
+        """
+        with self._lock:
+            stream = self._streams.get(name)
+        if stream is None:
+            raise KeyError(f"{name} is not connected")
+        return configs.normalize(stream.fresh_get("/", "config"), salt=salt)
+
+    def config_versions(self, name: Optional[str] = None) -> List[Dict[str, Any]]:
+        """The configurations kept, newest commit first, for one node or every one."""
+        if self.history is None:
+            return []
+        return [v.as_dict() for v in self.history.config_versions(name)]
+
+    def config_text(self, name: str, commit: Optional[int] = None) -> Dict[str, Any]:
+        """One kept configuration, as ``set / ...`` lines."""
+        if self.history is None:
+            raise KeyError("configurations are not kept: the server runs without a history")
+        kept = self.history.config(name, commit)
+        if kept is None:
+            raise KeyError(f"no configuration of {name}" + (f" after commit {commit}" if commit is not None else ""))
+        version, tree = kept
+        return {**version.as_dict(), "lines": configs.flatten(tree)}
+
+    def config_diff(self, name: str, commit: Optional[int] = None, against: Optional[int] = None) -> Dict[str, Any]:
+        """What *commit* (the newest kept, if ``None``) changed in *name*'s configuration.
+
+        Compared with the configuration kept before it, or with the one kept
+        after commit *against*.
+        """
+        if self.history is None:
+            raise KeyError("configurations are not kept: the server runs without a history")
+        after = self.history.config(name, commit)
+        if after is None:
+            raise KeyError(f"no configuration of {name}" + (f" after commit {commit}" if commit is not None else ""))
+        if against is not None:
+            before = self.history.config(name, against)
+            if before is None:
+                raise KeyError(f"no configuration of {name} after commit {against}")
+        else:
+            older = self.history.latest_config(name, before=after[0].commit_id)
+            before = self.history.config(name, older.commit_id) if older is not None else None
+        diff = configs.diff_trees(before[1] if before else None, after[1])
+        return {
+            "node": name,
+            "commit": after[0].as_dict(),
+            "against": before[0].as_dict() if before else None,
+            **diff.as_dict(),
+        }
 
     def _checks_rows(
         self, inv_filter: Optional[Dict[str, str]]

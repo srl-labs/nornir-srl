@@ -28,6 +28,7 @@ from .connections.srlinux import CONNECTION_NAME
 from .connections.routing import BGP_RIB_ROUTE_FAM_ALIASES
 from .connections.helpers import clean_structured_key
 from .fabric import collect_fabric_state as collect_lens_state
+from .history import DEFAULT_RETENTION_DAYS
 from .lenses import LensSpec, get_lens
 from .records import as_dict
 from .reports import ReportSpec, get_report
@@ -853,6 +854,25 @@ def server(
         "or ECMP width - the timeline reports one by one, in any network-instance. "
         "Repeatable; more can be added in the browser",
     ),
+    history: bool = typer.Option(
+        True,
+        "--history/--no-history",
+        help="Keep the timeline, the baselines and every configuration the nodes "
+        "commit on disk, one SQLite file per fabric, so they outlive a restart. "
+        "Needs --watch-interval",
+    ),
+    history_dir: Optional[Path] = typer.Option(
+        None,
+        "--history-dir",
+        help="Where the history files are kept (default: ~/.local/state/fcli/history, "
+        "next to --snapshot-dir)",
+    ),
+    history_days: float = typer.Option(
+        DEFAULT_RETENTION_DAYS,
+        "--history-days",
+        help="Days of changes the history keeps; 0 keeps them all. Baselines and "
+        "configurations are kept until deleted",
+    ),
 ) -> None:
     """Serves live report tables over HTTP, fed by gNMI subscriptions"""
     from .server.app import serve
@@ -887,6 +907,9 @@ def server(
         watch_interval=watch_interval,
         persist_acks=persist_acks,
         watch_prefixes=watched,
+        history=history,
+        history_dir=history_dir,
+        retention_days=history_days,
     )
 
 
