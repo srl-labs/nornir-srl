@@ -99,6 +99,8 @@
     pathGraphView: el("path-graph-view"),
     viewModeBtn: el("view-mode-btn"),
     baselineBtn: el("baseline-btn"),
+    baselineWrap: el("baseline-wrap"),
+    baselineMenu: el("baseline-menu"),
     ackAllBtn: el("ack-all-btn"),
     watchWrap: el("watch-wrap"),
     watchBtn: el("watch-btn"),
@@ -2471,7 +2473,11 @@
     state.windowSize = WINDOW_STEP;
     dom.title.textContent = report.title;
     dom.desc.textContent = report.description;
-    if (dom.baselineBtn) dom.baselineBtn.hidden = report.name !== "changes";
+    if (dom.baselineWrap) {
+      dom.baselineWrap.hidden = report.name !== "changes";
+      dom.baselineMenu.hidden = true;
+      if (report.name === "changes") loadBaselines();
+    }
     if (dom.ackAllBtn) {
       dom.ackAllBtn.hidden = report.name !== "incidents";
       dom.ackAllBtn.disabled = true; // until the incidents are in
@@ -5251,6 +5257,146 @@
     loadWatched({ open: true });
   }
 
+  /* ------------------------------------------------------------ baselines */
+
+  /** The baselines kept: the active one named on the button, all of them listed in its menu when open. */
+  async function loadBaselines({ open = false } = {}) {
+    let info = null;
+    try {
+      const res = await fetch("/api/baselines");
+      info = await res.json();
+    } catch (_err) {
+      return;
+    }
+    dom.baselineBtn.textContent = info.active ? `📌 Baseline: ${info.active}` : "📌 Baseline";
+    if (open || !dom.baselineMenu.hidden) renderBaselineMenu(info);
+  }
+
+  function baselineTime(at) {
+    return at ? new Date(at * 1000).toLocaleString() : "";
+  }
+
+  function renderBaselineMenu(info) {
+    const menu = dom.baselineMenu;
+    menu.replaceChildren();
+    const heading = document.createElement("div");
+    heading.className = "menu-heading";
+    heading.textContent = "Compared against";
+    const current = document.createElement("div");
+    current.className = "muted watch-note";
+    current.textContent = info.baseline_at
+      ? `${info.active ? `'${info.active}'` : "the reading taken at start-up, not kept"} - ${baselineTime(info.baseline_at)}`
+      : "nothing yet: the server is still settling";
+    menu.append(heading, current);
+
+    if (info.persistent && info.baselines.length) {
+      const kept = document.createElement("div");
+      kept.className = "menu-heading";
+      kept.textContent = "Kept";
+      menu.append(kept);
+      for (const baseline of info.baselines) {
+        const row = document.createElement("div");
+        row.className = "watch-row baseline-row";
+        const text = document.createElement("span");
+        text.textContent = baseline.name;
+        text.title = `${baselineTime(baseline.at)} - ${baseline.nodes} node(s), ${baseline.findings} finding(s)${baseline.note ? ` - ${baseline.note}` : ""}`;
+        if (baseline.name === info.active) text.classList.add("baseline-active");
+        const when = document.createElement("span");
+        when.className = "muted";
+        when.textContent = baselineTime(baseline.at);
+        const use = document.createElement("button");
+        use.type = "button";
+        use.className = "btn btn-ghost";
+        use.textContent = "Use";
+        use.disabled = baseline.name === info.active;
+        use.title = `Compare the fabric with '${baseline.name}'`;
+        use.addEventListener("click", () => changeBaseline("/api/baseline/use", { name: baseline.name }));
+        const remove = document.createElement("button");
+        remove.type = "button";
+        remove.className = "btn btn-ghost";
+        remove.textContent = "✕";
+        remove.title = `Delete '${baseline.name}'`;
+        remove.addEventListener("click", () => {
+          if (window.confirm(`Delete the baseline '${baseline.name}'?`)) {
+            changeBaseline(`/api/baseline/${encodeURIComponent(baseline.name)}`, null, "DELETE");
+          }
+        });
+        row.append(text, when, use, remove);
+        menu.append(row);
+      }
+      if (info.active) {
+        const latest = document.createElement("button");
+        latest.type = "button";
+        latest.className = "btn btn-ghost baseline-latest";
+        latest.textContent = "Compare with the latest reading instead";
+        latest.addEventListener("click", () => changeBaseline("/api/baseline/use", { name: null }));
+        menu.append(latest);
+      }
+    }
+
+    const form = document.createElement("form");
+    form.className = "watch-add baseline-add";
+    const name = document.createElement("input");
+    name.className = "input";
+    name.placeholder = info.persistent ? "name, e.g. before-upgrade" : "kept until the server stops";
+    name.disabled = !info.persistent;
+    name.spellcheck = false;
+    const note = document.createElement("input");
+    note.className = "input";
+    note.placeholder = "note (optional)";
+    note.disabled = !info.persistent;
+    const set = document.createElement("button");
+    set.type = "submit";
+    set.className = "btn";
+    set.textContent = "Set baseline";
+    set.title = "Keep the fabric as it is now and compare against it";
+    form.append(name, note, set);
+    form.addEventListener("submit", (event) => {
+      event.preventDefault();
+      const body = info.persistent ? { name: name.value.trim() || null, note: note.value.trim() } : {};
+      changeBaseline("/api/baseline", body);
+    });
+    menu.append(form);
+    if (!info.persistent) {
+      const hint = document.createElement("div");
+      hint.className = "muted watch-note";
+      hint.textContent = "Baselines are kept across restarts when the server runs with --history.";
+      menu.append(hint);
+    }
+    if (info.persistent) name.focus();
+  }
+
+  async function changeBaseline(url, body, method = "POST") {
+    dom.baselineBtn.disabled = true;
+    try {
+      const res = await fetch(url, {
+        method,
+        headers: { "Content-Type": "application/json" },
+        body: body === null ? undefined : JSON.stringify(body),
+      });
+      const answer = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        window.alert(answer.error || `the baseline could not be changed (${res.status})`);
+      } else {
+        // Asking for the drift right after setting the baseline shows it
+        // empty, which is the point: everything from here on is a change.
+        state.reportParams.set("since", "baseline");
+        renderReportParams();
+        updateFilterUI();
+        connect();
+        syncCurrentVisit();
+      }
+    } catch (_err) {
+      window.alert("the baseline could not be changed: the server did not answer");
+    } finally {
+      dom.baselineBtn.disabled = false;
+    }
+    // Setting one closes the menu, the drift it opens is what to look at;
+    // picking or deleting one keeps it open for the next.
+    if (url === "/api/baseline") dom.baselineMenu.hidden = true;
+    loadBaselines();
+  }
+
   // What a lens found, as cards: one per thing found, the nodes inside it,
   // and under each node what that node reports - the same fold the
   // services pages give a fabric.
@@ -5866,25 +6012,10 @@
   if (dom.kpiCardHealth) dom.kpiCardHealth.addEventListener("click", () => openReport("incidents"));
 
   if (dom.baselineBtn) {
-    dom.baselineBtn.addEventListener("click", async () => {
-      dom.baselineBtn.disabled = true;
-      try {
-        const res = await fetch("/api/baseline", { method: "POST" });
-        const status = await res.json();
-        const at = status.baseline_at ? new Date(status.baseline_at * 1000).toLocaleTimeString() : "now";
-        dom.streamInfo.textContent = `baseline set at ${at}`;
-        // Asking for the drift right after setting the baseline shows it
-        // empty, which is the point: everything from here on is a change.
-        state.reportParams.set("since", "baseline");
-        renderReportParams();
-        updateFilterUI();
-        connect();
-        syncCurrentVisit();
-      } catch (_err) {
-        showErrors([{ node: "server", error: "setting the baseline failed" }]);
-      } finally {
-        dom.baselineBtn.disabled = false;
-      }
+    dom.baselineBtn.addEventListener("click", () => {
+      const opening = dom.baselineMenu.hidden;
+      dom.baselineMenu.hidden = !opening;
+      if (opening) loadBaselines({ open: true });
     });
   }
 
@@ -6063,6 +6194,9 @@
     }
     if (!dom.exportMenu.hidden && !event.target.closest(".menu")) {
       dom.exportMenu.hidden = true;
+    }
+    if (dom.baselineMenu && !dom.baselineMenu.hidden && !event.target.closest("#baseline-wrap")) {
+      dom.baselineMenu.hidden = true;
     }
     if (dom.watchMenu && !dom.watchMenu.hidden && !event.target.closest(".menu")) {
       dom.watchMenu.hidden = true;

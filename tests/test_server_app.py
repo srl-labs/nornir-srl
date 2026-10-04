@@ -1131,6 +1131,7 @@ def test_reports_endpoint_lists_the_lenses_as_what_they_are(client):
         "where",
         "path",
         "service",
+        "config_diff",
     }
     assert all(r["category"] == "Lenses" for r in lenses.values())
     required = {name: [p["name"] for p in r["params"] if p["required"]] for name, r in lenses.items()}
@@ -1140,6 +1141,7 @@ def test_reports_endpoint_lists_the_lenses_as_what_they_are(client):
         "where": ["target"],
         "path": ["source", "destination"],
         "service": ["name"],
+        "config_diff": ["node"],
     }
 
 

@@ -472,6 +472,52 @@ class TimelineView:
         """Every cable ever seen on the nodes in view, as (far system name, port)."""
         return {node: self._timeline.cables(node) for node in self._nodes}
 
+    def config_diff(self, node: str, commit: Optional[int] = None, against: Optional[int] = None) -> List[Any]:
+        """What *commit* changed in *node*'s configuration, as :class:`~nornir_srl.lenses.ConfigLine` records.
+
+        Raises :class:`ValueError` for a node not in view or a configuration
+        that was not kept.
+        """
+        from ..lenses import ConfigLine  # noqa: PLC0415 - lenses import the timeline's records
+
+        history = self._timeline.history
+        if history is None:
+            raise ValueError("configurations are only kept when the server runs with a history")
+        name = resolve_node(node, self._nodes)
+        after = history.config(name, commit)
+        if after is None:
+            raise ValueError(f"no configuration of {name} kept" + (f" after commit {commit}" if commit is not None else ""))
+        if against is not None:
+            before = history.config(name, against)
+            if before is None:
+                raise ValueError(f"no configuration of {name} kept after commit {against}")
+        else:
+            older = history.latest_config(name, before=after[0].commit_id)
+            before = history.config(name, older.commit_id) if older else None
+        diff = configs.diff_trees(before[1] if before else None, after[1])
+        return [
+            ConfigLine(
+                node=name,
+                commit=after[0].commit_id,
+                against=before[0].commit_id if before else None,
+                op=op,
+                line=line,
+                username=after[0].username,
+                comment=after[0].comment,
+            )
+            for op, line in diff.lines
+        ]
+
+
+def resolve_node(name: str, nodes: Sequence[str]) -> str:
+    """*name* as one of *nodes*: exactly, or as the end of one - ``leaf1`` for ``clab-dc1-leaf1``."""
+    if name in nodes:
+        return name
+    tails = [n for n in nodes if n.endswith("-" + name)]
+    if len(tails) == 1:
+        return tails[0]
+    raise ValueError(f"no node '{name}' in view" + (f": did you mean {', '.join(tails)}?" if tails else ""))
+
 
 class Watcher:
     """Reads the fabric every *interval* seconds and keeps the timeline.

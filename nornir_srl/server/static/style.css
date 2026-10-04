@@ -3099,6 +3099,41 @@ button.pill-jump:hover {
   font-size: 12px;
 }
 
+/* -------------------------------------------------------------- Baselines */
+
+.baseline-menu {
+  min-width: 340px;
+}
+
+.baseline-row span:first-child {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.baseline-row .muted {
+  font-family: var(--font-sans, inherit);
+  font-size: 11px;
+}
+
+.baseline-active {
+  font-weight: 600;
+}
+
+.baseline-latest {
+  margin-top: 4px;
+  width: 100%;
+  text-align: left;
+}
+
+.baseline-add {
+  flex-wrap: wrap;
+}
+
+.baseline-add .input {
+  min-width: 120px;
+}
+
 /* ------------------------------------------------------ Side Pane Resizing */
 
 .side-resizer {

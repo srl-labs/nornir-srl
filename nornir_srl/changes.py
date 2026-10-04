@@ -110,7 +110,9 @@ class Change:
 
     @property
     def summary(self) -> str:
-        """``established -> active``, ``new: spine1 e1/1``, ``gone: ...``."""
+        """``established -> active``, ``new: spine1 e1/1``, ``gone: ...``, ``committed``."""
+        if self.kind == "config":
+            return "committed" if self.after == "complete" else f"commit {self.after}"
         if self.before == ABSENT:
             return f"new: {self.after}"
         if self.after == ABSENT:

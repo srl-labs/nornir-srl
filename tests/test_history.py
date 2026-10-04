@@ -420,3 +420,30 @@ def test_each_commit_keeps_the_configuration_and_says_what_it_changed(served, hi
     assert store.config_text("leaf1", 1)["lines"] == ["set / interface ethernet-1/1 description one"]
     with pytest.raises(KeyError):
         store.config_text("leaf1", 99)
+
+
+def test_the_config_diff_lens_answers_from_the_kept_configurations(served, history):
+    from nornir_srl.lenses import get_lens
+
+    store, devices = served
+    for device in devices.values():
+        device.responses["/"] = [{"/": CONFIG_ONE}]
+    watcher = _persistent(store, history)
+    watcher.tick()
+    watcher.tick()
+    devices["leaf1"].responses["/"] = [{"/": CONFIG_TWO}]
+    devices["leaf1"].push("system/configuration/commit[id=2]", [("status", "complete"), ("username", "bob")])
+    assert wait_for(lambda: len(store.fabric_state(None, ("config_commits",), history=False).reports["config_commits"]["leaf1"]) == 2)
+    watcher.tick()
+
+    lens = get_lens("config_diff")
+    table = store.lens_table(lens, None, {"node": "leaf1", "commit": "2"})
+    assert [(row["Op"], row["Line"]) for row in table["rows"]] == [
+        ("-", "set / interface ethernet-1/1 description one"),
+        ("+", "set / interface ethernet-1/1 description two"),
+    ]
+    # The commit's change on the timeline links to it.
+    changes = store.lens_table(get_lens("changes"), None, {"since": "15m"})
+    links = [link for card in changes["tree"] for entry in card["entries"] for item in entry["items"] for link in item["links"]]
+    assert {"report": "config_diff", "node": "leaf1"}.items() <= links[0].items()
+    assert dict(links[0]["params"]) == {"node": "leaf1", "commit": "2"}
