@@ -908,6 +908,12 @@ body {
   animation: m3-menu-enter 0.15s cubic-bezier(0, 0, 0.2, 1);
 }
 
+/* Set by fitMenus() where opening leftwards would go under the sidebar. */
+.menu-panel.opens-right {
+  left: 0;
+  right: auto;
+}
+
 @keyframes m3-menu-enter {
   from { opacity: 0; transform: translateY(-6px) scale(0.98); }
   to { opacity: 1; transform: translateY(0) scale(1); }

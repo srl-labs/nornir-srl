@@ -5398,6 +5398,30 @@
     loadWatched({ open: true });
   }
 
+  /* -------------------------------------------------------- menu placement */
+
+  // A menu opens leftwards from its button's right edge. A button the
+  // toolbar wrapped to the left of the page would open its menu over the
+  // sidebar - under it, as the sidebar is drawn above the toolbar - so a
+  // menu that would cross the sidebar, or the window's edge, opens
+  // rightwards from the button's left edge instead.
+  function fitMenus() {
+    const side = document.querySelector(".sidebar");
+    const sideRect = side ? side.getBoundingClientRect() : null;
+    // A sidebar that is a closed drawer, or hidden, bounds nothing.
+    const bound = sideRect && sideRect.width > 0 && sideRect.right > 0 ? sideRect.right : 0;
+    for (const panel of document.querySelectorAll(".menu-panel")) {
+      if (panel.hidden) continue;
+      panel.classList.remove("opens-right");
+      const rect = panel.getBoundingClientRect();
+      if (rect.left < bound + 4 || rect.left < 4) panel.classList.add("opens-right");
+    }
+  }
+
+  // After whatever a click opened, and once a menu filled in from the server.
+  document.addEventListener("click", () => requestAnimationFrame(fitMenus));
+  window.addEventListener("resize", () => requestAnimationFrame(fitMenus));
+
   /* ------------------------------------------------------------ baselines */
 
   /** The baselines kept: the active one named on the button, all of them listed in its menu when open. */
@@ -5505,6 +5529,7 @@
       menu.append(hint);
     }
     if (info.persistent) name.focus();
+    fitMenus();
   }
 
   async function changeBaseline(url, body, method = "POST") {
