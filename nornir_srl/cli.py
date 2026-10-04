@@ -112,7 +112,8 @@ def _report_failure(resource: str) -> Callable[[str, Optional[BaseException]], N
     """Report a host that failed, and leave it out of the table."""
 
     def on_error(node: str, exception: Optional[BaseException]) -> None:
-        typer.echo(f"Failed to get {resource} for {node}. Exception: {exception}")
+        # stderr, so -o json|yaml|csv on stdout still parses with a node down.
+        typer.echo(f"Failed to get {resource} for {node}. Exception: {exception}", err=True)
 
     return on_error
 

@@ -488,12 +488,22 @@ def _root(anchor: Anchor, members: List[Finding], fabric: _Fabric) -> Finding:
     """The finding that explains the rest, synthesizing one where no check says it."""
     if anchor[0] == "node":
         node = anchor[1]
+        # Why, in the words the connection failed with: refused, no route,
+        # no answer, a name that does not resolve.
+        reason = next(
+            (
+                f.detail[len("not checked: "):]
+                for f in members
+                if f.check == "collection" and f.node == node and f.detail.startswith("not checked: ")
+            ),
+            "",
+        )
         return Finding(
             check="node_unreachable",
             severity=ERROR,
             node=node,
             subject="gnmi",
-            detail="no report could be collected: the node is down or unreachable",
+            detail=f"no report could be collected: {reason}" if reason else "no report could be collected: the node is down or unreachable",
         )
     if anchor[0] == "underlay":
         _kind, node, peer = anchor
