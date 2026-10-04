@@ -974,12 +974,22 @@ class Resource:
 
     #: Where it lives: ``control A``, ``linecard 1/0`` (a forwarding complex).
     component: str
-    #: ``cpu``, ``memory``, or a datapath table - ``ip-lpm-routes``,
-    #: ``mac-addresses``, ``ecmp-groups``...
+    #: ``cpu``, ``memory``, or a datapath table - ``arp-nd-entries``,
+    #: ``direct-ip-next-hops``, ``indirect-ip-next-hops``, ``ecmp-groups``,
+    #: ``ecmp-members``, ``ip-hosts``, ``mac-addresses``,
+    #: ``ip-lpm-ipv4-routes``, ``dyn-load-balancing-ecmp-groups``... - as
+    #: many as the datapath has counters for. The virtual datapath of a
+    #: container image counts fewer of them than an ASIC does.
     name: str
+    #: As the device reports it, or worked out from *used* and *free* where
+    #: it reports only those.
     used_percent: Optional[int] = None
     used: Optional[int] = None
     free: Optional[int] = None
+    #: The utilization at which the node raises its own alarm for this
+    #: table (``resource-monitoring ... upper-threshold-set``, 90 unless
+    #: configured otherwise); ``None`` where it has none, or did not say.
+    threshold: Optional[int] = None
 
 
 @dataclass(frozen=True)

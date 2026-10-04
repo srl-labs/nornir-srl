@@ -104,7 +104,7 @@ Six reports were added for the layer the overlay depends on, each with a check:
 | `bfd` | `bfd_down` | BFD sessions not up. A far end that has never answered (`remote-discriminator 0`) is called out, since BFD is then usually not enabled there |
 | `isis`, `ospf` | `igp_adjacency_down` | IS-IS adjacencies not up; OSPF neighbours not `full`/`two-way` |
 | | `igp_no_adjacency` | An IGP interface that is up and not passive, with no adjacency: area, level, authentication or MTU mismatch |
-| `resources` | `resource_high` | CPU (5-minute average), memory or a forwarding table at ≥80% (warning) or ≥95% (error) |
+| `resources` | `resource_high` | CPU (5-minute average) or memory at ≥80% (warning) or ≥95% (error). Every forwarding table the datapath counts - ARP/ND entries, direct and indirect next-hops, ECMP groups and members, IP hosts, MAC addresses, LPM routes, dynamic load-balancing groups - is warned about at the threshold the node itself alarms at (`platform resource-monitoring datapath ... upper-threshold-set`, 90% by default), 80% where it says none, and an error from 95% |
 | `es` | `es_df` (extended) | Nodes that elect different designated forwarders for one segment in one network-instance: two leaves both forwarding on a single-active segment |
 | `components` | `hardware_fault` | A fitted card, fan or PSU that is not up, or that the platform health model calls unhealthy |
 | `transceivers` | `optic_dom` | An optic reporting one of its own DOM alarm or warning thresholds as crossed |

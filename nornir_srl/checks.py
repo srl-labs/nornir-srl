@@ -1098,20 +1098,33 @@ def check_resource_high(state: FabricState) -> List[Finding]:
     A full forwarding table is the failure nothing else explains: the route
     is in the RIB, BGP is happy, and the packet is dropped anyway because
     the hardware had no room left to program it.
+
+    Every table the datapath counts is checked - ARP/ND entries, direct and
+    indirect next-hops, ECMP groups and members, IP hosts, MAC addresses,
+    LPM routes, dynamic load-balancing groups - warned about at the
+    threshold the node itself alarms at (``RESOURCE_WARNING`` where it has
+    none) and an error from ``RESOURCE_ERROR``.
     """
     findings = []
     for node, resource in state.items("resources"):
         used = resource.used_percent
-        if used is None or used < RESOURCE_WARNING:
+        # A forwarding table is warned about where the node raises its own
+        # alarm for it, which is the operator's choice; anything else at
+        # fcli's. Full is full either way.
+        threshold = getattr(resource, "threshold", None)
+        warning = threshold if threshold is not None else RESOURCE_WARNING
+        error = max(RESOURCE_ERROR, warning)
+        if used is None or used < warning:
             continue
         counts = f" ({resource.used} used, {resource.free} free)" if resource.used is not None else ""
+        said = f", past the node's {threshold}% threshold" if threshold is not None else ""
         findings.append(
             Finding(
                 check="resource_high",
-                severity=ERROR if used >= RESOURCE_ERROR else WARNING,
+                severity=ERROR if used >= error else WARNING,
                 node=node,
                 subject=f"{resource.component} {resource.name}",
-                detail=f"{used}% in use{counts}",
+                detail=f"{used}% in use{counts}{said}",
             )
         )
     return findings

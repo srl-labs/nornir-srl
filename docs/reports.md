@@ -32,7 +32,7 @@ One registry drives all three surfaces, so a report cannot drift between CLI, MC
 | BFD Sessions | `bfd` | yes | Session state, the protocols protected, failures, diagnostics |
 | IS-IS Adjacencies | `isis` | yes | IS-IS interfaces and their adjacencies, with level, state and flap count |
 | OSPF Neighbors | `ospf` | yes | OSPF interfaces and their neighbours per area |
-| Resources | `resources` | yes | CPU, memory and forwarding-table (ASIC/XDP) utilization |
+| Resources | `resources` | yes | CPU, memory and every forwarding table the datapath counts (ARP/ND, next-hops, ECMP, IP hosts, MACs, LPM routes, DLB groups...), with the node's own alarm threshold in `-o json`/MCP. A container image's virtual datapath counts fewer tables than an ASIC |
 | Hardware | `components` | yes | Control and line cards, fabric modules, fans, power supplies |
 | Transceivers | `transceivers` | yes | Optics with rx/tx power, temperature and the DOM thresholds crossed |
 | ARP Table | `arp` | yes | IPv4 neighbours per sub-interface |

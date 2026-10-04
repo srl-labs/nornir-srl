@@ -13,6 +13,7 @@ rather than a failure.
 
 from __future__ import annotations
 
+import logging
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from ..records import (
@@ -30,6 +31,8 @@ from ..records import (
 )
 from .helpers import as_list, first_payload
 from .routing import _gnmi_path_missing, _suppress_pygnmi_client_logging
+
+logger = logging.getLogger(__name__)
 
 
 def _float(value: Any) -> Optional[float]:
@@ -215,6 +218,7 @@ class HealthMixin:
             self._get_optional("/platform/linecard[slot=*]/forwarding-complex[name=*]/datapath"),
             "platform",
         )
+        thresholds = self._resource_thresholds()
         for card in _dicts(_container(datapath).get("linecard")):
             for complex_ in _dicts(card.get("forwarding-complex")):
                 where = f"linecard {_text(card.get('slot'))}/{_text(complex_.get('name'))}"
@@ -223,18 +227,49 @@ class HealthMixin:
                 for engine in _branch(complex_, "datapath").values():
                     for item in _dicts(_container(engine).get("resource")):
                         used = as_int(item.get("used-percent"))
-                        if used is None and item.get("used-entries") is None:
-                            continue  # a table this datapath does not have
+                        entries, free = as_int(item.get("used-entries")), as_int(item.get("free-entries"))
+                        if used is None and entries is None:
+                            continue  # a table this datapath does not count
+                        if used is None and free is not None and entries + free > 0:
+                            # Some tables report their entries and no
+                            # percentage; a table without one could never
+                            # be found close to full.
+                            used = (entries * 100) // (entries + free)
+                        name = _enum(item.get("name"))
                         resources.append(
                             Resource(
                                 where,
-                                _enum(item.get("name")),
+                                name,
                                 used_percent=used,
-                                used=as_int(item.get("used-entries")),
-                                free=as_int(item.get("free-entries")),
+                                used=entries,
+                                free=free,
+                                threshold=thresholds.get(name),
                             )
                         )
         return {"resources": resources}
+
+    def _resource_thresholds(self) -> Dict[str, int]:
+        """Datapath table -> the utilization the node raises its own alarm at.
+
+        Configuration with its defaults, so asked as ``all``: a ``config``
+        Get answers only what someone configured. Releases before the
+        ``upper-threshold-set`` leaf called it ``rising-threshold-log``.
+        What the thresholds add is where to warn; a node that does not
+        answer for them still has its tables reported, warned about at
+        fcli's own threshold.
+        """
+        try:
+            payload = _payload(self._get_optional("/platform/resource-monitoring/datapath", "all"), "platform")
+        except Exception as exc:  # noqa: BLE001 - only an enrichment of the tables
+            logger.debug("resource thresholds not read: %s", exc)
+            return {}
+        thresholds: Dict[str, int] = {}
+        for engine in _container(payload).values():
+            for item in _dicts(_container(engine).get("resource")):
+                value = as_int(item.get("upper-threshold-set", item.get("rising-threshold-log")))
+                if value is not None:
+                    thresholds[_enum(item.get("name"))] = value
+        return thresholds
 
     def get_components(self) -> Dict[str, Any]:
         """Control and line cards, fabric modules, fans and power supplies.
