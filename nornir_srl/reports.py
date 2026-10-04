@@ -169,7 +169,11 @@ class ParamSpec:
     #: ``text``; ``address`` for one that has to parse as an IP address; ``ni``
     #: for the name of a network-instance, which a surface offers from the
     #: ones the fabric has - its placeholder being the one taken when none is
-    #: chosen.
+    #: chosen. ``config-node`` for a node whose configurations the server
+    #: kept, and ``commit`` for one of the commits it kept a configuration
+    #: after, on the node the report's ``config-node`` parameter names (never
+    #: called ``node``, which a page's URL keeps the inventory scope in): a
+    #: surface offers both from the history.
     kind: str = "text"
     #: True where nothing can be answered without it: a report renders in full
     #: without any of its parameters, but a lens is a question about something.
@@ -205,6 +209,10 @@ class ParamSpec:
                 raise ValueError(
                     f"{self.label}: '{text}' is not an IP address"
                 ) from None
+        if self.kind == "commit":
+            if not text.isdigit():
+                raise ValueError(f"{self.label}: '{text}' is not a commit id")
+            return text
         if self.kind == "choices":
             chosen = [part.strip().lower() for part in text.split(",") if part.strip()]
             unknown = [part for part in chosen if part not in self.choices]

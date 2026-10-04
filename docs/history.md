@@ -73,6 +73,8 @@ What a commit changed is one click away. Every commit on the timeline links to t
 + set / network-instance default protocols bgp group fabric failure-detection enable-bfd false
 ```
 
+On the lens itself, **Node**, **Commit** and **Against** are drop-downs of what the history holds: the nodes with kept configurations, and for the chosen node each kept commit by id, user, comment and time. **Commit** left at *newest* shows the newest kept commit, **Against** left at *the one before* compares with the configuration kept before it; picking an older commit there shows several commits' worth of change at once. The choice is kept in the URL (`#config_diff?host=leaf1&commit=8&against=3`).
+
 The same diffs are available through `GET /api/config/{node}/diff`, `fcli config-history --diff` and MCP `config_diff`. The Ask agent is told to read the diff of a commit that precedes a fault.
 
 ### Set lines

@@ -1986,7 +1986,9 @@ def _commit_links(change: Any) -> Tuple[Link, ...]:
             label="config diff",
             report="config_diff",
             node=change.node,
-            params=(("node", change.node), ("commit", commit)),
+            # 'host', not 'node': a page's URL keeps the nodes a view is
+            # narrowed to under 'node'.
+            params=(("host", change.node), ("commit", commit)),
         ),
     )
 
@@ -2012,7 +2014,7 @@ class ConfigLine:
     comment: str = ""
 
 
-def lens_config_diff(state: FabricState, node: str = "", commit: str = "", against: str = "") -> List[ConfigLine]:
+def lens_config_diff(state: FabricState, host: str = "", commit: str = "", against: str = "") -> List[ConfigLine]:
     """What a commit changed in a node's configuration, from the history the server keeps.
 
     Only the live server keeps configurations, and only with a history.
@@ -2020,7 +2022,7 @@ def lens_config_diff(state: FabricState, node: str = "", commit: str = "", again
     history = state.history
     if history is None or not hasattr(history, "config_diff"):
         return []
-    node = str(node or "").strip()
+    node = str(host or "").strip()
     if not node:
         raise ValueError("give the node whose configuration to compare")
 
@@ -2243,13 +2245,29 @@ LENSES: Tuple[LensSpec, ...] = (
         run=lens_config_diff,
         tree=tree_config_diff,
         params=(
-            ParamSpec(name="node", label="Node", placeholder="leaf1", help="The node whose configuration", required=True),
-            ParamSpec(name="commit", label="Commit", placeholder="newest", help="The commit id; empty for the newest kept"),
+            ParamSpec(
+                # Not 'node': a page's URL keeps the nodes a view is narrowed
+                # to under that name.
+                name="host",
+                label="Node",
+                placeholder="choose a node",
+                help="The node whose configuration",
+                kind="config-node",
+                required=True,
+            ),
+            ParamSpec(
+                name="commit",
+                label="Commit",
+                placeholder="newest",
+                help="The commit whose change to show; the newest kept if none is chosen",
+                kind="commit",
+            ),
             ParamSpec(
                 name="against",
                 label="Against",
                 placeholder="the one before",
-                help="Another commit to compare with, instead of the one before",
+                help="The commit whose configuration to compare with, instead of the one kept before it",
+                kind="commit",
             ),
         ),
         # Only the live server keeps configurations; the CLI has config-history

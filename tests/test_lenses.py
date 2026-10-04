@@ -1300,3 +1300,12 @@ def test_a_minute_of_changes_lists_the_one_that_made_it_red_first():
     (entry,) = card.entries
     assert card.state == entry.state == "down"
     assert [item.label for item in entry.items] == ["ERROR", "OK", ""]
+
+
+def test_no_parameter_is_called_what_a_page_keeps_its_scope_under():
+    """A page's URL keeps the nodes a view is narrowed to as ``node``; a
+    parameter of that name would be read back as the scope instead."""
+    from nornir_srl.reports import REPORTS
+
+    for spec in list(REPORTS) + list(LENSES):
+        assert all(param.name != "node" for param in spec.params), spec.name

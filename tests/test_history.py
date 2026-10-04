@@ -437,7 +437,7 @@ def test_the_config_diff_lens_answers_from_the_kept_configurations(served, histo
     watcher.tick()
 
     lens = get_lens("config_diff")
-    table = store.lens_table(lens, None, {"node": "leaf1", "commit": "2"})
+    table = store.lens_table(lens, None, {"host": "leaf1", "commit": "2"})
     assert [(row["Op"], row["Line"]) for row in table["rows"]] == [
         ("-", "set / interface ethernet-1/1 description one"),
         ("+", "set / interface ethernet-1/1 description two"),
@@ -446,4 +446,4 @@ def test_the_config_diff_lens_answers_from_the_kept_configurations(served, histo
     changes = store.lens_table(get_lens("changes"), None, {"since": "15m"})
     links = [link for card in changes["tree"] for entry in card["entries"] for item in entry["items"] for link in item["links"]]
     assert {"report": "config_diff", "node": "leaf1"}.items() <= links[0].items()
-    assert dict(links[0]["params"]) == {"node": "leaf1", "commit": "2"}
+    assert dict(links[0]["params"]) == {"host": "leaf1", "commit": "2"}

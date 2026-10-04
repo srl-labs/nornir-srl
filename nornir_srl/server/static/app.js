@@ -399,7 +399,8 @@
       name.className = "muted";
       name.textContent = spec.required ? `${spec.label} *` : spec.label;
 
-      const input = spec.kind === "ni" ? document.createElement("select") : document.createElement("input");
+      const chosen = isSelectKind(spec.kind);
+      const input = chosen ? document.createElement("select") : document.createElement("input");
       input.className = "input";
       input.required = Boolean(spec.required);
       if (spec.help) input.title = spec.help;
@@ -407,6 +408,10 @@
         input.dataset.paramKind = "ni";
         input.dataset.paramName = spec.name;
         fillInstanceOptions(input, spec, state.networkInstances);
+      } else if (chosen) {
+        input.dataset.paramKind = spec.kind;
+        input.dataset.paramName = spec.name;
+        fillConfigOptions(input, spec);
       } else {
         input.type = "search";
         input.placeholder = spec.placeholder || "";
@@ -424,6 +429,14 @@
         // Choosing what an unchosen instance already means is choosing nothing.
         if (value && !(spec.kind === "ni" && value === spec.placeholder)) state.reportParams.set(spec.name, value);
         else state.reportParams.delete(spec.name);
+        if (spec.kind === "config-node") {
+          // Commit ids are a node's own: another node's do not carry over.
+          for (const other of specs) if (other.kind === "commit") state.reportParams.delete(other.name);
+          for (const select of dom.reportParams.querySelectorAll("select[data-param-kind='commit']")) {
+            const other = specs.find((candidate) => candidate.name === select.dataset.paramName);
+            if (other) fillConfigOptions(select, other);
+          }
+        }
         updateFilterUI();
         connect();
         syncCurrentVisit();
@@ -433,7 +446,80 @@
       dom.reportParams.append(field);
     }
     if (specs.some((spec) => spec.kind === "ni")) refreshInstanceOptions();
+    if (specs.some((spec) => spec.kind === "config-node" || spec.kind === "commit")) refreshConfigOptions();
   }
+
+  // Parameters chosen from a list rather than typed. A function, not a
+  // constant: it is hoisted, and the parameters are drawn before the code
+  // below them has run.
+  function isSelectKind(kind) {
+    return kind === "ni" || kind === "config-node" || kind === "commit";
+  }
+
+  // The configurations the server kept, by node, newest commit first: what a
+  // node or a commit is chosen from on the Config Diff lens.
+  async function refreshConfigOptions() {
+    try {
+      const res = await fetch("/api/configs");
+      if (!res.ok) return;
+      const byNode = new Map();
+      for (const version of (await res.json()).configs || []) {
+        if (!byNode.has(version.node)) byNode.set(version.node, []);
+        byNode.get(version.node).push(version);
+      }
+      for (const versions of byNode.values()) versions.sort((a, b) => b.commit - a.commit);
+      state.configVersions = byNode;
+    } catch {
+      return;
+    }
+    const specs = (state.report && state.report.params) || [];
+    for (const select of dom.reportParams.querySelectorAll("select[data-param-kind='config-node'], select[data-param-kind='commit']")) {
+      const spec = specs.find((candidate) => candidate.name === select.dataset.paramName);
+      if (spec) fillConfigOptions(select, spec);
+    }
+  }
+
+  function configCommitLabel(version) {
+    const when = version.at ? new Date(version.at * 1000).toLocaleString() : "";
+    const parts = [String(version.commit), version.username || "?"];
+    if (version.comment) parts.push(`'${version.comment}'`);
+    if (when) parts.push(when);
+    return parts.join(" · ");
+  }
+
+  // A node or a commit, chosen from what the history holds. What is chosen
+  // already - from a link, the URL - stays an option even before the list
+  // arrives, or if the history does not hold it: the server says why then.
+  function fillConfigOptions(select, spec) {
+    const chosen = state.reportParams.get(spec.name) || "";
+    const known = state.configVersions || new Map();
+    select.replaceChildren();
+    if (spec.kind === "config-node") {
+      select.append(new Option(known.size ? spec.placeholder || "choose a node" : "no configurations kept yet", ""));
+      const nodes = [...known.keys()].sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
+      if (chosen && !nodes.includes(chosen)) nodes.unshift(chosen);
+      for (const node of nodes) {
+        const count = (known.get(node) || []).length;
+        const option = new Option(node, node);
+        option.title = `${count} configuration${count === 1 ? "" : "s"} kept`;
+        select.append(option);
+      }
+    } else {
+      // Empty means what the lens does without one: the newest, or the one before.
+      select.append(new Option(spec.placeholder || "", ""));
+      const specs = (state.report && state.report.params) || [];
+      const nodeSpec = specs.find((candidate) => candidate.kind === "config-node");
+      const versions = known.get((nodeSpec && state.reportParams.get(nodeSpec.name)) || "") || [];
+      if (chosen && !versions.some((v) => String(v.commit) === chosen)) {
+        select.append(new Option(`${chosen} (not kept)`, chosen));
+      }
+      for (const version of versions) {
+        select.append(new Option(configCommitLabel(version), String(version.commit)));
+      }
+    }
+    select.value = chosen;
+  }
+
 
   // A parameter that takes any number of fixed values - the kinds of change,
   // their severities - as a dropdown of checkboxes. None ticked means all of

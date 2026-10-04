@@ -1141,7 +1141,7 @@ def test_reports_endpoint_lists_the_lenses_as_what_they_are(client):
         "where": ["target"],
         "path": ["source", "destination"],
         "service": ["name"],
-        "config_diff": ["node"],
+        "config_diff": ["host"],
     }
 
 
