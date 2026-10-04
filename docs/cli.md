@@ -58,6 +58,13 @@ Commands:
   service       Shows one service as every node that carries it sees it
   snapshot      Keeps a report as it is now, to compare a fabric against later
   diff          Compares a report against a snapshot, or one node against another
+  config-commits Displays the commits each node logged to its configuration
+  history       Lists what the server's timeline recorded, from its history on disk
+  baseline      Keeps the fabric as it is now as a named baseline
+  baselines     Lists the baselines kept for this fabric
+  drift         Shows how the fabric now differs from a kept baseline
+  config-history Lists the configurations the server kept after each commit, or what one changed
+  running-config Prints each node's running configuration as set lines, secrets redacted
 ```
 
 Two kinds of filter, plus report-specific options:
@@ -121,6 +128,22 @@ Tunnel table with resolved egress interface, next-hop and pushed MPLS label-stac
 ```
 fcli tunnel-table -f type=ldp
 ```
+
+## History and configuration
+
+The CLI reads and writes the same history file `fcli server` keeps, by the same fabric name (see [History](history.md)), so these work with or without a server running:
+
+```bash
+fcli -t topo.clab.yml history --since 7d -k config -k bgp   # what the server recorded
+fcli -t topo.clab.yml baseline before-upgrade --note CHG-1042
+fcli -t topo.clab.yml baselines
+fcli -t topo.clab.yml drift before-upgrade                  # exits non-zero if something stopped working
+fcli -t topo.clab.yml -i node=leaf1 config-history          # the configurations kept after each commit
+fcli -t topo.clab.yml -i node=leaf1 config-history --diff --commit 42
+fcli -t topo.clab.yml -i role=leaf running-config -m 'protocols bgp group'
+```
+
+`baseline` makes the new baseline the one the server compares against (`--keep-only` to only keep it). `drift` compares with the active baseline when given no name. `running-config` reads the configuration live; `config-history` reads what the server kept, so it is empty for a fabric no server has watched with its history on.
 
 ## Debug logging
 

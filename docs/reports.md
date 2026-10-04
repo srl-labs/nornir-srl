@@ -7,6 +7,7 @@ One registry drives all three surfaces, so a report cannot drift between CLI, MC
 | Overview | | yes | Fabric KPIs (nodes, interfaces, BGP sessions) |
 | Topology | | yes | LLDP graph with inferred leaf / spine / DCGW / client tiers |
 | System Info | `sys-info` | yes | Chassis, serial, software version, last boot |
+| Config Commits | `config-commits` | yes | Each node's log of commits to its running configuration: id, user, comment, candidate, status, times |
 | Interface Stats | `ifstats` | yes | Per-interface rates and error/discard counters over the sample; the live table adds the port state |
 | Sub-Interfaces | `subif` | yes | Type, addresses, oper-state |
 | LAGs | `lag` | yes | LAG members and LACP |
@@ -36,7 +37,7 @@ One registry drives all three surfaces, so a report cannot drift between CLI, MC
 | Transceivers | `transceivers` | yes | Optics with rx/tx power, temperature and the DOM thresholds crossed |
 | ARP Table | `arp` | yes | IPv4 neighbours per sub-interface |
 | IPv6 Neighbors | `nd` | yes | ND entries per sub-interface |
-| Checks | `checks` | yes | Fabric sanity checks, worst first - BGP, BFD, IGP, interfaces, LLDP, MTU, EVPN services, ethernet-segments, resources, hardware, optics, flapping; exits non-zero on an error |
+| Checks | `checks` | yes | Fabric sanity checks, worst first - BGP, BFD, IGP, interfaces, LLDP, MTU, BGP and IGP configured differently on the two ends, EVPN services, ethernet-segments, resources, hardware, optics, flapping; exits non-zero on an error |
 
 A getter and the table it renders as are split apart. Every getter-backed report returns records (`nornir_srl/records.py`) — a network-instance with its subinterfaces as a list, a BGP neighbour with each address family as an object carrying its route counts, a bridge-table entry with its destination already read apart into interface, VTEP, VNI or ESI, a route with each next-hop resolved to the interface, tunnel or prefix it leaves through, a BGP route with every path attribute and the route-targets, SoO and tunnel encapsulation read out of its communities, an interface with its subinterfaces and their resolved down reason, an interface's counters with the errors and discards counted over the sample, an LLDP interface with its neighbours, an ARP or ND cache with each entry's time left as a number of seconds, an irb with each address's flags and its ARP/ND settings as fields, a LAG with its members, a tunnel with each next-hop's port and label stack — and the table is declared next to the report as the columns that read a record. `bgp-rib` has one table per family and EVPN route type, and `--detail` only adds columns to it: the records always carry everything. `-o json` and `-o yaml`, like the MCP tools, emit the records rather than the table's cells (`"families": [{"name": "evpn", "received": 74, ...}]` instead of `"evpn Rx/Act/Tx": "74/0/94"`); the table and `-o csv` are unchanged. The checks and lenses read the same records, so nothing downstream parses a cell back apart. What has no table is what no getter produces: the server-only services and dashboards, which the store builds from its streams, the nested `routing-pol`, and `checks`, whose findings are collected fabric-wide.
 

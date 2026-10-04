@@ -17,7 +17,9 @@ It can start with no topology loaded. These tools then pick or switch the fabric
 
 Report tools take the same `inv_filter` and `field_filter` as the CLI (comma-separated `key=value`).
 
-For "what is wrong", `fabric_incidents` is the tool to start with: the checks' findings grouped by root cause. `mark_baseline` and `changes_since_baseline` bracket a change: mark before a maintenance or a config push, then ask what it did.
+For "what is wrong", `fabric_incidents` is the tool to start with: the checks' findings grouped by root cause. `mark_baseline` and `changes_since_baseline` bracket a change: mark before a maintenance or a config push, then ask what it did. The baseline is kept on disk, named, in the fabric's history file shared with `fcli server` and the CLI; `list_baselines` shows the kept ones.
+
+The history tools read what the server recorded, whether or not it is running: `fabric_history` (the timeline, by time, node and kind), `config_history` and `config_diff` (the configuration kept after each commit, and what a commit changed, as set lines). `running_config` reads a node's configuration live, redacted, narrowed by a regex. See [History](history.md).
 
 ## Claude Desktop
 

@@ -51,6 +51,13 @@ The global options are the same as for the CLI, so the server can be pointed at 
 │ --watch-prefix             TEXT     A prefix or address whose route changes  │
 │                                     the timeline reports one by one;         │
 │                                     repeatable                               │
+│ --history/--no-history              Keep the timeline, the baselines and the │
+│                                     configurations on disk, one SQLite file  │
+│                                     per fabric [default: history]            │
+│ --history-dir              PATH     Where the history files are kept         │
+│                                     [default: ~/.local/state/fcli/history]   │
+│ --history-days             FLOAT    Days of changes the history keeps; 0     │
+│                                     keeps them all [default: 30.0]           │
 ╰──────────────────────────────────────────────────────────────────────────────╯
 ```
 
@@ -95,7 +102,9 @@ The server reads the fabric every `--watch-interval` seconds (15 by default) and
 * **A timeline** of what changed: sessions, ports, LLDP neighbours, BFD and IGP adjacencies, DF elections, MAC moves, route counts that halved, nodes that stopped answering, and findings raised and cleared. It feeds the **flapping** check.
 * **Acknowledgements**: **✓ ACK** on an incident's card takes a known problem out of the Overview, the topology badges, colours and summary, with an optional note. It comes back on its own if a new finding joins it, and the acknowledgement ends when the fault clears. **↺ Un-ACK** undoes it. **✓ ACK all** in the Incidents toolbar acknowledges every open incident in the current view at once, with one note. Acks last as long as the server runs; add `--persist-acks` to keep them across restarts.
 * **Route tables and neighbour caches**: one change per underlay route table ("312 changed next-hops, 4 withdrawn …") and a VRF's route count halving, with the default routes, every node's system address and your **watched prefixes** (`--watch-prefix`, or 👁 Watched on the Changes page) reported one by one, ECMP width included; an IP that starts answering from another MAC.
-* **A baseline**: the fabric as it was once the server settled, or whenever you press **📌 Set baseline** on the Changes page. `since: baseline` shows the drift from it, which is what a maintenance window or a config push actually changed.
+* **A baseline**: the fabric as it was once the server settled, or a named one set in the **📌 Baseline** menu on the Changes page, with a note. `since: baseline` shows the drift from it, which is what a maintenance window or a config push actually changed. A baseline that was set is kept and read back after a restart; the menu lists the kept ones to use or delete.
+* **Configurations**: every commit a node logs is on the timeline, with who made it and how many lines it changed, and links to the **Config Diff** lens: the lines it removed and added, as `set / ...` lines with secrets redacted.
+* **History**: all of the above is kept on disk, one SQLite file per fabric, so a restart loses nothing. fcli stopping and starting is on the timeline, and what changed while it was not running is reported when it starts again. See [History](history.md).
 
 ```
 ❯ fcli -t topo.clab.yml incidents          # the same grouping, one shot
@@ -153,7 +162,14 @@ The UI is a client of a small JSON API, which is just as usable from scripts:
 | `GET /api/report/{name}` | One rendered table as JSON |
 | `GET /api/stream/{name}` | The same table, pushed as server-sent events |
 | `GET /api/timeline` | How many changes the timeline holds, and when the latest reading and the baseline were taken |
-| `POST /api/baseline` | Keep the fabric as it is now as the baseline |
+| `POST /api/baseline` | Keep the fabric as it is now as the baseline; takes an optional `{"name": "before-upgrade", "note": "..."}` |
+| `GET /api/baselines` | The kept baselines, and which one is active |
+| `POST /api/baseline/use` | Compare against a kept baseline: `{"name": "..."}`, or `null` for the latest reading |
+| `DELETE /api/baseline/{name}` | Delete a kept baseline |
+| `GET /api/history` | Changes from the history on disk: `since`, `until` (`2h`, `7d` or a Unix time), `node`, `kind`, `limit` |
+| `GET /api/configs` | The configurations kept after each commit (`?node=` for one node) |
+| `GET /api/config/{node}` | One kept configuration as set lines (`?commit=`, the newest by default) |
+| `GET /api/config/{node}/diff` | What a commit changed (`?commit=`, `?against=`) |
 | `GET /api/acks` | The acknowledged findings, with when and the note |
 | `GET /api/watch`; `POST /api/watch`, `POST /api/unwatch` | The watched prefixes; watch or stop watching one: `{"prefix": "10.1.4.16"}` |
 | `POST /api/ack-all` | Acknowledge every open incident: `{"note": "...", "inv_filter": "k=v"}` |

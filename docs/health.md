@@ -54,6 +54,8 @@ The server reads the fabric every `--watch-interval` seconds (15 by default; `0`
 | `routes` | one change per route table (node × network-instance × family) per reading: how many prefixes changed next-hops, were withdrawn or are new, with examples. A warning if half the table or a default route went. The server holds only the `default` table prefix by prefix; every other table is followed by its size, and reported when it halves (a warning) or goes to or from zero |
 | `route` | one of the prefixes that matter changes: the default routes, the host routes to every node's system address (VTEPs, loopbacks) in `default`, and **watched prefixes**. Withdrawn is an error, an ECMP narrowing a warning, installed or widened is ok |
 | `node` | a node stops or starts answering |
+| `config` | a node logs a commit to its running configuration: who made it, the comment, and how many lines it changed. Info, or a warning for a commit that did not complete. Links to the Config Diff lens |
+| `server` | fcli itself stops or starts; a killed server's stop is a warning at the last time it was seen running. See [History](history.md) |
 | `finding` | a finding is raised or cleared, once it has lasted two readings (so a single-sample blip never reaches the timeline) |
 
 Severity reads as `error` (something stopped working), `warning`, `ok` (something recovered) or `info`.
@@ -75,6 +77,8 @@ A watched prefix is matched exactly, in every network-instance, and its next-hop
 The server streams the `default` route table only. The VRF tables of a large fabric are too big to stream and re-read on every reading. A watched prefix outside `default` is instead looked up on every node with a gNMI Get of that prefix, and of the next-hops it names, on each reading. Its next-hops are shown to the address or route they point at, not followed further down to a port. The full tables are still streamed while an IPv4/IPv6 RIB report or a lens that reads them is open.
 
 ## The baseline
+
+With the server's history on (the default), a baseline that was set is kept on disk, named, and read back after a restart; see [History](history.md#baselines-that-last).
 
 A baseline is one reading kept aside as *what good looks like*. It is taken automatically once the server has settled after starting, and again whenever you press **📌 Set baseline** on the Changes page, `POST /api/baseline`, or call the MCP tool `mark_baseline`. **Changes** with `since: baseline` shows the drift from it: the same comparison as the timeline, but between the baseline and now. Use it to see exactly what a maintenance window or a config push did.
 
@@ -102,6 +106,10 @@ Six reports were added for the layer the overlay depends on, each with a check:
 | `es` | `es_df` (extended) | Nodes that elect different designated forwarders for one segment in one network-instance: two leaves both forwarding on a single-active segment |
 | `components` | `hardware_fault` | A fitted card, fan or PSU that is not up, or that the platform health model calls unhealthy |
 | `transceivers` | `optic_dom` | An optic reporting one of its own DOM alarm or warning thresholds as crossed |
+
+## Configuration checks
+
+Two checks compare the two ends of a session or a link: `bgp_peer_mismatch` (an AS one end expects that the other does not run, a session the far end never configured, a family or BFD on one end only) and `igp_peer_mismatch` (the IGP on one end of a link only, an OSPF area or a network type that differs, one end passive). A mismatch is the root of the sessions and adjacencies it keeps down. See [History](history.md#configuration-checks).
 
 ## Containerlab
 
