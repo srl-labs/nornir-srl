@@ -97,6 +97,7 @@
     topoExportDrawio: el("topo-export-drawio"),
     servicesTreeView: el("services-tree-view"),
     pathGraphView: el("path-graph-view"),
+    configDiffView: el("config-diff-view"),
     viewModeBtn: el("view-mode-btn"),
     baselineBtn: el("baseline-btn"),
     baselineWrap: el("baseline-wrap"),
@@ -2693,6 +2694,9 @@
       syncCurrentVisit();
     }
     state.report = report;
+    // Overview and Topology draw themselves without the table's renderer,
+    // so nothing there would hide another report's diff.
+    dom.configDiffView.hidden = true;
     // A report opened from a link, the URL or history is never hidden in a
     // folded group: its group opens.
     if (report.category && state.collapsedGroups.delete(report.category)) saveCollapsedGroups();
@@ -2825,8 +2829,15 @@
     return isLens(report) && report.name === "path";
   }
 
+  // A configuration diff reads best as one: the two configurations side by side.
+  function hasDiffView(report) {
+    return isLens(report) && report.name === "config_diff";
+  }
+
   function viewModes(report) {
-    return hasGraphView(report) ? ["graph", "tree", "table"] : ["tree", "table"];
+    if (hasGraphView(report)) return ["graph", "tree", "table"];
+    if (hasDiffView(report)) return ["diff", "tree", "table"];
+    return ["tree", "table"];
   }
 
   function nextViewMode() {
@@ -2838,7 +2849,107 @@
     const next = nextViewMode();
     if (next === "table") return "📊 Table View";
     if (next === "graph") return "🗺 Path View";
+    if (next === "diff") return "🔀 Diff View";
     return isLens(state.report) ? "🌲 Tree View" : "🌲 Services View";
+  }
+
+  /* --------------------------------------------------------- config diff */
+
+  // What a configuration line sets, without the value it sets it to: an old
+  // and a new line with the same path are one setting changed, drawn side
+  // by side. A leaf-list is printed whole - "leaf [ a b ]" - so its path is
+  // what comes before the bracket.
+  function configLinePath(line) {
+    const text = String(line || "");
+    if (text.endsWith(" ]")) return text.split(" [")[0];
+    const cut = text.lastIndexOf(" ");
+    return cut > 0 ? text.slice(0, cut) : text;
+  }
+
+  // The removed and added lines, in configuration order, as rows of a
+  // two-column diff: a setting that changed is one row with its old line
+  // left and its new line right; one only removed or only added has a gap
+  // on the other side.
+  function configDiffPairs(rows) {
+    const pairs = [];
+    for (let i = 0; i < rows.length; i++) {
+      const row = rows[i];
+      const op = String(row.Op || "");
+      const next = rows[i + 1];
+      if (op === "-" && next && String(next.Op) === "+" && configLinePath(next.Line) === configLinePath(row.Line)) {
+        pairs.push({ old: String(row.Line), new: String(next.Line) });
+        i++;
+      } else if (op === "-") {
+        pairs.push({ old: String(row.Line), new: null });
+      } else {
+        pairs.push({ old: null, new: String(row.Line) });
+      }
+    }
+    return pairs;
+  }
+
+  // One side of a row: the line, with the part that differs from the other
+  // side's line marked, so a changed value stands out in a long path.
+  function configDiffCell(text, other, side) {
+    const cell = document.createElement("div");
+    cell.className = `cdiff-cell cdiff-${side}` + (text === null ? " cdiff-empty" : "");
+    const sign = document.createElement("span");
+    sign.className = "cdiff-sign";
+    sign.textContent = text === null ? "" : side === "old" ? "-" : "+";
+    const code = document.createElement("code");
+    code.className = "cdiff-line";
+    if (text !== null && other !== null) {
+      let start = 0;
+      while (start < text.length && start < other.length && text[start] === other[start]) start++;
+      // Back to the start of the word, so a value is marked whole.
+      while (start > 0 && text[start - 1] !== " ") start--;
+      code.append(document.createTextNode(text.slice(0, start)));
+      const changed = document.createElement("mark");
+      changed.className = "cdiff-word";
+      changed.textContent = text.slice(start);
+      code.append(changed);
+    } else if (text !== null) {
+      code.textContent = text;
+    }
+    cell.append(sign, code);
+    return cell;
+  }
+
+  function renderConfigDiff(rows) {
+    const view = dom.configDiffView;
+    view.replaceChildren();
+    if (!rows.length) {
+      const p = document.createElement("p");
+      p.className = "empty";
+      const missing = missingParams();
+      p.textContent = missing.length
+        ? `Choose ${missing.map((spec) => spec.label.toLowerCase()).join(" and ")} above to compare.`
+        : "No difference: the two configurations are the same.";
+      view.append(p);
+      return;
+    }
+    const first = rows[0];
+    const added = rows.filter((row) => String(row.Op) === "+").length;
+    const head = document.createElement("div");
+    head.className = "cdiff-head";
+    const left = document.createElement("div");
+    left.className = "cdiff-title cdiff-old";
+    left.textContent = first.Against !== "" && first.Against !== null && first.Against !== undefined
+      ? `commit ${first.Against}`
+      : "nothing kept before it";
+    const right = document.createElement("div");
+    right.className = "cdiff-title cdiff-new";
+    right.textContent = `commit ${first.Commit}`;
+    head.append(left, right);
+    const summary = document.createElement("div");
+    summary.className = "cdiff-summary";
+    summary.textContent = `${first.Node || ""}  ·  +${added} -${rows.length - added} lines`;
+    const grid = document.createElement("div");
+    grid.className = "cdiff-grid";
+    for (const pair of configDiffPairs(rows)) {
+      grid.append(configDiffCell(pair.old, pair.new, "old"), configDiffCell(pair.new, pair.old, "new"));
+    }
+    view.append(summary, head, grid);
   }
 
   /* ------------------------------------------------------------- stream */
@@ -5850,8 +5961,21 @@
 
   function renderBody() {
     // Overview and Topology own the main area; a table would be drawn over them.
+    // Only one view draws at a time; the diff view is the one no other
+    // branch below knows to hide.
+    dom.configDiffView.hidden = true;
     if (state.report && isPanelReport(state.report.name)) return;
     const rows = filteredRows();
+
+    if (!state.diff && hasDiffView(state.report) && state.viewMode === "diff") {
+      dom.tableWrap.hidden = true;
+      dom.servicesTreeView.hidden = true;
+      dom.pathGraphView.hidden = true;
+      dom.configDiffView.hidden = false;
+      renderConfigDiff(rows);
+      dom.rowCount.textContent = `${rows.length} line(s) changed`;
+      return;
+    }
 
     // The services tree draws a fabric, not a verdict on two of them, so a
     // comparison is always shown as a table.

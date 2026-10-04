@@ -3403,3 +3403,115 @@ button.pill-jump:hover {
   text-align: left;
   margin-bottom: 4px;
 }
+
+/* ------------------------------------------------- Config Diff: side by side */
+
+.config-diff-wrap {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 16px 20px 24px;
+}
+
+.cdiff-summary {
+  margin-bottom: 8px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.cdiff-head,
+.cdiff-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  column-gap: 2px;
+}
+
+.cdiff-head {
+  position: sticky;
+  top: -16px;
+  z-index: 2;
+  background: var(--bg, var(--panel));
+}
+
+.cdiff-title {
+  padding: 6px 10px;
+  font-size: 12px;
+  font-weight: 700;
+  border-bottom: 2px solid var(--border);
+}
+
+.cdiff-title.cdiff-old {
+  border-bottom-color: var(--err);
+}
+
+.cdiff-title.cdiff-new {
+  border-bottom-color: var(--ok);
+}
+
+.cdiff-grid {
+  border: 1px solid var(--border);
+  border-top: 0;
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+
+.cdiff-cell {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 2px 10px;
+  min-height: 1.6em;
+  border-bottom: 1px solid color-mix(in srgb, var(--border) 50%, transparent);
+}
+
+.cdiff-cell.cdiff-old {
+  background: color-mix(in srgb, var(--err) 10%, transparent);
+}
+
+.cdiff-cell.cdiff-new {
+  background: color-mix(in srgb, var(--ok) 12%, transparent);
+}
+
+.cdiff-cell.cdiff-empty {
+  background: repeating-linear-gradient(
+    -45deg,
+    transparent 0 6px,
+    color-mix(in srgb, var(--border) 35%, transparent) 6px 7px
+  );
+}
+
+.cdiff-sign {
+  flex: 0 0 1ch;
+  font-weight: 700;
+  user-select: none;
+}
+
+.cdiff-old .cdiff-sign {
+  color: var(--err);
+}
+
+.cdiff-new .cdiff-sign {
+  color: var(--ok);
+}
+
+.cdiff-line {
+  white-space: pre-wrap;
+  /* Wrap at the spaces between words; break a word only if it fits nowhere. */
+  overflow-wrap: anywhere;
+  font: inherit;
+  background: none;
+}
+
+.cdiff-word {
+  color: inherit;
+  border-radius: 3px;
+  padding: 0 1px;
+}
+
+.cdiff-old .cdiff-word {
+  background: color-mix(in srgb, var(--err) 30%, transparent);
+}
+
+.cdiff-new .cdiff-word {
+  background: color-mix(in srgb, var(--ok) 32%, transparent);
+}
