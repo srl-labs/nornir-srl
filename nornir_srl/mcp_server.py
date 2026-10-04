@@ -373,6 +373,30 @@ def sys_info(
 
 
 @mcp.tool()
+def config_commits(
+    inv_filter: Optional[str] = None,
+    field_filter: Optional[str] = None,
+) -> str:
+    """Get the log of commits each node made to its running configuration.
+
+    Use this to answer 'did someone change the configuration, and when': a
+    session that went down seconds after a commit points at that commit.
+
+    Returns one object per commit: node, id (increasing per node), status
+    ('complete' for a commit that went through), username, comment, type
+    (the candidate kind: 'shared', 'private', 'exclusive'), session (the
+    candidate's name), started and ended (UTC timestamps). The node keeps a
+    bounded log, so the oldest commits age out.
+
+    Args:
+        inv_filter: Inventory filter as comma-separated key=value pairs (e.g. 'role=leaf').
+        field_filter: Field filter as comma-separated key=value pairs (e.g. 'username=admin').
+            Values are case-insensitive regexes.
+    """
+    return _run_report("config_commits", inv_filter, field_filter)
+
+
+@mcp.tool()
 def bgp_peers(
     inv_filter: Optional[str] = None,
     field_filter: Optional[str] = None,

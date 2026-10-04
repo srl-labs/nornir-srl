@@ -42,12 +42,14 @@ from typing import (
 )
 
 from .checks import REQUIRED_REPORTS
-from .fabric import FabricState, out_of_band, text
+from .fabric import FabricState, as_list, out_of_band, text
 
 #: What a reading to diff is made of: what the checks read, plus the bridge
 #: tables and the neighbour caches, whose entries moving is what a loop, a
 #: duplicate address or a moved host looks like.
-WATCH_REPORTS: Tuple[str, ...] = tuple(dict.fromkeys(REQUIRED_REPORTS + ("mac", "arp", "nd")))
+WATCH_REPORTS: Tuple[str, ...] = tuple(
+    dict.fromkeys(REQUIRED_REPORTS + ("mac", "arp", "nd", "config_commits"))
+)
 
 #: A change that means something stopped working.
 ERROR = "error"
@@ -88,7 +90,9 @@ class Change:
     #: What kind of thing changed: ``bgp``, ``bgp-routes``, ``interface``,
     #: ``lldp``, ``bfd``, ``isis``, ``ospf``, ``es``, ``es-df``, ``mac``,
     #: ``vxlan``, ``routes``, ``ni``, ``ni-itf``, ``ni-rt``, ``hardware``,
-    #: ``optic``, ``node`` or ``finding``.
+    #: ``optic``, ``node``, ``config`` (a commit to the running
+    #: configuration), ``server`` (fcli itself stopping or starting) or
+    #: ``finding``.
     kind: str
     #: Which one, on that node: a peer, a port, a MAC in a network-instance.
     subject: str
@@ -408,8 +412,61 @@ def diff_fabric(
     changes += _diff_routes(old_rib, new_rib, important, at)
     changes += _diff_watched(old_watched, new_watched, at)
     changes += changes_learned
+    changes += _diff_commits(before, after, both, at)
     changes = _fold_instances(changes)
     changes.sort(key=change_order)
+    return changes
+
+
+def commit_detail(commit: Any) -> str:
+    """Who made a commit, how and why, as one line."""
+    parts = [f"by {commit.username or '?'}"]
+    if commit.comment:
+        parts.append(f"'{commit.comment}'")
+    if commit.session and commit.session != "default":
+        parts.append(f"in candidate {commit.session}")
+    if commit.ended or commit.started:
+        parts.append(f"at {commit.ended or commit.started}")
+    return ", ".join(parts)
+
+
+def _diff_commits(
+    before: FabricState, after: FabricState, both: Callable[[str, Sequence[str]], bool], at: float
+) -> List[Change]:
+    """The commits logged on each node since *before*, one change each.
+
+    A node keeps a bounded log, so a commit ageing out of it is not news, and
+    a commit is new only when its id is past every id *before* had: ids only
+    ever grow on a node, until it is rebooted from a configuration file that
+    starts the log afresh, which reads as no news rather than as history
+    rewritten.
+    """
+    changes = []
+    for node in sorted(after.reports.get("config_commits", {})):
+        if not both(node, ("config_commits",)):
+            continue
+        known = [c.id for c in as_list(before.reports["config_commits"].get(node))]
+        if not known:
+            # A log not read yet - its path still being bootstrapped - is not
+            # a node that has just made every commit it remembers.
+            continue
+        newest = max(known)
+        for commit in as_list(after.reports["config_commits"].get(node)):
+            if commit.id <= newest:
+                continue
+            changes.append(
+                Change(
+                    at=at,
+                    node=node,
+                    kind="config",
+                    subject=f"commit {commit.id}",
+                    before=ABSENT,
+                    after=commit.status or "complete",
+                    # A commit that did not go through is the one to read.
+                    severity=INFO if (commit.status or "complete") == "complete" else WARNING,
+                    detail=commit_detail(commit),
+                )
+            )
     return changes
 
 

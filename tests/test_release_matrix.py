@@ -130,7 +130,9 @@ def test_fixtures_exist() -> None:
 #: ``bgp_advertised_routes`` reads the rib-out-post, which no report read when
 #: the recordings before 26.7.2 were taken; 26.7.2 replays it, the older
 #: releases exercise it on a fake device until they are recorded again.
-NOT_YET_RECORDED = frozenset({"bgp_advertised_routes"})
+#: ``config_commits`` reads the commit log, checked by hand on 25.3.2 and
+#: 26.7.2 but not yet in any recording.
+NOT_YET_RECORDED = frozenset({"bgp_advertised_routes", "config_commits"})
 
 
 def test_fixtures_cover_the_report_registry() -> None:

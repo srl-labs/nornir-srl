@@ -287,6 +287,27 @@ class SystemInfo:
     software_version: str = ""
 
 
+@dataclass(frozen=True)
+class ConfigCommit:
+    """One commit to the running configuration, as the node logs it.
+
+    SR Linux keeps a bounded log of its own commits, so the oldest ones age
+    out: the log says who changed the configuration and when, not what.
+    """
+
+    id: int
+    #: ``complete``, or how a commit that did not finish ended.
+    status: str = ""
+    username: str = ""
+    comment: str = ""
+    #: ``shared``, ``private``, ``exclusive``: the candidate it was made in.
+    type: str = ""
+    #: The candidate's name, ``default`` for the shared one.
+    session: str = ""
+    started: str = ""
+    ended: str = ""
+
+
 # --------------------------------------------------------------------------- #
 # lag: link aggregation groups
 # --------------------------------------------------------------------------- #

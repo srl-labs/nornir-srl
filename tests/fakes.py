@@ -415,6 +415,24 @@ SYS_INFO_RESPONSES: Dict[str, List[Dict[str, Any]]] = {
     "/platform/control[slot=A]": [
         {"platform/control[slot=A]": {"software-version": "v24.10.1-492-gabc"}}
     ],
+    # The commit log answers with the container that holds it.
+    "/system/configuration/commit": [
+        {
+            "system/configuration": {
+                "commit": [
+                    {
+                        "id": 1,
+                        "type": "shared",
+                        "name": "default",
+                        "status": "complete",
+                        "username": "admin",
+                        "started": "2026-08-24T08:00:00.000Z",
+                        "ended": "2026-08-24T08:00:01.000Z",
+                    }
+                ]
+            }
+        }
+    ],
 }
 
 #: The paths of the BFD, IGP and platform reports, answered as a node that has

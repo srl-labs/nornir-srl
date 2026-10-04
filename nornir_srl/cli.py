@@ -909,6 +909,15 @@ def sys_info(
 
 
 @app.command()
+def config_commits(
+    ctx: typer.Context,
+    field_filter: Optional[List[str]] = FIELD_FILTER,
+) -> None:
+    """Displays the commits each node logged to its configuration"""
+    run_report(ctx, "config_commits", field_filter)
+
+
+@app.command()
 def bgp_peers(
     ctx: typer.Context,
     field_filter: Optional[List[str]] = FIELD_FILTER,

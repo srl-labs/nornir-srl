@@ -120,6 +120,8 @@ ON_CHANGE_PATHS: FrozenSet[str] = frozenset(
         "/network-instance[name=*]/protocols/bgp/neighbor",
         "/system/name/host-name",
         "/platform/chassis",
+        # The commit log: a line per commit, and nothing in between.
+        "/system/configuration/commit",
         # Route tables: a route is re-sent when it changes, and only then.
         "/network-instance[name=*]/route-table/ipv4-unicast",
         "/network-instance[name=*]/route-table/ipv6-unicast",
@@ -468,6 +470,19 @@ SYS_INFO_TABLE = Table(
         Column("part-number", "part_number"),
         Column("serial-number", "serial_number"),
         Column("software-version", "software_version"),
+    ),
+)
+
+CONFIG_COMMITS_TABLE = Table(
+    columns=(
+        Column("id", "id"),
+        Column("status", "status"),
+        Column("user", "username"),
+        Column("comment", "comment"),
+        Column("session", "session"),
+        Column("type", "type"),
+        Column("started", "started"),
+        Column("ended", "ended"),
     ),
 )
 
@@ -1307,6 +1322,21 @@ REPORTS: List[ReportSpec] = [
         subscribe=(
             SubscriptionSpec("/platform/chassis", datatype="state"),
             SubscriptionSpec("/platform/control[slot=A]", datatype="state"),
+        ),
+    ),
+    ReportSpec(
+        name="config_commits",
+        table=CONFIG_COMMITS_TABLE,
+        resource="config_commits",
+        key_columns=("Node", "id"),
+        title="Config Commits",
+        description="The commits each node logged to its running configuration: "
+        "when, by whom, with which comment. The node keeps a bounded log, so the "
+        "oldest age out.",
+        getter=lambda d: d.get_commits(),
+        category="System",
+        subscribe=(
+            SubscriptionSpec("/system/configuration/commit", datatype="state"),
         ),
     ),
     ReportSpec(
