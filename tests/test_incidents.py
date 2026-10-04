@@ -178,6 +178,37 @@ def test_bgp_sessions_down_fold_whatever_state_or_peer_details_a_reading_catches
     assert {f.detail for f in pattern.findings} == set(details)
 
 
+def test_every_flap_folds_into_one_incident_whatever_flaps():
+    """Sessions, a designated forwarder and a port that keep changing are one
+    thing to look at - the fabric is unsettled - however different each says
+    it is. A flap that is not the root of its incident stays where it is."""
+    lldp: Dict[str, List[LldpInterface]] = {}
+    for n in range(1, 4):
+        lldp.update(cabled("spine1", f"ethernet-1/{n}", f"leaf{n}", "ethernet-1/49"))
+    lldp.update(cabled("spine2", "ethernet-1/9", "leaf9", "ethernet-1/50"))
+    findings = [
+        Finding("flapping", "warning", "spine1", f"default/fe80::{n}%ethernet-1/{n}.0", f"bgp changed {n + 2} times (established / active) in the last 10 minutes")
+        for n in range(1, 3)
+    ] + [
+        Finding("flapping", "warning", "leaf3", "HOST1/macvrf-101", "es-df changed 3 times (192.0.2.12 / none / 192.0.2.14) in the last 10 minutes"),
+        Finding("flapping", "warning", "spine1", "ethernet-1/3", "interface changed 4 times (up / down) in the last 10 minutes"),
+        # Riding on a link that is down: that link is the incident.
+        itf_down("spine2", "ethernet-1/9.0"),
+        Finding("flapping", "warning", "spine2", "ethernet-1/9", "interface changed 5 times (up / down) in the last 10 minutes"),
+    ]
+    incidents = correlate(findings, fabric(lldp=lldp))
+    flapping = [i for i in incidents if i.root.check == "flapping"]
+    assert len(flapping) == 1
+    (folded,) = flapping
+    assert folded.kind == "pattern" and folded.title.startswith("Flapping in ")
+    assert "2 bgp" in folded.explanation and "1 es-df" in folded.explanation and "1 interface" in folded.explanation
+    assert len([f for f in folded.findings if f.check == "flapping"]) == 4
+    down = next(i for i in incidents if i.root.check == "itf_down")
+    assert any(f.check == "flapping" for f in down.findings)
+    # Nothing is lost by folding.
+    assert sorted(incident_findings(incidents), key=repr) == sorted(findings, key=repr)
+
+
 def test_no_finding_is_lost_by_being_grouped():
     findings = [
         itf_down("leaf1", "ethernet-1/1.0"),

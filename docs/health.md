@@ -25,6 +25,10 @@ Within an anchor, the root is chosen by precedence: a node gone, then hardware, 
 
 **Patterns.** The same cause in three or more places, with the same finding and the same detail once names and numbers are taken out, is folded into one incident. For example, *"BFD session down on 16 links: the far end has never answered — is BFD enabled there?"* is one configuration mistake, not sixteen problems. No finding is dropped by grouping, and the incidents together hold all of them.
 
+**Flapping.** Everything that keeps changing state - sessions, ports, LLDP neighbours, designated forwarders, MACs, routes - folds into one incident, *Flapping in N places*, whatever flaps and however many: the fabric is unsettled there, and the card counts what kind of thing is flapping (*22 route, 4 bgp, 4 interface, 4 lldp*). A flap that rides on a bigger fault - a link that is down - stays in that link's incident.
+
+**Since when.** Each incident says when its oldest finding was raised and when its newest was: *first 14:02:11 · last 14:05:40* on the card, and the First and Last columns of the table. The times come from the timeline, so they last across restarts with the history; a finding already there when the server first watched the fabric reads *before* that time. A finding is raised once it has lasted two readings, so a time is up to one watch interval after the fault began.
+
 ## Acknowledging
 
 A known problem, such as a link waiting for a technician or BFD due to be enabled in the next change window, keeps drawing the eye on every page until it is fixed. **✓ ACK** on an incident's card acknowledges it, with an optional note:

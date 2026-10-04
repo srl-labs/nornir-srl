@@ -605,18 +605,63 @@ def _patterns(incidents: List[Incident]) -> List[Incident]:
     """
     by_cause: Dict[Tuple[str, str, str], List[Incident]] = {}
     for incident in incidents:
-        if incident.kind in ("finding", "platform", "segment"):
+        if incident.root.check == FLAPPING:
+            # Whatever keeps changing - a session, a port, a DF, a MAC - is
+            # one thing to look at: the fabric is unsettled there.
+            key = (FLAPPING, "", "")
+        elif incident.kind in ("finding", "platform", "segment"):
             key = ("", incident.id, "")
         else:
             key = (incident.root.check, _template(incident.root.detail, incident.root.check), incident.root.severity)
         by_cause.setdefault(key, []).append(incident)
     folded: List[Incident] = []
     for (check, template, _severity), members in by_cause.items():
+        if check == FLAPPING and len(members) >= 2:
+            folded.append(_flaps(members))
+            continue
         if not check or len(members) < PATTERN_MIN:
             folded.extend(members)
             continue
         folded.append(_pattern(check, template, members))
     return folded
+
+
+#: The check whose incidents fold into one, whatever flaps.
+FLAPPING = "flapping"
+
+
+def _flaps(members: List[Incident]) -> Incident:
+    """Every incident that is something flapping, as one: what flaps, and how much of each.
+
+    A flapping finding says what kind of thing it is about first -
+    ``bgp changed 4 times ...``, ``es-df changed 3 times ...`` - which is
+    what the summary counts.
+    """
+    members = sorted(members, key=lambda i: i.title)
+    flaps = [f for incident in members for f in incident.findings if f.check == FLAPPING]
+    root = max(flaps, key=lambda f: (_SEVERITY_ORDER.get(f.severity, 9) * -1, f.detail))
+    related = tuple(f for incident in members for f in incident.findings if f is not root)
+    kinds: Dict[str, int] = {}
+    for flap in flaps:
+        kind = flap.detail.split(" ", 1)[0] or "?"
+        kinds[kind] = kinds.get(kind, 0) + 1
+    what = ", ".join(f"{count} {kind}" for kind, count in sorted(kinds.items(), key=lambda kv: (-kv[1], kv[0])))
+    nodes = tuple(sorted({node for incident in members for node in incident.nodes}))
+    places = "places" if len({i.kind for i in members}) != 1 else _PLACES.get(members[0].kind, "places")
+    return Incident(
+        id=f"pattern|{FLAPPING}",
+        severity=min((i.severity for i in members), key=lambda s: _SEVERITY_ORDER.get(s, 9)),
+        kind="pattern",
+        title=f"Flapping in {len(members)} {places}",
+        node=root.node,
+        nodes=nodes,
+        root=root,
+        related=related,
+        explanation=(
+            f"Things that keep changing state, on {len(nodes)} node{'s' if len(nodes) != 1 else ''}: "
+            f"{what}. {1 + len(related)} findings in all."
+        ),
+    )
 
 
 def _pattern(check: str, template: str, members: List[Incident]) -> Incident:
