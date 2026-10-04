@@ -41,22 +41,55 @@ pip install git+https://github.com/srl-labs/fcli
 
 ## Docker
 
-The image is [ghcr.io/srl-labs/fcli](https://github.com/srl-labs/fcli/pkgs/container/fcli). Attach it to the containerlab management network, publish port 8080, and bind-mount the topology file:
+The image is [ghcr.io/srl-labs/fcli](https://github.com/srl-labs/fcli/pkgs/container/fcli). Attach it to the containerlab management network, bind-mount the topology file, and mount a volume at `/state` for what fcli keeps on disk:
 
 ```bash
 CLAB_TOPO=topo.clab.yml
 NET=$(grep '^name:' "$CLAB_TOPO" | awk '{print $2}')
 alias fcli="docker run -it --network $NET --rm \
-  -p 8080:8080 \
   -v /etc/hosts:/etc/hosts:ro \
+  -v /etc/localtime:/etc/localtime:ro \
   -v ${PWD}/${CLAB_TOPO}:/topo.yml \
+  -v fcli-state:/state \
   ghcr.io/srl-labs/fcli:latest -t /topo.yml"
 
-fcli server --listen 0.0.0.0
 fcli bgp-peers
+fcli baseline before-upgrade
+fcli drift before-upgrade
 ```
 
-`--listen 0.0.0.0` is required inside Docker so the published port is reachable from the host. Running the container with no arguments drops into a shell.
+For the server, publish its port as well. `--listen 0.0.0.0` is required inside Docker so the published port is reachable from the host:
+
+```bash
+docker run -d --name fcli-server --network $NET \
+  -p 8080:8080 \
+  -v /etc/hosts:/etc/hosts:ro \
+  -v /etc/localtime:/etc/localtime:ro \
+  -v ${PWD}/${CLAB_TOPO}:/topo.yml \
+  -v fcli-state:/state \
+  ghcr.io/srl-labs/fcli:latest -t /topo.yml server --listen 0.0.0.0
+```
+
+Running the container with no arguments drops into a shell. `/etc/localtime` is mounted so times read in the host's timezone rather than UTC.
+
+### What is kept in `/state`
+
+The image sets `XDG_STATE_HOME=/state`, so everything fcli writes to disk lands under `/state/fcli/`: the [history](history.md) (timeline, baselines, configurations), snapshots, learned cabling and saved acknowledgements. Without a volume there, it is in the container's own filesystem and goes when the container does: with `--rm`, the server starts every time as if for the first time, and a baseline kept by `fcli baseline` is gone before `fcli drift` can read it.
+
+A named volume (`fcli-state` above) is the simplest choice. Docker creates it on first use, and every container that mounts it - the server and each one-off CLI run - shares one history. They can use it at the same time: SQLite coordinates them through a shared-memory file, which works between containers on one host.
+
+To share the history with an fcli installed on the host instead, bind-mount the host's directory and run as your own user, so the files stay readable by it (fcli creates them readable by their owner only):
+
+```bash
+docker run -it --rm --network $NET --user $(id -u):$(id -g) \
+  -v /etc/hosts:/etc/hosts:ro \
+  -v /etc/localtime:/etc/localtime:ro \
+  -v ${PWD}/${CLAB_TOPO}:/topo.yml \
+  -v ~/.local/state/fcli:/state/fcli \
+  ghcr.io/srl-labs/fcli:latest -t /topo.yml history
+```
+
+Keep `/state` on a local disk. On a network filesystem (NFS, SMB) the locking SQLite relies on is not dependable.
 
 If the container cannot reach the lab from Docker's default `docker0` bridge, either attach it to the containerlab network as above, or allow inter-network traffic (blocked by default on some hosts):
 
