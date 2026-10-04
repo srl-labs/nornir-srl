@@ -40,6 +40,7 @@ from .fabric import (
     collect_fabric_state as _collect,
     index as _index,
     out_of_band as _out_of_band,
+    parent as _parent,
     text as _text,
 )
 
@@ -877,6 +878,211 @@ def check_igp_no_adjacency(state: FabricState) -> List[Finding]:
 
 
 # --------------------------------------------------------------------------- #
+# configuration: the two ends of one session or one link
+# --------------------------------------------------------------------------- #
+
+
+def _address_owners(state: FabricState) -> Dict[str, str]:
+    """Every address a node has on a subinterface or loopback, and the node."""
+    owners: Dict[str, str] = {}
+    for node, addresses in system_addresses(state).items():
+        for address in addresses:
+            owners.setdefault(address, node)
+    for node, _parent, subif in _subinterfaces(state):
+        for prefix in tuple(subif.ipv4) + tuple(subif.ipv6):
+            owners.setdefault(prefix.split("/", 1)[0], node)
+    return owners
+
+
+def _peer_host(peer: str) -> str:
+    """``fe80::1%ethernet-1/1.0`` and ``10.0.0.1`` as the bare address."""
+    return str(peer or "").split("/", 1)[0].split("%", 1)[0].strip()
+
+
+def _enabled_families(peer: Neighbor) -> Set[str]:
+    return {family.name for family in peer.families if family.enabled}
+
+
+def check_bgp_peer_mismatch(state: FabricState) -> List[Finding]:
+    """Two ends of one BGP session configured not to match.
+
+    Each end is read as configured: the AS it expects from the other, the
+    families it offers, whether BFD protects the session. A session between
+    two nodes of the fabric can be checked from both ends, and what the ends
+    disagree on is the reason it is down - or, for a family or BFD, what it
+    is silently not doing while it is up.
+    """
+    owners = _address_owners(state)
+    addresses: Dict[str, Set[str]] = {}
+    for address, node in owners.items():
+        addresses.setdefault(node, set()).add(address)
+    sessions: Dict[Tuple[str, str], List[Neighbor]] = {}
+    dynamic: Set[Tuple[str, str]] = set()
+    for node, ni, peer in _bgp_neighbors(state):
+        sessions.setdefault((node, ni), []).append(peer)
+        if peer.dynamic:
+            dynamic.add((node, ni))
+
+    findings = []
+    reported: Set[Tuple[str, ...]] = set()
+    for (node, ni), peers in sorted(sessions.items()):
+        for peer in peers:
+            far = owners.get(_peer_host(peer.peer))
+            if far is None or far == node:
+                continue
+            mine = addresses.get(node, set())
+            back = next(
+                (p for p in sessions.get((far, ni), []) if _peer_host(p.peer) in mine),
+                None,
+            )
+            subject = f"{ni}/{peer.peer}"
+            if back is None:
+                # An end that accepts dynamic neighbours only lists a session
+                # once it is up; nothing configured is missing there.
+                # A far end whose sessions were not read says nothing either.
+                if (far, ni) in dynamic or far not in state.nodes("bgp_peers"):
+                    continue
+                if _text(peer.state) == "established":
+                    continue
+                findings.append(
+                    Finding(
+                        check="bgp_peer_mismatch",
+                        severity=ERROR,
+                        node=node,
+                        subject=subject,
+                        detail=f"{far} owns {_peer_host(peer.peer)} but has no session back to {node} in {ni}",
+                    )
+                )
+                continue
+            if peer.peer_as is not None and back.local_as is not None and peer.peer_as != back.local_as:
+                findings.append(
+                    Finding(
+                        check="bgp_peer_mismatch",
+                        severity=ERROR,
+                        node=node,
+                        subject=subject,
+                        detail=f"expects AS {peer.peer_as} from {far}, which runs AS {back.local_as}",
+                    )
+                )
+            pair = (ni,) + tuple(sorted([(node, peer.peer), (far, back.peer)]))
+            if pair in reported:
+                continue
+            reported.add(pair)
+            here, there = _enabled_families(peer), _enabled_families(back)
+            for family in sorted(here ^ there):
+                which, other = (node, far) if family in here else (far, node)
+                findings.append(
+                    Finding(
+                        check="bgp_peer_mismatch",
+                        severity=WARNING,
+                        node=node,
+                        subject=subject,
+                        detail=f"{family} is enabled on {which} only: {other} does not exchange it on this session",
+                    )
+                )
+            if peer.bfd != back.bfd:
+                which = node if peer.bfd else far
+                findings.append(
+                    Finding(
+                        check="bgp_peer_mismatch",
+                        severity=WARNING,
+                        node=node,
+                        subject=subject,
+                        detail=f"BFD protects it on {which} only, so a failure is detected fast on one end",
+                    )
+                )
+    return findings
+
+
+def _igp_ends(state: FabricState) -> Dict[Tuple[str, str], Dict[str, Any]]:
+    """(node, port) -> protocol -> the interface an IGP runs on it as."""
+    ends: Dict[Tuple[str, str], Dict[str, Any]] = {}
+    for report in ("isis", "ospf"):
+        for node, itf in state.items(report):
+            if itf.name.startswith(_IGP_LOOPBACKS):
+                continue
+            ends.setdefault((node, _parent(itf.name)), {})[report] = itf
+    return ends
+
+
+def check_igp_peer_mismatch(state: FabricState) -> List[Finding]:
+    """Two ends of one link configured not to form the IGP adjacency they should.
+
+    Reads both ends of every cable LLDP sees: the IGP running on one end
+    only, an OSPF area that differs, a network type that differs, one end
+    passive. Each of them is an adjacency that does not form, or one that
+    forms and carries less than it should, and none is visible from either
+    end alone.
+    """
+    ends = _igp_ends(state)
+    running = {report: set(state.nodes(report)) for report in ("isis", "ospf")}
+    findings = []
+    compared = set()
+    for link in _adjacencies(state):
+        pair = tuple(sorted([(link.node, link.port), (link.peer, link.peer_port)]))
+        if pair in compared:
+            continue
+        compared.add(pair)
+        (node, port), (far, far_port) = pair
+        near, other = ends.get((node, port), {}), ends.get((far, far_port), {})
+        for report, noun in (("isis", "IS-IS"), ("ospf", "OSPF")):
+            a, b = near.get(report), other.get(report)
+            if a is None and b is None:
+                continue
+            if a is None or b is None:
+                # Only a mismatch where the other end runs the protocol at
+                # all and simply not on this link.
+                only, missing = ((node, port), (far, far_port)) if a is not None else ((far, far_port), (node, port))
+                if missing[0] not in running[report]:
+                    continue
+                itf = a or b
+                findings.append(
+                    Finding(
+                        check="igp_peer_mismatch",
+                        severity=WARNING,
+                        node=only[0],
+                        subject=itf.name,
+                        detail=f"{noun} runs on this end only: {missing[0]} {missing[1]} does not run it",
+                    )
+                )
+                continue
+            if report == "ospf" and a.area != b.area:
+                findings.append(
+                    Finding(
+                        check="igp_peer_mismatch",
+                        severity=ERROR,
+                        node=node,
+                        subject=a.name,
+                        detail=f"OSPF area {a.area} here, {b.area} on {far} {b.name}: no adjacency forms",
+                    )
+                )
+            kind_a = a.circuit_type if report == "isis" else a.interface_type
+            kind_b = b.circuit_type if report == "isis" else b.interface_type
+            if kind_a and kind_b and kind_a != kind_b:
+                findings.append(
+                    Finding(
+                        check="igp_peer_mismatch",
+                        severity=ERROR if report == "isis" else WARNING,
+                        node=node,
+                        subject=a.name,
+                        detail=f"{noun} network type {kind_a} here, {kind_b} on {far} {b.name}",
+                    )
+                )
+            if a.passive != b.passive:
+                which = node if a.passive else far
+                findings.append(
+                    Finding(
+                        check="igp_peer_mismatch",
+                        severity=WARNING,
+                        node=node,
+                        subject=a.name,
+                        detail=f"{noun} is passive on {which} only: no adjacency forms over this link",
+                    )
+                )
+    return findings
+
+
+# --------------------------------------------------------------------------- #
 # the platform
 # --------------------------------------------------------------------------- #
 
@@ -1084,6 +1290,19 @@ CHECKS: Tuple[Check, ...] = (
         title="IGP interfaces that are up but formed no adjacency",
         requires=("isis", "ospf"),
         run=check_igp_no_adjacency,
+    ),
+    Check(
+        name="bgp_peer_mismatch",
+        title="BGP sessions whose two ends are configured not to match",
+        # The addresses say which node the far end of a session is.
+        requires=("bgp_peers", "subif", "ni"),
+        run=check_bgp_peer_mismatch,
+    ),
+    Check(
+        name="igp_peer_mismatch",
+        title="Links whose two ends are configured for different IGP adjacencies",
+        requires=("lldp", "isis", "ospf"),
+        run=check_igp_peer_mismatch,
     ),
     Check(
         name="resource_high",

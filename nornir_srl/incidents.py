@@ -53,8 +53,12 @@ ROOT_PRIORITY: Tuple[str, ...] = (
     "mtu_mismatch",
     "itf_errors",
     "underlay_unreachable",
+    # A configuration that cannot work explains the adjacency or the session
+    # it keeps down.
+    "igp_peer_mismatch",
     "igp_adjacency_down",
     "igp_no_adjacency",
+    "bgp_peer_mismatch",
     "bfd_down",
     "bgp_down",
     "bgp_af_down",
@@ -67,10 +71,19 @@ ROOT_PRIORITY: Tuple[str, ...] = (
 
 #: Checks whose subject is a port or a subinterface.
 _PORT_CHECKS = frozenset(
-    {"itf_down", "itf_errors", "lldp_one_sided", "mtu_mismatch", "optic_dom", "igp_adjacency_down", "igp_no_adjacency"}
+    {
+        "itf_down",
+        "itf_errors",
+        "lldp_one_sided",
+        "mtu_mismatch",
+        "optic_dom",
+        "igp_adjacency_down",
+        "igp_no_adjacency",
+        "igp_peer_mismatch",
+    }
 )
 #: Checks whose subject is ``<ni>/<peer address>``.
-_SESSION_CHECKS = frozenset({"bgp_down", "bgp_af_down", "bgp_no_routes", "bfd_down"})
+_SESSION_CHECKS = frozenset({"bgp_down", "bgp_af_down", "bgp_no_routes", "bfd_down", "bgp_peer_mismatch"})
 #: Checks about the node itself rather than about anything on it.
 _PLATFORM_CHECKS = frozenset({"hardware_fault", "resource_high"})
 #: Flap kinds whose subject is a port or subinterface.
@@ -91,6 +104,8 @@ _NOUNS = {
     "bfd_down": ("BFD session down", "BFD sessions down"),
     "bgp_down": ("BGP session down", "BGP sessions down"),
     "bgp_af_down": ("BGP family down", "BGP families down"),
+    "bgp_peer_mismatch": ("BGP configuration mismatch", "BGP configuration mismatches"),
+    "igp_peer_mismatch": ("IGP configuration mismatch", "IGP configuration mismatches"),
     "bgp_no_routes": ("BGP family without routes", "BGP families without routes"),
     "es_df": ("ethernet-segment problem", "ethernet-segment problems"),
     "flapping": ("flap", "flaps"),
