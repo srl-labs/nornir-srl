@@ -287,6 +287,27 @@ class SystemInfo:
     software_version: str = ""
 
 
+@dataclass(frozen=True)
+class ConfigCommit:
+    """One commit to the running configuration, as the node logs it.
+
+    SR Linux keeps a bounded log of its own commits, so the oldest ones age
+    out: the log says who changed the configuration and when, not what.
+    """
+
+    id: int
+    #: ``complete``, or how a commit that did not finish ended.
+    status: str = ""
+    username: str = ""
+    comment: str = ""
+    #: ``shared``, ``private``, ``exclusive``: the candidate it was made in.
+    type: str = ""
+    #: The candidate's name, ``default`` for the shared one.
+    session: str = ""
+    started: str = ""
+    ended: str = ""
+
+
 # --------------------------------------------------------------------------- #
 # lag: link aggregation groups
 # --------------------------------------------------------------------------- #
@@ -953,12 +974,22 @@ class Resource:
 
     #: Where it lives: ``control A``, ``linecard 1/0`` (a forwarding complex).
     component: str
-    #: ``cpu``, ``memory``, or a datapath table - ``ip-lpm-routes``,
-    #: ``mac-addresses``, ``ecmp-groups``...
+    #: ``cpu``, ``memory``, or a datapath table - ``arp-nd-entries``,
+    #: ``direct-ip-next-hops``, ``indirect-ip-next-hops``, ``ecmp-groups``,
+    #: ``ecmp-members``, ``ip-hosts``, ``mac-addresses``,
+    #: ``ip-lpm-ipv4-routes``, ``dyn-load-balancing-ecmp-groups``... - as
+    #: many as the datapath has counters for. The virtual datapath of a
+    #: container image counts fewer of them than an ASIC does.
     name: str
+    #: As the device reports it, or worked out from *used* and *free* where
+    #: it reports only those.
     used_percent: Optional[int] = None
     used: Optional[int] = None
     free: Optional[int] = None
+    #: The utilization at which the node raises its own alarm for this
+    #: table (``resource-monitoring ... upper-threshold-set``, 90 unless
+    #: configured otherwise); ``None`` where it has none, or did not say.
+    threshold: Optional[int] = None
 
 
 @dataclass(frozen=True)

@@ -21,7 +21,9 @@ from starlette.routing import Mount, Route
 from starlette.staticfiles import StaticFiles
 
 from .. import __version__
+from ..changes import as_row, parse_since
 from ..diff import diff_nodes, diff_tables
+from ..history import DEFAULT_RETENTION_DAYS, HistoryError, HistoryStore
 from ..lenses import LENSES_BY_NAME, coerce_lens_params, lenses_for
 from ..reports import SERVER, ReportSpec, coerce_params, get_report, reports_for
 from .agent import NO_PROVIDER, ChatService
@@ -195,6 +197,30 @@ class SuppressCancelledErrorMiddleware:
             pass
 
 
+async def _optional_json(request: Request) -> Optional[Dict[str, Any]]:
+    """A request's JSON object body, ``{}`` when it has none, ``None`` when it is not one."""
+    raw = await request.body()
+    if not raw.strip():
+        return {}
+    try:
+        body = json.loads(raw)
+    except ValueError:
+        return None
+    return body if isinstance(body, dict) else None
+
+
+def _when(raw: Optional[str]) -> Optional[float]:
+    """``2h`` ago, ``1d`` ago, or a Unix time; ``None`` for nothing."""
+    if raw in (None, ""):
+        return None
+    try:
+        value = float(raw)
+    except ValueError:
+        return parse_since(raw)
+    # A bare number this large is a Unix time, not a number of minutes.
+    return value if value > 1e9 else parse_since(raw)
+
+
 def create_app(
     nornir: Nornir,
     *,
@@ -206,14 +232,23 @@ def create_app(
     restart_debounce: float = 1.0,
     connect_retry_interval: float = 30.0,
     topo_name: Optional[str] = None,
+    fabric_source: Optional[str] = None,
     snapshot_dir: Optional[Path] = None,
     watch_interval: float = 0.0,
     persist_acks: bool = False,
     watch_prefixes: Sequence[str] = (),
     chat_client_factory: Optional[Callable[[], Any]] = None,
     jsonrpc_call: Optional[Callable[..., Any]] = None,
+    history: bool = True,
+    history_dir: Optional[Path] = None,
+    retention_days: float = DEFAULT_RETENTION_DAYS,
 ) -> Starlette:
-    """Build the fcli server application around an initialized Nornir inventory."""
+    """Build the fcli server application around an initialized Nornir inventory.
+
+    With *history* and a *watch_interval*, the timeline, the baselines and
+    the configurations the nodes commit are kept on disk, one SQLite file per
+    fabric in *history_dir* (beside the snapshots, by default).
+    """
     snapshot_store = SnapshotStore(snapshot_dir)
     # The cables are kept beside the snapshots, one file per fabric, so a
     # server restarted during an outage still knows what the down link was.
@@ -222,8 +257,18 @@ def create_app(
         if watch_interval > 0
         else None
     )
+    history_store: Optional[HistoryStore] = None
+    if history and watch_interval > 0:
+        try:
+            history_store = HistoryStore.for_fabric(
+                topo_name or "fabric", history_dir or snapshot_store.directory.parent / "history"
+            )
+        except (HistoryError, OSError) as exc:
+            logger.warning("running without a history: %s", exc)
     store = FabricStore(
         nornir,
+        history=history_store,
+        retention_days=retention_days,
         sample_interval=sample_interval,
         resync_interval=resync_interval,
         workers=workers,
@@ -272,6 +317,9 @@ def create_app(
             {
                 "version": __version__,
                 "topo_name": store.topo_name,
+                # Where the fabric's name came from: the lab, the Nornir config
+                # or the command line, so the badge says what it names.
+                "fabric_source": fabric_source or ("clab" if store.topo_name else None),
                 # The lenses are offered alongside the reports, marked as what
                 # they are: a question with arguments, run rather than streamed.
                 "reports": [r.as_dict() for r in reports_for(SERVER)]
@@ -376,10 +424,100 @@ def create_app(
             return JSONResponse({"error": str(exc)}, status_code=400)
         return JSONResponse({"watched": store.timeline.watched()})
 
-    async def baseline(_request: Request) -> Response:
-        """Keep the fabric as it is now as the baseline it is compared against."""
-        status = await anyio.to_thread.run_sync(store.set_baseline)
+    async def baseline(request: Request) -> Response:
+        """Keep the fabric as it is now as the baseline it is compared against.
+
+        Takes an optional ``{"name": "before-upgrade", "note": "..."}``.
+        """
+        body = await _optional_json(request)
+        if body is None:
+            return JSONResponse({"error": "invalid JSON body"}, status_code=400)
+        name, note = body.get("name"), body.get("note") or ""
+        if name is not None and not isinstance(name, str) or not isinstance(note, str):
+            return JSONResponse({"error": "name and note must be strings"}, status_code=400)
+        try:
+            status = await anyio.to_thread.run_sync(store.set_baseline, name, note)
+        except ValueError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400)
         return JSONResponse(status)
+
+    async def baselines(_request: Request) -> Response:
+        """The baselines kept, and which one the fabric is compared against."""
+        return JSONResponse(await anyio.to_thread.run_sync(store.baselines))
+
+    async def baseline_use(request: Request) -> Response:
+        """Compare against a kept baseline: ``{"name": "..."}``, or ``null`` for the latest reading."""
+        body = await _optional_json(request)
+        if body is None or "name" not in body:
+            return JSONResponse({"error": "give the 'name' of a baseline, or null"}, status_code=400)
+        try:
+            return JSONResponse(await anyio.to_thread.run_sync(store.use_baseline, body["name"]))
+        except KeyError as exc:
+            return JSONResponse({"error": exc.args[0]}, status_code=404)
+
+    async def baseline_delete(request: Request) -> Response:
+        try:
+            return JSONResponse(await anyio.to_thread.run_sync(store.delete_baseline, request.path_params["name"]))
+        except KeyError as exc:
+            return JSONResponse({"error": exc.args[0]}, status_code=404)
+
+    async def history_changes(request: Request) -> Response:
+        """Changes from the history on disk, beyond what the timeline holds in memory.
+
+        Query: ``since`` and ``until`` (``2h``, ``1d``, or a Unix time),
+        ``node`` and ``kind`` (comma-separated), ``limit`` (default 1000).
+        """
+        if store.history is None:
+            return JSONResponse({"error": "the server runs without a history"}, status_code=404)
+        query = request.query_params
+        try:
+            since = _when(query.get("since"))
+            until = _when(query.get("until"))
+            limit = int(query.get("limit") or 1000)
+        except ValueError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400)
+        nodes = [n for n in (query.get("node") or "").split(",") if n] or None
+        kinds = [k for k in (query.get("kind") or "").split(",") if k] or None
+        found = await anyio.to_thread.run_sync(
+            functools.partial(store.history.changes, since=since, until=until, nodes=nodes, kinds=kinds, limit=limit)
+        )
+        return JSONResponse({"changes": [{"at": c.at, **as_row(c)} for c in found]})
+
+    async def config_versions(request: Request) -> Response:
+        """The configurations kept after each commit: ``?node=leaf1`` for one node."""
+        node = request.query_params.get("node") or None
+        return JSONResponse({"configs": await anyio.to_thread.run_sync(store.config_versions, node)})
+
+    def _commit(raw: Optional[str]) -> Optional[int]:
+        if raw in (None, ""):
+            return None
+        try:
+            return int(raw)
+        except ValueError:
+            raise ValueError(f"'{raw}' is not a commit id") from None
+
+    async def config_text(request: Request) -> Response:
+        """One node's configuration after a commit (``?commit=``, the newest by default), as set lines."""
+        try:
+            commit = _commit(request.query_params.get("commit"))
+            result = await anyio.to_thread.run_sync(store.config_text, request.path_params["node"], commit)
+        except ValueError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400)
+        except KeyError as exc:
+            return JSONResponse({"error": exc.args[0]}, status_code=404)
+        return JSONResponse(result)
+
+    async def config_diff(request: Request) -> Response:
+        """What a commit changed: ``?commit=`` (the newest by default), ``?against=`` another commit."""
+        try:
+            commit = _commit(request.query_params.get("commit"))
+            against = _commit(request.query_params.get("against"))
+            result = await anyio.to_thread.run_sync(store.config_diff, request.path_params["node"], commit, against)
+        except ValueError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400)
+        except KeyError as exc:
+            return JSONResponse({"error": exc.args[0]}, status_code=404)
+        return JSONResponse(result)
 
     def streamable_report(name: str) -> ReportSpec:
         """The named report, provided the server is able to stream it."""
@@ -616,6 +754,13 @@ def create_app(
         Route("/api/topology", topology),
         Route("/api/timeline", timeline),
         Route("/api/baseline", baseline, methods=["POST"]),
+        Route("/api/baselines", baselines),
+        Route("/api/baseline/use", baseline_use, methods=["POST"]),
+        Route("/api/baseline/{name}", baseline_delete, methods=["DELETE"]),
+        Route("/api/history", history_changes),
+        Route("/api/configs", config_versions),
+        Route("/api/config/{node}", config_text),
+        Route("/api/config/{node}/diff", config_diff),
         Route("/api/acks", acks),
         Route("/api/watch", watched),
         Route("/api/watch", watch_change, methods=["POST"]),
@@ -660,10 +805,14 @@ def serve(
     idle_timeout: float = 900.0,
     log_level: str = "info",
     topo_name: Optional[str] = None,
+    fabric_source: Optional[str] = None,
     snapshot_dir: Optional[Path] = None,
     watch_interval: float = 15.0,
     persist_acks: bool = False,
     watch_prefixes: Sequence[str] = (),
+    history: bool = True,
+    history_dir: Optional[Path] = None,
+    retention_days: float = DEFAULT_RETENTION_DAYS,
 ) -> None:
     """Run the fcli server with uvicorn (blocking)."""
     import uvicorn
@@ -676,10 +825,14 @@ def serve(
         workers=workers,
         idle_timeout=idle_timeout,
         topo_name=topo_name,
+        fabric_source=fabric_source,
         snapshot_dir=snapshot_dir,
         watch_interval=watch_interval,
         persist_acks=persist_acks,
         watch_prefixes=watch_prefixes,
+        history=history,
+        history_dir=history_dir,
+        retention_days=retention_days,
     )
     store = app.store
     config = uvicorn.Config(

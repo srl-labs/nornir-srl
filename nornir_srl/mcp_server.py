@@ -56,6 +56,9 @@ NORNIR_DEFAULT_CONFIG = clab.NORNIR_DEFAULT_CONFIG
 
 # These hold the initialized nornir instance and persistent temp files
 _nornir_instance: Optional[Nornir] = None
+#: The loaded fabric's name, as the server names its history file: the
+#: containerlab topology's name, or None for a Nornir config.
+_fabric_name: Optional[str] = None
 _temp_files: List[Any] = []  # prevent GC of NamedTemporaryFile objects
 
 
@@ -78,8 +81,10 @@ def _init_nornir_from_topo(
     gnmi_port: int = SRL_DEFAULT_GNMI_PORT,
 ) -> Nornir:
     """Initialize Nornir from a containerlab topology file."""
+    global _fabric_name
     with open(topo_file, "r") as f:
         topo = yaml.safe_load(os.path.expandvars(f.read()))
+    _fabric_name = str(topo.get("name") or "") or None
 
     hosts = clab.srl_hosts(topo)
     groups = clab.srl_groups(gnmi_port, cert_file)
@@ -106,6 +111,8 @@ def _init_nornir_from_topo(
 
 def _init_nornir_from_config(config_file: str) -> Nornir:
     """Initialize Nornir from a nornir config file."""
+    global _fabric_name
+    _fabric_name = None
     return InitNornir(config_file=config_file)
 
 
@@ -370,6 +377,30 @@ def sys_info(
             (e.g. 'state=up'). Values are case-insensitive regexes.
     """
     return _run_report("sys_info", inv_filter, field_filter)
+
+
+@mcp.tool()
+def config_commits(
+    inv_filter: Optional[str] = None,
+    field_filter: Optional[str] = None,
+) -> str:
+    """Get the log of commits each node made to its running configuration.
+
+    Use this to answer 'did someone change the configuration, and when': a
+    session that went down seconds after a commit points at that commit.
+
+    Returns one object per commit: node, id (increasing per node), status
+    ('complete' for a commit that went through), username, comment, type
+    (the candidate kind: 'shared', 'private', 'exclusive'), session (the
+    candidate's name), started and ended (UTC timestamps). The node keeps a
+    bounded log, so the oldest commits age out.
+
+    Args:
+        inv_filter: Inventory filter as comma-separated key=value pairs (e.g. 'role=leaf').
+        field_filter: Field filter as comma-separated key=value pairs (e.g. 'username=admin').
+            Values are case-insensitive regexes.
+    """
+    return _run_report("config_commits", inv_filter, field_filter)
 
 
 @mcp.tool()
@@ -1145,37 +1176,54 @@ def fabric_incidents(inv_filter: Optional[str] = None) -> str:
 _baseline: Dict[str, Any] = {}
 
 
+def _history() -> Any:
+    """The loaded fabric's history file, shared with fcli server and the CLI."""
+    from .oneshot import open_history  # noqa: PLC0415
+
+    return open_history(_fabric_name)
+
+
 @mcp.tool()
-def mark_baseline(inv_filter: Optional[str] = None) -> str:
+def mark_baseline(inv_filter: Optional[str] = None, name: Optional[str] = None, note: Optional[str] = None) -> str:
     """Remember the fabric as it is now, to compare it against later.
 
     Call it before a change - a maintenance, a config push, a test - and call
     changes_since_baseline afterwards to see exactly what the change did:
     sessions and ports that went down or came up, LLDP neighbours lost, DF
-    elections that moved, MACs that moved, route counts that fell, findings
-    raised and cleared. The baseline lives as long as this MCP server does,
-    and is replaced by the next call.
+    elections that moved, MACs that moved, route counts that fell, commits
+    made, findings raised and cleared.
 
-    Returns when the baseline was taken, how many nodes it covers, and the
-    findings the checks had at that point.
+    The baseline is kept on disk under *name* in the fabric's history, the
+    same file fcli server keeps: it outlives this MCP server, list_baselines
+    shows it, and it becomes the baseline the web UI compares against.
+
+    Returns when the baseline was taken, its name, how many nodes it covers,
+    and the findings the checks had at that point.
 
     Args:
         inv_filter: Inventory filter as comma-separated key=value pairs. The
             comparison later covers the nodes both readings have in common.
+        name: What to keep it as, e.g. 'before-upgrade' (default 'baseline';
+            letters, digits, '.', '_' and '-').
+        note: Why it was taken: a change ticket, a maintenance window.
     """
     import time as _time  # noqa: PLC0415
 
+    from .oneshot import keep_baseline  # noqa: PLC0415
 
     i_filter, _ = _parse_filters(inv_filter, None)
     nornir = get_nornir()
     target = nornir.filter(**i_filter) if i_filter else nornir
-    state = collect_lens_state(target, WATCH_REPORTS)
-    findings = run_checks(state)
+    try:
+        saved, state, findings = keep_baseline(_history(), target, name or "baseline", note=note or "")
+    except ValueError as exc:
+        return json.dumps({"error": str(exc)}, indent=2)
     _baseline.clear()
-    _baseline.update(at=_time.time(), state=state, findings=findings, inv_filter=inv_filter)
+    _baseline.update(at=saved.at, state=state, findings=findings, inv_filter=inv_filter, name=saved.name)
     return json.dumps(
         {
-            "baseline_at": _time.strftime("%Y-%m-%dT%H:%M:%S", _time.localtime(_baseline["at"])),
+            "baseline_at": _time.strftime("%Y-%m-%dT%H:%M:%S", _time.localtime(saved.at)),
+            "name": saved.name,
             "nodes": len(target.inventory.hosts),
             "findings": len(findings),
             "not_collected": [
@@ -1188,19 +1236,46 @@ def mark_baseline(inv_filter: Optional[str] = None) -> str:
 
 
 @mcp.tool()
-def changes_since_baseline(watch_prefixes: Optional[str] = None) -> str:
-    """What changed in the fabric since mark_baseline was called.
+def list_baselines() -> str:
+    """The baselines kept for the loaded fabric, newest first.
 
-    Reads the fabric again, over the same nodes, and compares it with the
-    baseline. Only differences are returned, worst first: an empty list means
-    nothing the reports can see has changed.
+    Kept by mark_baseline, by 'Set baseline' in fcli server's web UI, or by
+    'fcli baseline' - they share one history file per fabric. 'active' is
+    the one changes_since_baseline compares against when given no name.
 
-    Returns {"baseline_at": ..., "changes": [...]}, each change with:
+    Returns {"active": name, "baselines": [{name, taken, nodes, findings, note}]}.
+    """
+    import time as _time  # noqa: PLC0415
+
+    history = _history()
+    return json.dumps(
+        {
+            "active": history.get_meta("baseline"),
+            "baselines": [
+                {**r.as_dict(), "taken": _time.strftime("%Y-%m-%dT%H:%M:%S", _time.localtime(r.at))}
+                for r in history.readings()
+            ],
+        },
+        indent=2,
+    )
+
+
+@mcp.tool()
+def changes_since_baseline(watch_prefixes: Optional[str] = None, name: Optional[str] = None) -> str:
+    """What changed in the fabric since a baseline was taken.
+
+    Reads the fabric again and compares it with the baseline: the one
+    mark_baseline took in this session, or the one kept under *name*, or the
+    fabric's active baseline. Only differences are returned, worst first: an
+    empty list means nothing the reports can see has changed.
+
+    Returns {"baseline_at": ..., "name": ..., "changes": [...]}, each change with:
         time, node, kind ('bgp', 'bgp-routes', 'interface', 'lldp', 'bfd',
             'isis', 'ospf', 'es', 'es-df', 'ni', 'ni-itf', 'ni-rt', 'mac',
-            'routes', 'hardware', 'optic', 'arp', 'nd', 'route' or 'finding'),
+            'routes', 'hardware', 'optic', 'arp', 'nd', 'route', 'config'
+            (a commit, with who made it) or 'finding'),
             subject (the peer, port, network-instance, MAC, address, route
-            table or prefix, or finding),
+            table or prefix, commit, or finding),
         before, after (empty where it did not exist on that side),
         severity ('error' something stopped working, 'warning', 'ok' something
             recovered, 'info' something new or gone that was not working
@@ -1214,33 +1289,187 @@ def changes_since_baseline(watch_prefixes: Optional[str] = None) -> str:
     Args:
         watch_prefixes: Comma-separated prefixes or addresses to report one by
             one as well, e.g. '10.1.4.16,6.6.6.1/32'.
+        name: A kept baseline to compare with (see list_baselines); omit for
+            the one taken in this session, or the fabric's active one.
     """
     import time as _time  # noqa: PLC0415
 
     from .changes import as_row, diff_fabric, diff_findings, normalize_prefix  # noqa: PLC0415
+    from .oneshot import drift  # noqa: PLC0415
 
-    if not _baseline:
-        return json.dumps({"error": "no baseline: call mark_baseline first"}, indent=2)
-    i_filter, _ = _parse_filters(_baseline.get("inv_filter"), None)
-    nornir = get_nornir()
-    target = nornir.filter(**i_filter) if i_filter else nornir
-    state = collect_lens_state(target, WATCH_REPORTS)
-    now = _time.time()
     try:
         watched = [normalize_prefix(p) for p in (watch_prefixes or "").split(",") if p.strip()]
     except ValueError as exc:
         return json.dumps({"error": str(exc)}, indent=2)
-    changes = diff_fabric(_baseline["state"], state, at=now, watched=watched) + diff_findings(
-        _baseline["findings"], run_checks(state), at=now
-    )
+    nornir = get_nornir()
+    if _baseline and (name is None or name == _baseline.get("name")):
+        i_filter, _ = _parse_filters(_baseline.get("inv_filter"), None)
+        target = nornir.filter(**i_filter) if i_filter else nornir
+        state = collect_lens_state(target, WATCH_REPORTS)
+        now = _time.time()
+        changes = diff_fabric(_baseline["state"], state, at=now, watched=watched) + diff_findings(
+            _baseline["findings"], run_checks(state), at=now
+        )
+        at, used = _baseline["at"], _baseline.get("name")
+    else:
+        try:
+            saved, changes = drift(_history(), nornir, name, watched=watched)
+        except KeyError as exc:
+            return json.dumps({"error": f"{exc.args[0]}: call mark_baseline first"}, indent=2)
+        at, used = saved.at, saved.name
     return json.dumps(
         {
-            "baseline_at": _time.strftime("%Y-%m-%dT%H:%M:%S", _time.localtime(_baseline["at"])),
+            "baseline_at": _time.strftime("%Y-%m-%dT%H:%M:%S", _time.localtime(at)),
+            "name": used,
             "changes": [as_row(change) for change in changes],
         },
         indent=2,
         default=str,
     )
+
+
+@mcp.tool()
+def fabric_history(
+    since: str = "1d",
+    node: Optional[str] = None,
+    kind: Optional[str] = None,
+    limit: int = 200,
+) -> str:
+    """What fcli server's timeline recorded, read from its history on disk.
+
+    Use this for 'what happened overnight', 'when did leaf3 last flap', 'who
+    committed what this week': the server writes every change it sees to the
+    fabric's history file, including while no one is looking, and this reads
+    it back - the server need not be running. Empty if it never watched this
+    fabric.
+
+    Returns {"changes": [...]}, newest first, each with time, node, kind,
+    subject, before, after, severity and detail, as changes_since_baseline.
+    Kinds include 'config' (a commit: who, comment, and how many lines it
+    changed) and 'server' (fcli itself stopping or starting: nothing was
+    watched in between, and changes found on restart say 'while fcli was
+    not running').
+
+    Args:
+        since: How far back: '15m', '2h', '7d' (default '1d').
+        node: Comma-separated node names, to narrow it down.
+        kind: Comma-separated kinds, e.g. 'config,bgp'.
+        limit: At most this many changes (default 200).
+    """
+    from .changes import as_row, parse_since  # noqa: PLC0415
+
+    try:
+        start = parse_since(since)
+    except ValueError as exc:
+        return json.dumps({"error": str(exc)}, indent=2)
+    nodes = [n.strip() for n in (node or "").split(",") if n.strip()] or None
+    kinds = [k.strip() for k in (kind or "").split(",") if k.strip()] or None
+    found = _history().changes(since=start, nodes=nodes, kinds=kinds, limit=limit)
+    return json.dumps({"changes": [as_row(c) for c in found]}, indent=2, default=str)
+
+
+@mcp.tool()
+def config_history(node: Optional[str] = None) -> str:
+    """The configurations fcli server kept after each commit, newest first.
+
+    The server reads a node's running configuration after every commit it
+    sees and keeps it, redacted. Use config_diff to see what one changed.
+
+    Returns {"configs": [{node, commit, at, username, comment}]}.
+
+    Args:
+        node: One node's name; omit for every node.
+    """
+    import time as _time  # noqa: PLC0415
+
+    versions = _history().config_versions(node)
+    return json.dumps(
+        {
+            "configs": [
+                {**{k: v for k, v in version.as_dict().items() if k != "digest"},
+                 "at": _time.strftime("%Y-%m-%dT%H:%M:%S", _time.localtime(version.at))}
+                for version in versions
+            ]
+        },
+        indent=2,
+    )
+
+
+@mcp.tool()
+def config_diff(node: str, commit: Optional[int] = None, against: Optional[int] = None) -> str:
+    """What one commit changed in a node's configuration, as SR Linux set lines.
+
+    Compares the configuration fcli server kept after *commit* with the one
+    kept before it (or after *against*). Secrets are redacted to digests: a
+    changed password shows as changed, never as what it was.
+
+    Returns {"node", "commit", "against", "added", "removed", "summary",
+    "lines": [{"op": "+"|"-", "line": "set / ..."}]}.
+
+    Args:
+        node: The node's name.
+        commit: The commit id (see config_history); omit for the newest kept.
+        against: Another commit to compare with, instead of the one before.
+    """
+    from . import configs as config_module  # noqa: PLC0415
+
+    history = _history()
+    after = history.config(node, commit)
+    if after is None:
+        return json.dumps({"error": f"no configuration of {node} kept" + (f" after commit {commit}" if commit else "")}, indent=2)
+    if against is not None:
+        before = history.config(node, against)
+        if before is None:
+            return json.dumps({"error": f"no configuration of {node} kept after commit {against}"}, indent=2)
+    else:
+        older = history.latest_config(node, before=after[0].commit_id)
+        before = history.config(node, older.commit_id) if older else None
+    diff = config_module.diff_trees(before[1] if before else None, after[1])
+    return json.dumps(
+        {
+            "node": node,
+            "commit": after[0].commit_id,
+            "against": before[0].commit_id if before else None,
+            **diff.as_dict(),
+        },
+        indent=2,
+    )
+
+
+@mcp.tool()
+def running_config(inv_filter: Optional[str] = None, match: Optional[str] = None) -> str:
+    """Each node's running configuration now, as SR Linux 'info flat' set lines, secrets redacted.
+
+    Use this to see how something is configured rather than how it is
+    running: a BGP group's settings, a routing policy, an interface. Narrow
+    it with *match*: a full configuration is hundreds of lines per node.
+
+    Returns {node: [lines]} or {node: {"error": ...}}.
+
+    Args:
+        inv_filter: Inventory filter as comma-separated key=value pairs.
+        match: Only the lines matching this case-insensitive regex, e.g.
+            'protocols bgp' or 'interface ethernet-1/1 '.
+    """
+    import re as _re  # noqa: PLC0415
+
+    from . import configs as config_module  # noqa: PLC0415
+    from .oneshot import running_configs  # noqa: PLC0415
+
+    i_filter, _ = _parse_filters(inv_filter, None)
+    nornir = get_nornir()
+    target = nornir.filter(**i_filter) if i_filter else nornir
+    try:
+        pattern = _re.compile(match, _re.IGNORECASE) if match else None
+    except _re.error as exc:
+        return json.dumps({"error": f"match: {exc}"}, indent=2)
+    result: Dict[str, Any] = {}
+    for node, tree in running_configs(target, salt=_history().salt()).items():
+        if isinstance(tree, str):
+            result[node] = {"error": tree}
+            continue
+        result[node] = [line for line in config_module.flatten(tree) if pattern is None or pattern.search(line)]
+    return json.dumps(result, indent=2)
 
 
 @mcp.tool()

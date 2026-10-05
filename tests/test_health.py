@@ -251,6 +251,100 @@ def test_resources_read_cpu_memory_and_every_datapath_engine():
     assert lpm == Resource("linecard 1/0", "ip-lpm-routes", used_percent=97, used=97, free=3)
 
 
+DATAPATH_PATH = "/platform/linecard[slot=*]/forwarding-complex[name=*]/datapath"
+THRESHOLD_PATH = "/platform/resource-monitoring/datapath"
+
+#: The tables an ASIC counts, some of which a container image's virtual
+#: datapath lists without counters.
+ASIC_TABLES = (
+    "arp-nd-entries",
+    "direct-ip-next-hops",
+    "ecmp-groups",
+    "ecmp-members",
+    "indirect-ip-next-hops",
+    "ip-hosts",
+    "mac-addresses",
+    "ip-lpm-ipv4-routes",
+    "ip-lpm-ipv6-routes",
+    "dyn-load-balancing-ecmp-groups",
+)
+
+
+def _datapath(engine: str, resources: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    return [
+        {
+            "platform": {
+                "linecard": [
+                    {"slot": 1, "forwarding-complex": [{"name": "0", "datapath": {engine: {"resource": resources}}}]}
+                ]
+            }
+        }
+    ]
+
+
+def _thresholds(engine: str, values: Dict[str, int], leaf: str = "upper-threshold-set") -> List[Dict[str, Any]]:
+    return [
+        {
+            "platform/resource-monitoring/datapath": {
+                engine: {
+                    "resource": [
+                        {"name": f"srl_nokia-platform-datapath-resources:{name}", leaf: value}
+                        for name, value in values.items()
+                    ]
+                }
+            }
+        }
+    ]
+
+
+def test_every_table_an_asic_counts_is_a_resource_with_the_node_s_threshold():
+    device = Device(
+        {
+            DATAPATH_PATH: _datapath(
+                "asic",
+                [{"name": name, "used-percent": 10, "used-entries": 10, "free-entries": 90} for name in ASIC_TABLES],
+            ),
+            THRESHOLD_PATH: _thresholds("asic", {name: 90 for name in ASIC_TABLES} | {"ip-hosts": 75}),
+        }
+    )
+    resources = device.get_resources()["resources"]
+    assert [r.name for r in resources] == list(ASIC_TABLES)
+    assert {r.name: r.threshold for r in resources}["ip-hosts"] == 75
+    assert all(r.threshold == 90 for r in resources if r.name != "ip-hosts")
+
+
+def test_a_table_that_reports_only_its_entries_has_its_utilization_worked_out():
+    device = Device(
+        {
+            DATAPATH_PATH: _datapath(
+                "asic",
+                [
+                    {"name": "ecmp-members", "used-entries": 900, "free-entries": 100},
+                    {"name": "ip-lpm-ipv4-routes", "used-entries": 0, "free-entries": 0},
+                    # listed, not counted: what a container image's datapath does
+                    {"name": "dyn-load-balancing-ecmp-groups"},
+                ],
+            )
+        }
+    )
+    members, routes = device.get_resources()["resources"]
+    assert (members.name, members.used_percent) == ("ecmp-members", 90)
+    assert (routes.name, routes.used_percent) == ("ip-lpm-ipv4-routes", None)
+
+
+def test_resource_thresholds_are_read_under_their_older_name_or_not_at_all():
+    older = Device(
+        {
+            DATAPATH_PATH: _datapath("xdp", [{"name": "mac-addresses", "used-percent": 1, "used-entries": 1, "free-entries": 99}]),
+            THRESHOLD_PATH: _thresholds("xdp", {"mac-addresses": 85}, leaf="rising-threshold-log"),
+        }
+    )
+    assert older.get_resources()["resources"][0].threshold == 85
+    # A node that does not answer for its thresholds still has its tables.
+    unknown = Device({DATAPATH_PATH: older.responses[DATAPATH_PATH]})
+    assert unknown.get_resources()["resources"][0].threshold is None
+
+
 def test_fabric_modules_are_only_asked_of_a_modular_chassis():
     """SR Linux gates /platform/fabric on the 'chassis' feature; a fixed-form
     node rejects the path, so it is not asked there at all."""
@@ -386,6 +480,27 @@ def test_resources_warn_at_80_and_error_at_95_percent():
         (WARNING, "control A memory"),
         (ERROR, "linecard 1/0 ip-lpm-routes"),
     ]
+
+
+def test_a_forwarding_table_is_warned_about_at_the_node_s_own_threshold():
+    resources = [
+        # past the node's lowered threshold, short of fcli's own
+        Resource("linecard 1/0", "ip-hosts", used_percent=75, used=750, free=250, threshold=70),
+        # past fcli's own, short of the node's
+        Resource("linecard 1/0", "mac-addresses", used_percent=85, threshold=90),
+        # a threshold above fcli's error level moves the error with it
+        Resource("linecard 1/0", "ecmp-groups", used_percent=97, threshold=98),
+        Resource("linecard 1/0", "ecmp-members", used_percent=99, threshold=98),
+        Resource("linecard 1/0", "arp-nd-entries", used_percent=96, threshold=90),
+    ]
+    rows = run("resource_high", fabric(resources={"leaf1": resources}))
+    assert [(r["Severity"], r["Subject"]) for r in rows] == [
+        (WARNING, "linecard 1/0 ip-hosts"),
+        (ERROR, "linecard 1/0 ecmp-members"),
+        (ERROR, "linecard 1/0 arp-nd-entries"),
+    ]
+    hosts = next(r for r in rows if r["Subject"].endswith("ip-hosts"))
+    assert hosts["Detail"] == "75% in use (750 used, 250 free), past the node's 70% threshold"
 
 
 def test_hardware_that_is_fitted_and_not_working_is_an_error():

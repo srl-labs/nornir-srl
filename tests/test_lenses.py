@@ -1169,7 +1169,8 @@ def test_service_tree_lets_a_gateway_carry_its_wan_side_instance():
 #: Lenses that ask the whole fabric one fixed question, so need no argument.
 FABRIC_WIDE = {"incidents", "changes"}
 #: Lenses that answer from the server's timeline rather than from reports.
-FROM_THE_TIMELINE = {"changes"}
+#: Lenses answered from what the server keeps - the timeline, the configurations - rather than a report.
+FROM_THE_TIMELINE = {"changes", "config_diff"}
 
 
 def test_every_lens_has_a_tree_and_the_params_it_cannot_do_without():
@@ -1299,3 +1300,12 @@ def test_a_minute_of_changes_lists_the_one_that_made_it_red_first():
     (entry,) = card.entries
     assert card.state == entry.state == "down"
     assert [item.label for item in entry.items] == ["ERROR", "OK", ""]
+
+
+def test_no_parameter_is_called_what_a_page_keeps_its_scope_under():
+    """A page's URL keeps the nodes a view is narrowed to as ``node``; a
+    parameter of that name would be read back as the scope instead."""
+    from nornir_srl.reports import REPORTS
+
+    for spec in list(REPORTS) + list(LENSES):
+        assert all(param.name != "node" for param in spec.params), spec.name

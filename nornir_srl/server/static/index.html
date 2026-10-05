@@ -46,7 +46,7 @@
         <header class="brand">
           <span class="brand-mark">fcli</span>
           <span class="brand-sub"><a href="https://www.nokia.com/ip-networks/service-router-linux-NOS/" target="_blank" rel="noopener noreferrer">SR Linux</a> Observability tool</span>
-          <span id="topo-badge" class="topo-badge" hidden></span>
+          <span id="fabric-name" class="fabric-name" hidden></span>
         </header>
 
         <div id="side-split" class="side-split">
@@ -162,16 +162,18 @@
           >
             ✓ ACK all
           </button>
-          <!-- Changes lens only: keep the fabric as it is now as what it is compared against. -->
-          <button
-            id="baseline-btn"
-            class="btn"
-            type="button"
-            hidden
-            title="Keep the fabric as it is now as the baseline; 'since: baseline' then shows the drift from it"
-          >
-            📌 Set baseline
-          </button>
+          <!-- Changes lens only: the baselines kept, which one is compared against, and setting one. -->
+          <div id="baseline-wrap" class="menu" hidden>
+            <button
+              id="baseline-btn"
+              class="btn"
+              type="button"
+              title="Keep the fabric as it is now as a baseline, or pick a kept one; 'since: baseline' then shows the drift from it"
+            >
+              📌 Baseline
+            </button>
+            <div id="baseline-menu" class="menu-panel watch-menu baseline-menu" hidden></div>
+          </div>
           <!-- Changes lens only: the prefixes whose route changes are reported one by one. -->
           <div id="watch-wrap" class="menu" hidden>
             <button
@@ -424,6 +426,8 @@
         <div id="services-tree-view" class="services-tree-wrap" hidden></div>
 
         <div id="path-graph-view" class="path-graph-wrap" hidden></div>
+
+        <div id="config-diff-view" class="config-diff-wrap" hidden></div>
 
         <div class="table-wrap" id="table-wrap">
           <table class="grid" id="grid">

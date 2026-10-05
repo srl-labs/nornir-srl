@@ -25,6 +25,10 @@ Within an anchor, the root is chosen by precedence: a node gone, then hardware, 
 
 **Patterns.** The same cause in three or more places, with the same finding and the same detail once names and numbers are taken out, is folded into one incident. For example, *"BFD session down on 16 links: the far end has never answered — is BFD enabled there?"* is one configuration mistake, not sixteen problems. No finding is dropped by grouping, and the incidents together hold all of them.
 
+**Flapping.** Everything that keeps changing state - sessions, ports, LLDP neighbours, designated forwarders, MACs, routes - folds into one incident, *Flapping in N places*, whatever flaps and however many: the fabric is unsettled there, and the card counts what kind of thing is flapping (*22 route, 4 bgp, 4 interface, 4 lldp*). A flap that rides on a bigger fault - a link that is down - stays in that link's incident.
+
+**Since when.** Each incident says when its oldest finding was raised and when its newest was: *first 14:02:11 · last 14:05:40* on the card, and the First and Last columns of the table. The times come from the timeline, so they last across restarts with the history; a finding already there when the server first watched the fabric reads *before* that time. A finding is raised once it has lasted two readings, so a time is up to one watch interval after the fault began.
+
 ## Acknowledging
 
 A known problem, such as a link waiting for a technician or BFD due to be enabled in the next change window, keeps drawing the eye on every page until it is fixed. **✓ ACK** on an incident's card acknowledges it, with an optional note:
@@ -54,9 +58,15 @@ The server reads the fabric every `--watch-interval` seconds (15 by default; `0`
 | `routes` | one change per route table (node × network-instance × family) per reading: how many prefixes changed next-hops, were withdrawn or are new, with examples. A warning if half the table or a default route went. The server holds only the `default` table prefix by prefix; every other table is followed by its size, and reported when it halves (a warning) or goes to or from zero |
 | `route` | one of the prefixes that matter changes: the default routes, the host routes to every node's system address (VTEPs, loopbacks) in `default`, and **watched prefixes**. Withdrawn is an error, an ECMP narrowing a warning, installed or widened is ok |
 | `node` | a node stops or starts answering |
+| `config` | a node logs a commit to its running configuration: who made it, the comment, and how many lines it changed. Info, or a warning for a commit that did not complete. Links to the Config Diff lens |
+| `server` | fcli itself stops or starts; a killed server's stop is a warning at the last time it was seen running. See [History](history.md) |
 | `finding` | a finding is raised or cleared, once it has lasted two readings (so a single-sample blip never reaches the timeline) |
 
 Severity reads as `error` (something stopped working), `warning`, `ok` (something recovered) or `info`.
+
+**Since** takes a time span (`90s`, `15m`, `2h`, `1d`; a bare number is minutes), `baseline` for the drift from the baseline rather than a window, or `all` (or nothing) for everything the timeline holds; the field offers these as presets and takes anything else typed. A span reaches as far back as the timeline holds in memory, the newest 5000 changes; `fcli history` and `GET /api/history` read further back, from the history on disk.
+
+The Changes lens takes **Kind** and **Severity** next to **Since**, each a list of checkboxes: ticking `bgp` and `config`, or `error`, narrows the cards and the table alike, and the choice is kept in the URL (`#changes?since=2h&kind=bgp,config`). Nothing ticked shows everything. The table's column filters only narrow the table.
 
 The **flapping** check reads the timeline. Three or more transitions of one session, port, adjacency or MAC within 10 minutes is a finding, and a MAC moving back and forth between two ports is what a loop looks like.
 
@@ -75,6 +85,8 @@ A watched prefix is matched exactly, in every network-instance, and its next-hop
 The server streams the `default` route table only. The VRF tables of a large fabric are too big to stream and re-read on every reading. A watched prefix outside `default` is instead looked up on every node with a gNMI Get of that prefix, and of the next-hops it names, on each reading. Its next-hops are shown to the address or route they point at, not followed further down to a port. The full tables are still streamed while an IPv4/IPv6 RIB report or a lens that reads them is open.
 
 ## The baseline
+
+With the server's history on (the default), a baseline that was set is kept on disk, named, and read back after a restart; see [History](history.md#baselines-that-last).
 
 A baseline is one reading kept aside as *what good looks like*. It is taken automatically once the server has settled after starting, and again whenever you press **📌 Set baseline** on the Changes page, `POST /api/baseline`, or call the MCP tool `mark_baseline`. **Changes** with `since: baseline` shows the drift from it: the same comparison as the timeline, but between the baseline and now. Use it to see exactly what a maintenance window or a config push did.
 
@@ -98,10 +110,14 @@ Six reports were added for the layer the overlay depends on, each with a check:
 | `bfd` | `bfd_down` | BFD sessions not up. A far end that has never answered (`remote-discriminator 0`) is called out, since BFD is then usually not enabled there |
 | `isis`, `ospf` | `igp_adjacency_down` | IS-IS adjacencies not up; OSPF neighbours not `full`/`two-way` |
 | | `igp_no_adjacency` | An IGP interface that is up and not passive, with no adjacency: area, level, authentication or MTU mismatch |
-| `resources` | `resource_high` | CPU (5-minute average), memory or a forwarding table at ≥80% (warning) or ≥95% (error) |
+| `resources` | `resource_high` | CPU (5-minute average) or memory at ≥80% (warning) or ≥95% (error). Every forwarding table the datapath counts - ARP/ND entries, direct and indirect next-hops, ECMP groups and members, IP hosts, MAC addresses, LPM routes, dynamic load-balancing groups - is warned about at the threshold the node itself alarms at (`platform resource-monitoring datapath ... upper-threshold-set`, 90% by default), 80% where it says none, and an error from 95% |
 | `es` | `es_df` (extended) | Nodes that elect different designated forwarders for one segment in one network-instance: two leaves both forwarding on a single-active segment |
 | `components` | `hardware_fault` | A fitted card, fan or PSU that is not up, or that the platform health model calls unhealthy |
 | `transceivers` | `optic_dom` | An optic reporting one of its own DOM alarm or warning thresholds as crossed |
+
+## Configuration checks
+
+Two checks compare the two ends of a session or a link: `bgp_peer_mismatch` (an AS one end expects that the other does not run, a session the far end never configured, a family or BFD on one end only) and `igp_peer_mismatch` (the IGP on one end of a link only, an OSPF area or a network type that differs, one end passive). A mismatch is the root of the sessions and adjacencies it keeps down. See [History](history.md#configuration-checks).
 
 ## Containerlab
 

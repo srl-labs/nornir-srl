@@ -47,7 +47,7 @@
     nodesBlock: el("nodes-block"),
     nodeList: el("node-list"),
     nodeSummary: el("node-summary"),
-    topoBadge: el("topo-badge"),
+    fabricName: el("fabric-name"),
     version: el("version"),
     navBack: el("nav-back"),
     navForward: el("nav-forward"),
@@ -97,8 +97,11 @@
     topoExportDrawio: el("topo-export-drawio"),
     servicesTreeView: el("services-tree-view"),
     pathGraphView: el("path-graph-view"),
+    configDiffView: el("config-diff-view"),
     viewModeBtn: el("view-mode-btn"),
     baselineBtn: el("baseline-btn"),
+    baselineWrap: el("baseline-wrap"),
+    baselineMenu: el("baseline-menu"),
     ackAllBtn: el("ack-all-btn"),
     watchWrap: el("watch-wrap"),
     watchBtn: el("watch-btn"),
@@ -180,6 +183,7 @@
     colFilters: new Map(),
     colWidths: new Map(),
     reportParams: new Map(), // the selected report's own arguments, e.g. the RIB LPM address
+    collapsedGroups: loadCollapsedGroups(), // sidebar categories folded away, kept per browser
     networkInstances: [], // the fabric's instances, for an argument that is one of them
     tree: null, // a lens's answer as cards, alongside its rows
     records: null, // a lens's answer as the objects it found
@@ -385,6 +389,10 @@
     const specs = (state.report && state.report.params) || [];
     dom.reportParams.hidden = !specs.length;
     for (const spec of specs) {
+      if (spec.kind === "choices") {
+        dom.reportParams.append(choicesParam(spec));
+        continue;
+      }
       const field = document.createElement("label");
       field.className = "field";
 
@@ -392,7 +400,8 @@
       name.className = "muted";
       name.textContent = spec.required ? `${spec.label} *` : spec.label;
 
-      const input = spec.kind === "ni" ? document.createElement("select") : document.createElement("input");
+      const chosen = isSelectKind(spec.kind);
+      const input = chosen ? document.createElement("select") : document.createElement("input");
       input.className = "input";
       input.required = Boolean(spec.required);
       if (spec.help) input.title = spec.help;
@@ -400,12 +409,30 @@
         input.dataset.paramKind = "ni";
         input.dataset.paramName = spec.name;
         fillInstanceOptions(input, spec, state.networkInstances);
+      } else if (chosen) {
+        input.dataset.paramKind = spec.kind;
+        input.dataset.paramName = spec.name;
+        fillConfigOptions(input, spec);
       } else {
         input.type = "search";
         input.placeholder = spec.placeholder || "";
         input.autocomplete = "off";
         input.spellcheck = false;
         input.value = state.reportParams.get(spec.name) || "";
+        if ((spec.suggestions || []).length) {
+          // Presets to pick, with what each means; anything else can still
+          // be typed.
+          const list = document.createElement("datalist");
+          list.id = `param-${spec.name}-suggestions`;
+          for (const suggestion of spec.suggestions) {
+            const option = document.createElement("option");
+            option.value = suggestion.value;
+            option.label = suggestion.label;
+            list.append(option);
+          }
+          input.setAttribute("list", list.id);
+          field.append(list);
+        }
       }
 
       input.addEventListener("change", () => {
@@ -417,6 +444,14 @@
         // Choosing what an unchosen instance already means is choosing nothing.
         if (value && !(spec.kind === "ni" && value === spec.placeholder)) state.reportParams.set(spec.name, value);
         else state.reportParams.delete(spec.name);
+        if (spec.kind === "config-node") {
+          // Commit ids are a node's own: another node's do not carry over.
+          for (const other of specs) if (other.kind === "commit") state.reportParams.delete(other.name);
+          for (const select of dom.reportParams.querySelectorAll("select[data-param-kind='commit']")) {
+            const other = specs.find((candidate) => candidate.name === select.dataset.paramName);
+            if (other) fillConfigOptions(select, other);
+          }
+        }
         updateFilterUI();
         connect();
         syncCurrentVisit();
@@ -426,6 +461,159 @@
       dom.reportParams.append(field);
     }
     if (specs.some((spec) => spec.kind === "ni")) refreshInstanceOptions();
+    if (specs.some((spec) => spec.kind === "config-node" || spec.kind === "commit")) refreshConfigOptions();
+  }
+
+  // Parameters chosen from a list rather than typed. A function, not a
+  // constant: it is hoisted, and the parameters are drawn before the code
+  // below them has run.
+  function isSelectKind(kind) {
+    return kind === "ni" || kind === "config-node" || kind === "commit";
+  }
+
+  // The configurations the server kept, by node, newest commit first: what a
+  // node or a commit is chosen from on the Config Diff lens.
+  async function refreshConfigOptions() {
+    try {
+      const res = await fetch("/api/configs");
+      if (!res.ok) return;
+      const byNode = new Map();
+      for (const version of (await res.json()).configs || []) {
+        if (!byNode.has(version.node)) byNode.set(version.node, []);
+        byNode.get(version.node).push(version);
+      }
+      for (const versions of byNode.values()) versions.sort((a, b) => b.commit - a.commit);
+      state.configVersions = byNode;
+    } catch {
+      return;
+    }
+    const specs = (state.report && state.report.params) || [];
+    for (const select of dom.reportParams.querySelectorAll("select[data-param-kind='config-node'], select[data-param-kind='commit']")) {
+      const spec = specs.find((candidate) => candidate.name === select.dataset.paramName);
+      if (spec) fillConfigOptions(select, spec);
+    }
+  }
+
+  function configCommitLabel(version) {
+    const when = version.at ? new Date(version.at * 1000).toLocaleString() : "";
+    const parts = [String(version.commit), version.username || "?"];
+    if (version.comment) parts.push(`'${version.comment}'`);
+    if (when) parts.push(when);
+    return parts.join(" · ");
+  }
+
+  // A node or a commit, chosen from what the history holds. What is chosen
+  // already - from a link, the URL - stays an option even before the list
+  // arrives, or if the history does not hold it: the server says why then.
+  function fillConfigOptions(select, spec) {
+    const chosen = state.reportParams.get(spec.name) || "";
+    const known = state.configVersions || new Map();
+    select.replaceChildren();
+    if (spec.kind === "config-node") {
+      select.append(new Option(known.size ? spec.placeholder || "choose a node" : "no configurations kept yet", ""));
+      const nodes = [...known.keys()].sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
+      if (chosen && !nodes.includes(chosen)) nodes.unshift(chosen);
+      for (const node of nodes) {
+        const count = (known.get(node) || []).length;
+        const option = new Option(node, node);
+        option.title = `${count} configuration${count === 1 ? "" : "s"} kept`;
+        select.append(option);
+      }
+    } else {
+      // Empty means what the lens does without one: the newest, or the one before.
+      select.append(new Option(spec.placeholder || "", ""));
+      const specs = (state.report && state.report.params) || [];
+      const nodeSpec = specs.find((candidate) => candidate.kind === "config-node");
+      const versions = known.get((nodeSpec && state.reportParams.get(nodeSpec.name)) || "") || [];
+      if (chosen && !versions.some((v) => String(v.commit) === chosen)) {
+        select.append(new Option(`${chosen} (not kept)`, chosen));
+      }
+      for (const version of versions) {
+        select.append(new Option(configCommitLabel(version), String(version.commit)));
+      }
+    }
+    select.value = chosen;
+  }
+
+
+  // A parameter that takes any number of fixed values - the kinds of change,
+  // their severities - as a dropdown of checkboxes. None ticked means all of
+  // them; the button says what is chosen.
+  function choicesParam(spec) {
+    const field = document.createElement("div");
+    field.className = "field menu choices-param";
+    const name = document.createElement("span");
+    name.className = "muted";
+    name.textContent = spec.label;
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "btn choices-btn";
+    if (spec.help) button.title = spec.help;
+    const panel = document.createElement("div");
+    panel.className = "menu-panel choices-menu";
+    panel.hidden = true;
+
+    const chosen = () =>
+      new Set((state.reportParams.get(spec.name) || "").split(",").filter(Boolean));
+    const caption = () => {
+      const picked = [...chosen()];
+      button.textContent = picked.length
+        ? picked.length <= 2
+          ? picked.join(", ")
+          : `${picked.length} of ${spec.choices.length}`
+        : spec.placeholder || "all";
+      button.classList.toggle("is-active", picked.length > 0);
+    };
+    const apply = (picked) => {
+      if (picked.size) state.reportParams.set(spec.name, spec.choices.filter((c) => picked.has(c)).join(","));
+      else state.reportParams.delete(spec.name);
+      caption();
+      updateFilterUI();
+      connect();
+      syncCurrentVisit();
+    };
+
+    const draw = () => {
+      panel.replaceChildren();
+      const picked = chosen();
+      const all = document.createElement("button");
+      all.type = "button";
+      all.className = "btn btn-ghost choices-all";
+      all.textContent = picked.size ? "Show all" : "All shown - tick to narrow";
+      all.disabled = !picked.size;
+      all.addEventListener("click", () => {
+        apply(new Set());
+        draw();
+      });
+      panel.append(all);
+      for (const choice of spec.choices) {
+        const label = document.createElement("label");
+        const box = document.createElement("input");
+        box.type = "checkbox";
+        box.checked = picked.has(choice);
+        box.addEventListener("change", () => {
+          const now = chosen();
+          if (box.checked) now.add(choice);
+          else now.delete(choice);
+          apply(now);
+          all.textContent = now.size ? "Show all" : "All shown - tick to narrow";
+          all.disabled = !now.size;
+        });
+        label.append(box, document.createTextNode(choice));
+        panel.append(label);
+      }
+    };
+
+    button.addEventListener("click", () => {
+      const opening = panel.hidden;
+      // One open at a time.
+      for (const other of dom.reportParams.querySelectorAll(".choices-menu")) other.hidden = true;
+      panel.hidden = !opening;
+      if (opening) draw();
+    });
+    caption();
+    field.append(name, button, panel);
+    return field;
   }
 
   // A network-instance is chosen from the ones the fabric has rather than
@@ -520,14 +708,12 @@
     state.reports = data.reports;
     state.fabric = data.topo_name || "";
     dom.version.textContent = "v" + data.version;
-    if (data.topo_name) {
-      if (dom.topoBadge) {
-        dom.topoBadge.textContent = "clab: " + data.topo_name;
-        dom.topoBadge.title = "Containerlab topology: " + data.topo_name;
-        dom.topoBadge.hidden = false;
-      }
-    } else if (dom.topoBadge) {
-      dom.topoBadge.hidden = true;
+    if (dom.fabricName) {
+      const clab = data.fabric_source === "clab";
+      dom.fabricName.textContent = data.topo_name
+        ? `Fabric: ${data.topo_name}${clab ? " (clab)" : ""}`
+        : "";
+      dom.fabricName.hidden = !data.topo_name;
     }
     if (data.chat && data.chat.enabled && dom.chatOpen) {
       state.chatEnabled = true;
@@ -579,6 +765,25 @@
     }
   }
 
+  // Folded sidebar groups are a per-browser convenience: kept when the
+  // browser lets us, and an empty set when it does not.
+  function loadCollapsedGroups() {
+    try {
+      const raw = JSON.parse(localStorage.getItem("fcli-collapsed-groups") || "[]");
+      return new Set(Array.isArray(raw) ? raw : []);
+    } catch (_err) {
+      return new Set();
+    }
+  }
+
+  function saveCollapsedGroups() {
+    try {
+      localStorage.setItem("fcli-collapsed-groups", JSON.stringify([...state.collapsedGroups]));
+    } catch (_err) {
+      /* storage unavailable: folding lasts as long as the page */
+    }
+  }
+
   function renderReportList() {
     const needle = dom.reportSearch.value.trim().toLowerCase();
     const groups = new Map();
@@ -592,9 +797,43 @@
     for (const [category, reports] of groups) {
       const section = document.createElement("div");
       section.className = "report-group";
+      // A search shows every match, folded group or not: what is searched
+      // for is what is wanted.
+      const collapsed = !needle && state.collapsedGroups.has(category);
+      section.classList.toggle("is-collapsed", collapsed);
       const heading = document.createElement("h3");
-      heading.textContent = category;
+      const toggle = document.createElement("button");
+      toggle.type = "button";
+      toggle.className = "report-group-toggle";
+      toggle.setAttribute("aria-expanded", collapsed ? "false" : "true");
+      toggle.title = collapsed ? `Show the ${category} reports` : `Hide the ${category} reports`;
+      const chevron = document.createElement("span");
+      chevron.className = "report-group-chevron";
+      chevron.setAttribute("aria-hidden", "true");
+      chevron.textContent = "▾";
+      const label = document.createElement("span");
+      label.textContent = category;
+      toggle.append(chevron, label);
+      if (collapsed) {
+        const count = document.createElement("span");
+        count.className = "report-group-count";
+        count.textContent = String(reports.length);
+        const current = reports.some((r) => state.report && state.report.name === r.name);
+        if (current) count.classList.add("has-current");
+        toggle.append(count);
+      }
+      toggle.addEventListener("click", () => {
+        if (state.collapsedGroups.has(category)) state.collapsedGroups.delete(category);
+        else state.collapsedGroups.add(category);
+        saveCollapsedGroups();
+        renderReportList();
+      });
+      heading.append(toggle);
       section.append(heading);
+      if (collapsed) {
+        dom.reportList.append(section);
+        continue;
+      }
       for (const report of reports) {
         const button = document.createElement("button");
         button.type = "button";
@@ -2453,6 +2692,12 @@
       syncCurrentVisit();
     }
     state.report = report;
+    // Overview and Topology draw themselves without the table's renderer,
+    // so nothing there would hide another report's diff.
+    dom.configDiffView.hidden = true;
+    // A report opened from a link, the URL or history is never hidden in a
+    // folded group: its group opens.
+    if (report.category && state.collapsedGroups.delete(report.category)) saveCollapsedGroups();
     // A comparison belongs to the report it was made of.
     state.diff = null;
     state.snapshots = [];
@@ -2471,7 +2716,11 @@
     state.windowSize = WINDOW_STEP;
     dom.title.textContent = report.title;
     dom.desc.textContent = report.description;
-    if (dom.baselineBtn) dom.baselineBtn.hidden = report.name !== "changes";
+    if (dom.baselineWrap) {
+      dom.baselineWrap.hidden = report.name !== "changes";
+      dom.baselineMenu.hidden = true;
+      if (report.name === "changes") loadBaselines();
+    }
     if (dom.ackAllBtn) {
       dom.ackAllBtn.hidden = report.name !== "incidents";
       dom.ackAllBtn.disabled = true; // until the incidents are in
@@ -2578,8 +2827,15 @@
     return isLens(report) && report.name === "path";
   }
 
+  // A configuration diff reads best as one: the two configurations side by side.
+  function hasDiffView(report) {
+    return isLens(report) && report.name === "config_diff";
+  }
+
   function viewModes(report) {
-    return hasGraphView(report) ? ["graph", "tree", "table"] : ["tree", "table"];
+    if (hasGraphView(report)) return ["graph", "tree", "table"];
+    if (hasDiffView(report)) return ["diff", "tree", "table"];
+    return ["tree", "table"];
   }
 
   function nextViewMode() {
@@ -2591,7 +2847,107 @@
     const next = nextViewMode();
     if (next === "table") return "📊 Table View";
     if (next === "graph") return "🗺 Path View";
+    if (next === "diff") return "🔀 Diff View";
     return isLens(state.report) ? "🌲 Tree View" : "🌲 Services View";
+  }
+
+  /* --------------------------------------------------------- config diff */
+
+  // What a configuration line sets, without the value it sets it to: an old
+  // and a new line with the same path are one setting changed, drawn side
+  // by side. A leaf-list is printed whole - "leaf [ a b ]" - so its path is
+  // what comes before the bracket.
+  function configLinePath(line) {
+    const text = String(line || "");
+    if (text.endsWith(" ]")) return text.split(" [")[0];
+    const cut = text.lastIndexOf(" ");
+    return cut > 0 ? text.slice(0, cut) : text;
+  }
+
+  // The removed and added lines, in configuration order, as rows of a
+  // two-column diff: a setting that changed is one row with its old line
+  // left and its new line right; one only removed or only added has a gap
+  // on the other side.
+  function configDiffPairs(rows) {
+    const pairs = [];
+    for (let i = 0; i < rows.length; i++) {
+      const row = rows[i];
+      const op = String(row.Op || "");
+      const next = rows[i + 1];
+      if (op === "-" && next && String(next.Op) === "+" && configLinePath(next.Line) === configLinePath(row.Line)) {
+        pairs.push({ old: String(row.Line), new: String(next.Line) });
+        i++;
+      } else if (op === "-") {
+        pairs.push({ old: String(row.Line), new: null });
+      } else {
+        pairs.push({ old: null, new: String(row.Line) });
+      }
+    }
+    return pairs;
+  }
+
+  // One side of a row: the line, with the part that differs from the other
+  // side's line marked, so a changed value stands out in a long path.
+  function configDiffCell(text, other, side) {
+    const cell = document.createElement("div");
+    cell.className = `cdiff-cell cdiff-${side}` + (text === null ? " cdiff-empty" : "");
+    const sign = document.createElement("span");
+    sign.className = "cdiff-sign";
+    sign.textContent = text === null ? "" : side === "old" ? "-" : "+";
+    const code = document.createElement("code");
+    code.className = "cdiff-line";
+    if (text !== null && other !== null) {
+      let start = 0;
+      while (start < text.length && start < other.length && text[start] === other[start]) start++;
+      // Back to the start of the word, so a value is marked whole.
+      while (start > 0 && text[start - 1] !== " ") start--;
+      code.append(document.createTextNode(text.slice(0, start)));
+      const changed = document.createElement("mark");
+      changed.className = "cdiff-word";
+      changed.textContent = text.slice(start);
+      code.append(changed);
+    } else if (text !== null) {
+      code.textContent = text;
+    }
+    cell.append(sign, code);
+    return cell;
+  }
+
+  function renderConfigDiff(rows) {
+    const view = dom.configDiffView;
+    view.replaceChildren();
+    if (!rows.length) {
+      const p = document.createElement("p");
+      p.className = "empty";
+      const missing = missingParams();
+      p.textContent = missing.length
+        ? `Choose ${missing.map((spec) => spec.label.toLowerCase()).join(" and ")} above to compare.`
+        : "No difference: the two configurations are the same.";
+      view.append(p);
+      return;
+    }
+    const first = rows[0];
+    const added = rows.filter((row) => String(row.Op) === "+").length;
+    const head = document.createElement("div");
+    head.className = "cdiff-head";
+    const left = document.createElement("div");
+    left.className = "cdiff-title cdiff-old";
+    left.textContent = first.Against !== "" && first.Against !== null && first.Against !== undefined
+      ? `commit ${first.Against}`
+      : "nothing kept before it";
+    const right = document.createElement("div");
+    right.className = "cdiff-title cdiff-new";
+    right.textContent = `commit ${first.Commit}`;
+    head.append(left, right);
+    const summary = document.createElement("div");
+    summary.className = "cdiff-summary";
+    summary.textContent = `${first.Node || ""}  ·  +${added} -${rows.length - added} lines`;
+    const grid = document.createElement("div");
+    grid.className = "cdiff-grid";
+    for (const pair of configDiffPairs(rows)) {
+      grid.append(configDiffCell(pair.old, pair.new, "old"), configDiffCell(pair.new, pair.old, "new"));
+    }
+    view.append(summary, head, grid);
   }
 
   /* ------------------------------------------------------------- stream */
@@ -3416,9 +3772,39 @@
   }
 
   /**
+   * The BGP RIB report of each family the peers table counts, and the column
+   * that names the peer in it. EVPN has no single RIB report - it is split by
+   * route type - so its active routes are the peer's received routes instead.
+   */
+  const ACTIVE_ROUTES_REPORTS = {
+    "ipv4-unicast": ["bgp_rib_ipv4", "neighbor"],
+    "ipv6-unicast": ["bgp_rib_ipv6", "neighbor"],
+    "l3vpn-ipv4-unicast": ["bgp_rib_l3vpn_v4", "neighbor"],
+    "l3vpn-ipv6-unicast": ["bgp_rib_l3vpn_v6", "neighbor"],
+  };
+
+  /** The routes from a peer in one family that the node uses. */
+  function jumpToPeerActiveRoutes(nodeName, niName, peerAddress, family) {
+    // An unnumbered peer is fe80::1%ethernet-1/1.0; match it with or without
+    // the interface it is scoped to.
+    const address = peerAddress.split("%")[0];
+    const peer = `^${escapeRegex(address)}(%\\S*)?$`;
+    const target = ACTIVE_ROUTES_REPORTS[family];
+    if (!target) {
+      jumpToFilteredReport("bgp_received_routes", [niName], [nodeName],
+        { peer, st: BGP_RIB_USED_FILTER }, { peer: peerAddress, family }, [nodeName]);
+      return;
+    }
+    const [report, column] = target;
+    jumpToFilteredReport(report, [niName], [nodeName],
+      { [column]: peer, st: BGP_RIB_USED_FILTER }, null, [nodeName]);
+  }
+
+  /**
    * A BGP peers 'Rx/Act/Tx' cell with its Rx count linked to the routes the
-   * peer sent and its Tx count to the ones sent to it, or null for a cell
-   * that is not one. A count of 0 has no routes behind it and stays text.
+   * peer sent, its Act count to the ones of those in use in the family's RIB
+   * report and its Tx count to the ones sent to it, or null for a cell that
+   * is not one. A count of 0 has no routes behind it and stays text.
    */
   function peerRoutesCell(row, column, value) {
     const peer = String(row.peer ?? "").trim();
@@ -3426,7 +3812,7 @@
     const counts = /^(\d+)\/(\d+)\/(\d+)$/.exec(String(value));
     if (!peer || !row.Node || !family || !counts) return null;
     const [, rx, act, tx] = counts;
-    const part = (count, direction, title) => {
+    const part = (count, title, jump) => {
       if (count === "0") return document.createTextNode(count);
       const link = document.createElement("a");
       link.className = "vrf-link";
@@ -3435,15 +3821,20 @@
       link.title = title;
       link.addEventListener("click", (event) => {
         event.preventDefault();
-        jumpToPeerRoutes(direction, row.Node, row.NI, peer, family);
+        jump();
       });
       return link;
     };
     const cell = document.createDocumentFragment();
     cell.append(
-      part(rx, "received", `Show the ${family} routes ${peer} sent to ${row.Node}`),
-      document.createTextNode(`/${act}/`),
-      part(tx, "advertised", `Show the ${family} routes ${row.Node} sent to ${peer}`)
+      part(rx, `Show the ${family} routes ${peer} sent to ${row.Node}`,
+        () => jumpToPeerRoutes("received", row.Node, row.NI, peer, family)),
+      document.createTextNode("/"),
+      part(act, `Show the active ${family} routes ${row.Node} has from ${peer}`,
+        () => jumpToPeerActiveRoutes(row.Node, row.NI, peer, family)),
+      document.createTextNode("/"),
+      part(tx, `Show the ${family} routes ${row.Node} sent to ${peer}`,
+        () => jumpToPeerRoutes("advertised", row.Node, row.NI, peer, family))
     );
     return cell;
   }
@@ -3454,17 +3845,101 @@
     });
   }
 
+  /** The report that lists an interface of a service, and its name column. */
+  function interfaceReport(name) {
+    if (/^irb/.test(name)) return ["irb", "name"];
+    if (/^vxlan/.test(name)) return ["vxlan", "vxlan-itf"];
+    return ["subif", "Subitf"];
+  }
+
+  /** One interface of one node, in the report that lists it. */
+  function jumpToInterface(name, nodeName) {
+    const [report, column] = interfaceReport(name);
+    jumpToFilteredReport(report, [], [nodeName], { [column]: exactMatchPattern([name]) });
+  }
+
+  /**
+   * An ethernet-segment by its ESI, on every node: a multi-homed segment is
+   * worth seeing from all the nodes that share it. Its name is optional and
+   * may be missing, its ESI never is.
+   */
+  function jumpToEthernetSegment(esi) {
+    jumpToFilteredReport("es", [], [], { esi: exactMatchPattern([esi]) });
+  }
+
+  /** A full 10-byte ESI from the compressed one a label shows: `..` is a run of zero bytes. */
+  function expandEsi(esi) {
+    const parts = esi.split(":");
+    const gap = parts.indexOf("..");
+    if (gap < 0) return esi;
+    const zeros = Array(Math.max(0, 10 - (parts.length - 1))).fill("00");
+    return [...parts.slice(0, gap), ...zeros, ...parts.slice(gap + 1)].join(":");
+  }
+
+  function reportLink(text, title, jump) {
+    const link = document.createElement("a");
+    link.className = "vrf-link";
+    link.href = "#";
+    link.textContent = text;
+    link.title = title;
+    link.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      jump();
+    });
+    return link;
+  }
+
+  /**
+   * A pill label with *name* in it turned into a jump to the report that
+   * lists it; the rest of the label stays text.
+   */
+  function fillLinkedLabel(pill, label, name, title, jump) {
+    const at = name ? label.indexOf(name) : -1;
+    if (at < 0) {
+      pill.append(document.createTextNode(label));
+      return;
+    }
+    pill.append(
+      document.createTextNode(label.slice(0, at)),
+      reportLink(name, title, jump),
+      document.createTextNode(label.slice(at + name.length))
+    );
+  }
+
+  /** A pill label that starts with an interface name, the name linked. */
+  function fillInterfaceLabel(pill, label, nodeName) {
+    const name = (/^\S+/.exec(label) || [""])[0];
+    const [report] = interfaceReport(name);
+    const what = { irb: "IRB interface", vxlan: "VXLAN interface", subif: "sub-interface" }[report];
+    fillLinkedLabel(pill, label, name, `Show ${what} ${name} on ${nodeName}`, () =>
+      jumpToInterface(name, nodeName)
+    );
+  }
+
+  /**
+   * An ethernet-segment label - `[ES: ]ID: <esi>, <name>, mode: ..., oper: ...` -
+   * with its ESI linked to the segment report.
+   */
+  function fillEsLabel(pill, label) {
+    const id = (/\bID:\s*([0-9a-f:.]+)/i.exec(label) || [])[1] || "";
+    const esi = expandEsi(id);
+    fillLinkedLabel(pill, label, id, `Show ethernet-segment ${esi}`, () =>
+      jumpToEthernetSegment(esi)
+    );
+  }
+
   // A virtual-ES label with its next-hop(s) turned into RIB jumps. The rest of
   // the label stays text; only `nh: <ip>` is a control, because that address
   // being active in this IP-VRF is what the segment tracks.
   function fillVirtualEsLabel(esPill, es, niName) {
     const match = /\bnh:\s*([^,]+)/.exec(es);
     if (!match) {
-      esPill.textContent = es;
+      fillEsLabel(esPill, es);
       return;
     }
     const ips = match[1].trim().split(/\s+/).filter(Boolean);
-    esPill.append(document.createTextNode(es.slice(0, match.index) + "nh: "));
+    fillEsLabel(esPill, es.slice(0, match.index) + "nh: ");
     ips.forEach((ip, index) => {
       if (index) esPill.append(document.createTextNode(" "));
       const report = ribReportForAddress(ip);
@@ -4103,7 +4578,7 @@
               const p = document.createElement("span");
               p.className = "pill";
               applyPillState(p, itfText);
-              p.textContent = itfText.trim();
+              fillInterfaceLabel(p, itfText.trim(), nodeName);
               pillGroup.append(p);
 
               const vrfs = vrfText
@@ -4151,7 +4626,7 @@
               const p = document.createElement("span");
               p.className = "pill";
               applyPillState(p, itfText);
-              p.textContent = itfText.trim();
+              fillInterfaceLabel(p, itfText.trim(), nodeName);
               line.append(p);
 
               const es = esText.join("->").trim();
@@ -4165,7 +4640,7 @@
                 const oper = /\boper:\s*(\S+)/.exec(es);
                 const kind = oper ? stateKind(oper[1]) : "";
                 if (kind && kind !== "up") esPill.classList.add(`pill-${kind}`);
-                esPill.textContent = es;
+                fillEsLabel(esPill, es);
                 line.append(arrow, esPill);
               }
               lines.append(line);
@@ -4190,7 +4665,7 @@
             vxlanStr.split(",").forEach((v) => {
               const p = document.createElement("span");
               p.className = "pill pill-vxlan";
-              p.textContent = v.trim();
+              fillInterfaceLabel(p, v.trim(), nodeName);
               pillGroup.append(p);
             });
             vxRowDiv.append(pillGroup);
@@ -4518,7 +4993,14 @@
                   jumpToVrf("bridge_domains", macName, nodeName);
                 });
 
-                p.append(link, document.createTextNode(restText));
+                p.append(link);
+                const irb = /^(\s*\()(irb\S+)/.exec(restText);
+                if (irb) {
+                  p.append(document.createTextNode(irb[1]));
+                  fillInterfaceLabel(p, restText.slice(irb[1].length), nodeName);
+                } else {
+                  p.append(document.createTextNode(restText));
+                }
               } else {
                 p.textContent = itemStr.trim();
               }
@@ -4546,7 +5028,7 @@
               const p = document.createElement("span");
               p.className = "pill";
               applyPillState(p, s);
-              p.textContent = s.trim();
+              fillInterfaceLabel(p, s.trim(), nodeName);
               line.append(p);
               lines.append(line);
             });
@@ -4643,7 +5125,7 @@
 
               const p = document.createElement("span");
               p.className = "pill pill-vxlan";
-              p.textContent = v.trim();
+              fillInterfaceLabel(p, v.trim(), nodeName);
               line.append(p);
               lines.append(line);
             });
@@ -5017,6 +5499,14 @@
     // The label, where the lens gives one: an incident's colour is that of
     // down, but what it is is an error, not something reported down.
     if (card.state || card.label) top.append(lensStateBadge(card.state, card.label || card.state.toUpperCase()));
+    if (card.when) {
+      // Since when, and when last: an incident's first and newest finding.
+      const when = document.createElement("span");
+      when.className = "bd-when";
+      when.textContent = `🕒 ${card.when}`;
+      when.title = "When its oldest finding was raised, and its newest";
+      top.append(when);
+    }
     if (card.badge) {
       const badge = document.createElement("span");
       badge.className = "bd-badge-count";
@@ -5216,6 +5706,171 @@
     loadWatched({ open: true });
   }
 
+  /* -------------------------------------------------------- menu placement */
+
+  // A menu opens leftwards from its button's right edge. A button the
+  // toolbar wrapped to the left of the page would open its menu over the
+  // sidebar - under it, as the sidebar is drawn above the toolbar - so a
+  // menu that would cross the sidebar, or the window's edge, opens
+  // rightwards from the button's left edge instead.
+  function fitMenus() {
+    const side = document.querySelector(".sidebar");
+    const sideRect = side ? side.getBoundingClientRect() : null;
+    // A sidebar that is a closed drawer, or hidden, bounds nothing.
+    const bound = sideRect && sideRect.width > 0 && sideRect.right > 0 ? sideRect.right : 0;
+    for (const panel of document.querySelectorAll(".menu-panel")) {
+      if (panel.hidden) continue;
+      panel.classList.remove("opens-right");
+      const rect = panel.getBoundingClientRect();
+      if (rect.left < bound + 4 || rect.left < 4) panel.classList.add("opens-right");
+    }
+  }
+
+  // After whatever a click opened, and once a menu filled in from the server.
+  document.addEventListener("click", () => requestAnimationFrame(fitMenus));
+  window.addEventListener("resize", () => requestAnimationFrame(fitMenus));
+
+  /* ------------------------------------------------------------ baselines */
+
+  /** The baselines kept: the active one named on the button, all of them listed in its menu when open. */
+  async function loadBaselines({ open = false } = {}) {
+    let info = null;
+    try {
+      const res = await fetch("/api/baselines");
+      info = await res.json();
+    } catch (_err) {
+      return;
+    }
+    dom.baselineBtn.textContent = info.active ? `📌 Baseline: ${info.active}` : "📌 Baseline";
+    if (open || !dom.baselineMenu.hidden) renderBaselineMenu(info);
+  }
+
+  function baselineTime(at) {
+    return at ? new Date(at * 1000).toLocaleString() : "";
+  }
+
+  function renderBaselineMenu(info) {
+    const menu = dom.baselineMenu;
+    menu.replaceChildren();
+    const heading = document.createElement("div");
+    heading.className = "menu-heading";
+    heading.textContent = "Compared against";
+    const current = document.createElement("div");
+    current.className = "muted watch-note";
+    current.textContent = info.baseline_at
+      ? `${info.active ? `'${info.active}'` : "the reading taken at start-up, not kept"} - ${baselineTime(info.baseline_at)}`
+      : "nothing yet: the server is still settling";
+    menu.append(heading, current);
+
+    if (info.persistent && info.baselines.length) {
+      const kept = document.createElement("div");
+      kept.className = "menu-heading";
+      kept.textContent = "Kept";
+      menu.append(kept);
+      for (const baseline of info.baselines) {
+        const row = document.createElement("div");
+        row.className = "watch-row baseline-row";
+        const text = document.createElement("span");
+        text.textContent = baseline.name;
+        text.title = `${baselineTime(baseline.at)} - ${baseline.nodes} node(s), ${baseline.findings} finding(s)${baseline.note ? ` - ${baseline.note}` : ""}`;
+        if (baseline.name === info.active) text.classList.add("baseline-active");
+        const when = document.createElement("span");
+        when.className = "muted";
+        when.textContent = baselineTime(baseline.at);
+        const use = document.createElement("button");
+        use.type = "button";
+        use.className = "btn btn-ghost";
+        use.textContent = "Use";
+        use.disabled = baseline.name === info.active;
+        use.title = `Compare the fabric with '${baseline.name}'`;
+        use.addEventListener("click", () => changeBaseline("/api/baseline/use", { name: baseline.name }));
+        const remove = document.createElement("button");
+        remove.type = "button";
+        remove.className = "btn btn-ghost";
+        remove.textContent = "✕";
+        remove.title = `Delete '${baseline.name}'`;
+        remove.addEventListener("click", () => {
+          if (window.confirm(`Delete the baseline '${baseline.name}'?`)) {
+            changeBaseline(`/api/baseline/${encodeURIComponent(baseline.name)}`, null, "DELETE");
+          }
+        });
+        row.append(text, when, use, remove);
+        menu.append(row);
+      }
+      if (info.active) {
+        const latest = document.createElement("button");
+        latest.type = "button";
+        latest.className = "btn btn-ghost baseline-latest";
+        latest.textContent = "Compare with the latest reading instead";
+        latest.addEventListener("click", () => changeBaseline("/api/baseline/use", { name: null }));
+        menu.append(latest);
+      }
+    }
+
+    const form = document.createElement("form");
+    form.className = "watch-add baseline-add";
+    const name = document.createElement("input");
+    name.className = "input";
+    name.placeholder = info.persistent ? "name, e.g. before-upgrade" : "kept until the server stops";
+    name.disabled = !info.persistent;
+    name.spellcheck = false;
+    const note = document.createElement("input");
+    note.className = "input";
+    note.placeholder = "note (optional)";
+    note.disabled = !info.persistent;
+    const set = document.createElement("button");
+    set.type = "submit";
+    set.className = "btn";
+    set.textContent = "Set baseline";
+    set.title = "Keep the fabric as it is now and compare against it";
+    form.append(name, note, set);
+    form.addEventListener("submit", (event) => {
+      event.preventDefault();
+      const body = info.persistent ? { name: name.value.trim() || null, note: note.value.trim() } : {};
+      changeBaseline("/api/baseline", body);
+    });
+    menu.append(form);
+    if (!info.persistent) {
+      const hint = document.createElement("div");
+      hint.className = "muted watch-note";
+      hint.textContent = "Baselines are kept across restarts when the server runs with --history.";
+      menu.append(hint);
+    }
+    if (info.persistent) name.focus();
+    fitMenus();
+  }
+
+  async function changeBaseline(url, body, method = "POST") {
+    dom.baselineBtn.disabled = true;
+    try {
+      const res = await fetch(url, {
+        method,
+        headers: { "Content-Type": "application/json" },
+        body: body === null ? undefined : JSON.stringify(body),
+      });
+      const answer = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        window.alert(answer.error || `the baseline could not be changed (${res.status})`);
+      } else {
+        // Asking for the drift right after setting the baseline shows it
+        // empty, which is the point: everything from here on is a change.
+        state.reportParams.set("since", "baseline");
+        renderReportParams();
+        updateFilterUI();
+        connect();
+        syncCurrentVisit();
+      }
+    } catch (_err) {
+      window.alert("the baseline could not be changed: the server did not answer");
+    } finally {
+      dom.baselineBtn.disabled = false;
+    }
+    // Setting one closes the menu, the drift it opens is what to look at;
+    // picking or deleting one keeps it open for the next.
+    if (url === "/api/baseline") dom.baselineMenu.hidden = true;
+    loadBaselines();
+  }
+
   // What a lens found, as cards: one per thing found, the nodes inside it,
   // and under each node what that node reports - the same fold the
   // services pages give a fabric.
@@ -5403,8 +6058,21 @@
 
   function renderBody() {
     // Overview and Topology own the main area; a table would be drawn over them.
+    // Only one view draws at a time; the diff view is the one no other
+    // branch below knows to hide.
+    dom.configDiffView.hidden = true;
     if (state.report && isPanelReport(state.report.name)) return;
     const rows = filteredRows();
+
+    if (!state.diff && hasDiffView(state.report) && state.viewMode === "diff") {
+      dom.tableWrap.hidden = true;
+      dom.servicesTreeView.hidden = true;
+      dom.pathGraphView.hidden = true;
+      dom.configDiffView.hidden = false;
+      renderConfigDiff(rows);
+      dom.rowCount.textContent = `${rows.length} line(s) changed`;
+      return;
+    }
 
     // The services tree draws a fabric, not a verdict on two of them, so a
     // comparison is always shown as a table.
@@ -5427,9 +6095,8 @@
       dom.servicesTreeView.hidden = true;
       dom.pathGraphView.hidden = false;
       renderPathGraph(state.graph);
-      if (state.rows.length) {
-        dom.rowCount.textContent = `${state.graph ? state.graph.nodes.length : 0} lookup(s), ${state.rows.length} row(s)`;
-      }
+      // Written for an empty answer too, or the count of the last one stays.
+      dom.rowCount.textContent = `${state.graph ? state.graph.nodes.length : 0} lookup(s), ${state.rows.length} row(s)`;
       return;
     }
     dom.pathGraphView.hidden = true;
@@ -5438,9 +6105,8 @@
       dom.tableWrap.hidden = true;
       dom.servicesTreeView.hidden = false;
       renderLensTree(state.tree || []);
-      if (state.rows.length) {
-        dom.rowCount.textContent = `${state.tree ? state.tree.length : 0} card(s), ${state.rows.length} row(s)`;
-      }
+      // Written for an empty answer too, or the count of the last one stays.
+      dom.rowCount.textContent = `${state.tree ? state.tree.length : 0} card(s), ${state.rows.length} row(s)`;
       return;
     }
 
@@ -5831,25 +6497,10 @@
   if (dom.kpiCardHealth) dom.kpiCardHealth.addEventListener("click", () => openReport("incidents"));
 
   if (dom.baselineBtn) {
-    dom.baselineBtn.addEventListener("click", async () => {
-      dom.baselineBtn.disabled = true;
-      try {
-        const res = await fetch("/api/baseline", { method: "POST" });
-        const status = await res.json();
-        const at = status.baseline_at ? new Date(status.baseline_at * 1000).toLocaleTimeString() : "now";
-        dom.streamInfo.textContent = `baseline set at ${at}`;
-        // Asking for the drift right after setting the baseline shows it
-        // empty, which is the point: everything from here on is a change.
-        state.reportParams.set("since", "baseline");
-        renderReportParams();
-        updateFilterUI();
-        connect();
-        syncCurrentVisit();
-      } catch (_err) {
-        showErrors([{ node: "server", error: "setting the baseline failed" }]);
-      } finally {
-        dom.baselineBtn.disabled = false;
-      }
+    dom.baselineBtn.addEventListener("click", () => {
+      const opening = dom.baselineMenu.hidden;
+      dom.baselineMenu.hidden = !opening;
+      if (opening) loadBaselines({ open: true });
     });
   }
 
@@ -6028,6 +6679,12 @@
     }
     if (!dom.exportMenu.hidden && !event.target.closest(".menu")) {
       dom.exportMenu.hidden = true;
+    }
+    if (!event.target.closest(".choices-param")) {
+      for (const panel of dom.reportParams.querySelectorAll(".choices-menu")) panel.hidden = true;
+    }
+    if (dom.baselineMenu && !dom.baselineMenu.hidden && !event.target.closest("#baseline-wrap")) {
+      dom.baselineMenu.hidden = true;
     }
     if (dom.watchMenu && !dom.watchMenu.hidden && !event.target.closest(".menu")) {
       dom.watchMenu.hidden = true;

@@ -1181,6 +1181,15 @@ class HostStream:
             self._get_error = None
         return [strip_modules(d) for d in resp] if resp else []
 
+    def fresh_get(self, path: str, datatype: str) -> List[Dict[str, Any]]:
+        """A gNMI Get that bypasses the Get cache, for what just changed.
+
+        The configuration read after a commit is the one thing a cached
+        answer would be wrong about: two commits inside the cache's TTL would
+        read as the same configuration.
+        """
+        return self._raw_get(path, datatype)
+
     def discovery_get(self, path: str, datatype: str) -> List[Dict[str, Any]]:
         """A Get made while discovering which paths a report needs.
 

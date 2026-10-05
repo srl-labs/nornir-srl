@@ -42,12 +42,45 @@ from typing import (
 )
 
 from .checks import REQUIRED_REPORTS
-from .fabric import FabricState, out_of_band, text
+from .fabric import FabricState, as_list, out_of_band, text
 
 #: What a reading to diff is made of: what the checks read, plus the bridge
 #: tables and the neighbour caches, whose entries moving is what a loop, a
 #: duplicate address or a moved host looks like.
-WATCH_REPORTS: Tuple[str, ...] = tuple(dict.fromkeys(REQUIRED_REPORTS + ("mac", "arp", "nd")))
+WATCH_REPORTS: Tuple[str, ...] = tuple(
+    dict.fromkeys(REQUIRED_REPORTS + ("mac", "arp", "nd", "config_commits"))
+)
+
+#: Every kind of change the timeline records, grouped the way they read:
+#: sessions and adjacencies, ports and platform, routes, services, and what
+#: people and fcli itself did.
+CHANGE_KINDS: Tuple[str, ...] = (
+    "bgp",
+    "bgp-routes",
+    "bfd",
+    "isis",
+    "ospf",
+    "interface",
+    "lldp",
+    "optic",
+    "hardware",
+    "node",
+    "route",
+    "routes",
+    "ni",
+    "ni-itf",
+    "ni-rt",
+    "es",
+    "es-df",
+    "vxlan",
+    "mac",
+    "arp",
+    "nd",
+    "config",
+    "finding",
+    "ack",
+    "server",
+)
 
 #: A change that means something stopped working.
 ERROR = "error"
@@ -88,7 +121,9 @@ class Change:
     #: What kind of thing changed: ``bgp``, ``bgp-routes``, ``interface``,
     #: ``lldp``, ``bfd``, ``isis``, ``ospf``, ``es``, ``es-df``, ``mac``,
     #: ``vxlan``, ``routes``, ``ni``, ``ni-itf``, ``ni-rt``, ``hardware``,
-    #: ``optic``, ``node`` or ``finding``.
+    #: ``optic``, ``node``, ``config`` (a commit to the running
+    #: configuration), ``server`` (fcli itself stopping or starting) or
+    #: ``finding``.
     kind: str
     #: Which one, on that node: a peer, a port, a MAC in a network-instance.
     subject: str
@@ -106,7 +141,9 @@ class Change:
 
     @property
     def summary(self) -> str:
-        """``established -> active``, ``new: spine1 e1/1``, ``gone: ...``."""
+        """``established -> active``, ``new: spine1 e1/1``, ``gone: ...``, ``committed``."""
+        if self.kind == "config":
+            return "committed" if self.after == "complete" else f"commit {self.after}"
         if self.before == ABSENT:
             return f"new: {self.after}"
         if self.after == ABSENT:
@@ -408,8 +445,61 @@ def diff_fabric(
     changes += _diff_routes(old_rib, new_rib, important, at)
     changes += _diff_watched(old_watched, new_watched, at)
     changes += changes_learned
+    changes += _diff_commits(before, after, both, at)
     changes = _fold_instances(changes)
     changes.sort(key=change_order)
+    return changes
+
+
+def commit_detail(commit: Any) -> str:
+    """Who made a commit, how and why, as one line."""
+    parts = [f"by {commit.username or '?'}"]
+    if commit.comment:
+        parts.append(f"'{commit.comment}'")
+    if commit.session and commit.session != "default":
+        parts.append(f"in candidate {commit.session}")
+    if commit.ended or commit.started:
+        parts.append(f"at {commit.ended or commit.started}")
+    return ", ".join(parts)
+
+
+def _diff_commits(
+    before: FabricState, after: FabricState, both: Callable[[str, Sequence[str]], bool], at: float
+) -> List[Change]:
+    """The commits logged on each node since *before*, one change each.
+
+    A node keeps a bounded log, so a commit ageing out of it is not news, and
+    a commit is new only when its id is past every id *before* had: ids only
+    ever grow on a node, until it is rebooted from a configuration file that
+    starts the log afresh, which reads as no news rather than as history
+    rewritten.
+    """
+    changes = []
+    for node in sorted(after.reports.get("config_commits", {})):
+        if not both(node, ("config_commits",)):
+            continue
+        known = [c.id for c in as_list(before.reports["config_commits"].get(node))]
+        if not known:
+            # A log not read yet - its path still being bootstrapped - is not
+            # a node that has just made every commit it remembers.
+            continue
+        newest = max(known)
+        for commit in as_list(after.reports["config_commits"].get(node)):
+            if commit.id <= newest:
+                continue
+            changes.append(
+                Change(
+                    at=at,
+                    node=node,
+                    kind="config",
+                    subject=f"commit {commit.id}",
+                    before=ABSENT,
+                    after=commit.status or "complete",
+                    # A commit that did not go through is the one to read.
+                    severity=INFO if (commit.status or "complete") == "complete" else WARNING,
+                    detail=commit_detail(commit),
+                )
+            )
     return changes
 
 
@@ -654,6 +744,10 @@ def _severity(kind: str, before: str, after: str) -> str:
         # Deleted is a configuration change rather than a failure: a service
         # that stops working while it is there goes down, and that is an error.
         return WARNING
+    if kind == "interface" and after == ABSENT:
+        # Deleted, like a network-instance, is a configuration change: a port
+        # that fails while it is configured goes down, and that is an error.
+        return WARNING
     if kind == "ni-rt":
         return WARNING if before != ABSENT and after != ABSENT else INFO
     if kind == "lldp":
@@ -661,9 +755,9 @@ def _severity(kind: str, before: str, after: str) -> str:
     if is_good and not was_good:
         return OK
     if was_good and not is_good:
-        # A port or session that was removed from the configuration is gone
-        # rather than failed, but from here the two look alike: a failure is
-        # the reading that gets it looked at.
+        # A session that was removed from the configuration is gone rather
+        # than failed, but from here the two look alike: a failure is the
+        # reading that gets it looked at.
         return ERROR
     if before == ABSENT or after == ABSENT:
         return INFO
@@ -856,6 +950,7 @@ def as_row(change: Change) -> Mapping[str, Any]:
 
 __all__ = [
     "ABSENT",
+    "CHANGE_KINDS",
     "Change",
     "ERROR",
     "FLAP_KINDS",

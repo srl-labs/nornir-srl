@@ -779,3 +779,176 @@ def test_nodes_that_elect_different_designated_forwarders_are_an_error():
 
     agree = fabric(es={"leaf5": [segment("192.0.2.15")], "leaf6": [segment("192.0.2.15")]})
     assert run("es_df", agree) == []
+
+
+# --------------------------------------------------------------------------- #
+# configuration mismatches between the two ends of a session or a link
+# --------------------------------------------------------------------------- #
+
+from nornir_srl.records import IsisInterface, OspfInterface  # noqa: E402
+
+
+def _addressed(**nodes: str) -> Dict[str, Any]:
+    """``_addressed(leaf1="10.0.0.0/31")``: one routed subinterface each."""
+    return {
+        node: [Interface("ethernet-1/1", (SubinterfaceState("ethernet-1/1.0", ipv4=(prefix,)),))]
+        for node, prefix in nodes.items()
+    }
+
+
+def _session(peer: str, local_as: int, peer_as: int, families=("ipv4-unicast",), state="established", **kw: Any) -> List[BgpPeers]:
+    return [
+        BgpPeers(
+            ni="default",
+            neighbors=(
+                Neighbor(
+                    peer=peer,
+                    state=state,
+                    local_as=local_as,
+                    peer_as=peer_as,
+                    families=tuple(Family(name) for name in families),
+                    **kw,
+                ),
+            ),
+        )
+    ]
+
+
+def _bgp_fabric(leaf: List[BgpPeers], spine: List[BgpPeers]) -> FabricState:
+    return fabric(
+        subif=_addressed(leaf1="10.0.0.1/31", spine1="10.0.0.0/31"),
+        ni={},
+        bgp_peers={"leaf1": leaf, "spine1": spine},
+    )
+
+
+def test_bgp_peer_mismatch_is_silent_on_two_ends_that_match():
+    state = _bgp_fabric(_session("10.0.0.0", 65001, 65100), _session("10.0.0.1", 65100, 65001))
+    assert run("bgp_peer_mismatch", state) == []
+
+
+def test_bgp_peer_mismatch_says_which_as_one_end_expects_and_the_other_runs():
+    state = _bgp_fabric(
+        _session("10.0.0.0", 65001, 65101, state="active"), _session("10.0.0.1", 65100, 65001, state="active")
+    )
+    [finding] = run("bgp_peer_mismatch", state)
+    assert finding["Node"] == "leaf1" and finding["Severity"] == ERROR
+    assert finding["Subject"] == "default/10.0.0.0"
+    assert finding["Detail"] == "expects AS 65101 from spine1, which runs AS 65100"
+
+
+def test_bgp_peer_mismatch_finds_a_session_the_far_end_never_configured():
+    state = _bgp_fabric(_session("10.0.0.0", 65001, 65100, state="active"), [BgpPeers(ni="default", neighbors=())])
+    [finding] = run("bgp_peer_mismatch", state)
+    assert finding["Detail"] == "spine1 owns 10.0.0.0 but has no session back to leaf1 in default"
+
+
+def test_bgp_peer_mismatch_trusts_a_far_end_that_takes_dynamic_neighbours():
+    dynamic = [BgpPeers(ni="default", neighbors=(Neighbor(peer="10.9.9.9", state="established", dynamic=True),))]
+    state = _bgp_fabric(_session("10.0.0.0", 65001, 65100, state="active"), dynamic)
+    assert run("bgp_peer_mismatch", state) == []
+
+
+def test_bgp_peer_mismatch_finds_a_family_or_bfd_on_one_end_only_once():
+    state = _bgp_fabric(
+        _session("10.0.0.0", 65001, 65100, families=("ipv4-unicast", "evpn"), bfd=True),
+        _session("10.0.0.1", 65100, 65001),
+    )
+    details = [f["Detail"] for f in run("bgp_peer_mismatch", state)]
+    assert details == [
+        "evpn is enabled on leaf1 only: spine1 does not exchange it on this session",
+        "BFD protects it on leaf1 only, so a failure is detected fast on one end",
+    ]
+
+
+def test_bgp_peer_mismatch_reads_a_link_local_peer_by_its_address():
+    state = fabric(
+        subif={
+            "leaf1": [Interface("ethernet-1/1", (SubinterfaceState("ethernet-1/1.0", ipv6=("fe80::1/64",)),))],
+            "spine1": [Interface("ethernet-1/1", (SubinterfaceState("ethernet-1/1.0", ipv6=("fe80::2/64",)),))],
+        },
+        ni={},
+        bgp_peers={
+            "leaf1": _session("fe80::2%ethernet-1/1.0", 65001, 65100),
+            "spine1": _session("fe80::1%ethernet-1/1.0", 65100, 65002),
+        },
+    )
+    [finding] = run("bgp_peer_mismatch", state)
+    assert finding["Node"] == "spine1" and "expects AS 65002 from leaf1" in finding["Detail"]
+
+
+def _igp_fabric(**reports: Any) -> FabricState:
+    return fabric(lldp=_lldp(leaf1=[("ethernet-1/1", "spine1", "ethernet-1/1")], spine1=[("ethernet-1/1", "leaf1", "ethernet-1/1")]), **reports)
+
+
+def test_igp_peer_mismatch_is_silent_on_two_ends_that_match():
+    state = _igp_fabric(
+        ospf={
+            "leaf1": [OspfInterface("default", "main", "0.0.0.0", "ethernet-1/1.0", interface_type="point-to-point")],
+            "spine1": [OspfInterface("default", "main", "0.0.0.0", "ethernet-1/1.0", interface_type="point-to-point")],
+        },
+        isis={},
+    )
+    assert run("igp_peer_mismatch", state) == []
+
+
+def test_igp_peer_mismatch_finds_an_ospf_area_and_network_type_that_differ():
+    state = _igp_fabric(
+        ospf={
+            "leaf1": [OspfInterface("default", "main", "0.0.0.0", "ethernet-1/1.0", interface_type="point-to-point")],
+            "spine1": [OspfInterface("default", "main", "0.0.0.1", "ethernet-1/1.0", interface_type="broadcast")],
+        },
+        isis={},
+    )
+    assert [(f["Severity"], f["Detail"]) for f in run("igp_peer_mismatch", state)] == [
+        (ERROR, "OSPF area 0.0.0.0 here, 0.0.0.1 on spine1 ethernet-1/1.0: no adjacency forms"),
+        (WARNING, "OSPF network type point-to-point here, broadcast on spine1 ethernet-1/1.0"),
+    ]
+
+
+def test_igp_peer_mismatch_finds_is_is_passive_or_typed_differently():
+    state = _igp_fabric(
+        isis={
+            "leaf1": [IsisInterface("default", "i1", "ethernet-1/1.0", passive=True, circuit_type="point-to-point")],
+            "spine1": [IsisInterface("default", "i1", "ethernet-1/1.0", circuit_type="broadcast")],
+        },
+        ospf={},
+    )
+    assert [(f["Severity"], f["Subject"], f["Detail"]) for f in run("igp_peer_mismatch", state)] == [
+        (ERROR, "ethernet-1/1.0", "IS-IS network type point-to-point here, broadcast on spine1 ethernet-1/1.0"),
+        (WARNING, "ethernet-1/1.0", "IS-IS is passive on leaf1 only: no adjacency forms over this link"),
+    ]
+
+
+def test_igp_peer_mismatch_finds_the_igp_on_one_end_of_a_link_only():
+    state = _igp_fabric(
+        isis={
+            "leaf1": [IsisInterface("default", "i1", "ethernet-1/1.0")],
+            "spine1": [IsisInterface("default", "i1", "system0.0")],
+        },
+        ospf={},
+    )
+    [finding] = run("igp_peer_mismatch", state)
+    assert (finding["Node"], finding["Detail"]) == ("leaf1", "IS-IS runs on this end only: spine1 ethernet-1/1 does not run it")
+    # A far end that runs no IS-IS at all is not one configured wrong on this link.
+    state.reports["isis"] = {"leaf1": state.reports["isis"]["leaf1"]}
+    assert run("igp_peer_mismatch", state) == []
+
+
+def test_bgp_peer_mismatch_says_nothing_about_a_session_still_opening():
+    """Families and BFD are negotiated: a session that has not come up - a
+    dynamic one refused and retrying - has none yet on either end."""
+    state = _bgp_fabric(
+        _session("10.0.0.0", 65001, 65100, families=("ipv4-unicast", "evpn"), bfd=True, state="opensent"),
+        _session("10.0.0.1", 65100, 65001, families=(), state="active"),
+    )
+    assert run("bgp_peer_mismatch", state) == []
+
+
+def test_bgp_peer_mismatch_compares_no_as_a_dynamic_neighbour_only_learned():
+    """A dynamic neighbour's peer AS is what the far end announced."""
+    state = _bgp_fabric(
+        _session("10.0.0.0", 65001, 65999, state="active", dynamic=True),
+        _session("10.0.0.1", 65100, 65001, state="active"),
+    )
+    assert run("bgp_peer_mismatch", state) == []

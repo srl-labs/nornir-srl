@@ -41,6 +41,7 @@ from __future__ import annotations
 
 import ipaddress
 import re
+import time
 from dataclasses import dataclass, replace
 from typing import (
     Any,
@@ -67,7 +68,7 @@ from .checks import (
     underlay_hosts,
 )
 from .acks import mark as mark_acknowledged
-from .changes import parse_since, worst_first
+from .changes import CHANGE_KINDS, parse_since, worst_first
 from .checks import REQUIRED_REPORTS, run_checks
 from .incidents import correlate
 from .records import BgpVpnInstance, EthernetSegment, NeighborCache, NeighborEntry, Route, RouteNextHop, as_dict
@@ -341,6 +342,9 @@ class Card:
     key: str = ""
     #: The action the card offers on it: ``ack`` or ``unack``.
     action: str = ""
+    #: When, in a few words: since when an incident has been there and when
+    #: it last got worse.
+    when: str = ""
 
 
 def _entries(
@@ -1835,9 +1839,37 @@ def lens_incidents(state: FabricState) -> List[Any]:
     return mark_acknowledged(correlate(run_checks(state), state), state.acknowledged)
 
 
+def _clock(at: Optional[float]) -> str:
+    """A time as the timeline reads it: the time of day, the date too when not today."""
+    if at is None:
+        return ""
+    when = time.localtime(at)
+    if time.strftime("%Y-%m-%d", when) == time.strftime("%Y-%m-%d"):
+        return time.strftime("%H:%M:%S", when)
+    return time.strftime("%Y-%m-%d %H:%M", when)
+
+
+def incident_first(incident: Any) -> str:
+    """Since when an incident has been wrong: ``14:02:11``, or ``before 09:30`` if it was there when watching began."""
+    first = _clock(getattr(incident, "first_seen", None))
+    return f"before {first}" if first and getattr(incident, "since_before", False) else first
+
+
+def incident_when(incident: Any) -> str:
+    """``first 14:02:11 · last 14:05:40``; one time where both are the same."""
+    first, last = incident_first(incident), _clock(getattr(incident, "last_seen", None))
+    if not first:
+        return ""
+    if not last or last == first or getattr(incident, "last_seen", None) == getattr(incident, "first_seen", None):
+        return f"since {first}"
+    return f"first {first} · last {last}"
+
+
 INCIDENT_COLUMNS: Tuple[Column, ...] = (
     Column("Severity", "severity"),
     Column("Incident", "title"),
+    Column("First", incident_first),
+    Column("Last", lambda i: _clock(getattr(i, "last_seen", None))),
     Column("Root cause", lambda i: i.root.check),
     Column(
         "Scope",
@@ -1889,6 +1921,7 @@ def tree_incidents(incidents: List[Any]) -> List[Card]:
                 entries=entries,
                 key=incident.id,
                 action="unack" if acked else "ack",
+                when=incident_when(incident),
             )
         )
     return cards
@@ -1901,20 +1934,35 @@ def tree_incidents(incidents: List[Any]) -> List[Card]:
 #: What ``since`` is set to, to compare against the baseline rather than the
 #: timeline.
 BASELINE = "baseline"
+#: What ``since`` takes for everything the timeline holds: the same as nothing,
+#: but a value a surface can offer to pick.
+ALL = "all"
 
 
-def lens_changes(state: FabricState, since: str = "") -> List[Any]:
+def lens_changes(state: FabricState, since: str = "", kind: str = "", severity: str = "") -> List[Any]:
     """What changed lately, or how the fabric has drifted from its baseline.
 
     Answered from :attr:`FabricState.history`, which only the live server
-    keeps: everywhere else there is no past to answer from.
+    keeps: everywhere else there is no past to answer from. *kind* and
+    *severity* narrow it down, each comma-separated, none meaning all.
     """
     history = state.history
     if history is None:
         return []
-    if str(since).strip().lower() == BASELINE:
-        return history.drift()
-    return history.changes(since=parse_since(since))
+    when = str(since or "").strip().lower()
+    if when == BASELINE:
+        changes = history.drift()
+    elif when == ALL:
+        changes = history.changes()
+    else:
+        changes = history.changes(since=parse_since(since))
+    kinds = {k for k in str(kind or "").split(",") if k}
+    severities = {s for s in str(severity or "").split(",") if s}
+    return [
+        c
+        for c in changes
+        if (not kinds or c.kind in kinds) and (not severities or c.severity in severities)
+    ]
 
 
 CHANGE_COLUMNS: Tuple[Column, ...] = (
@@ -1957,6 +2005,7 @@ def tree_changes(changes: List[Any]) -> List[Card]:
                             Detail("change", c.summary),
                             *((Detail("detail", c.detail),) if c.detail and c.detail != c.summary else ()),
                         ),
+                        links=_commit_links(c),
                     ),
                     "change",
                     by_severity=True,
@@ -1964,6 +2013,106 @@ def tree_changes(changes: List[Any]) -> List[Card]:
             )
         )
     return cards
+
+
+def _commit_links(change: Any) -> Tuple[Link, ...]:
+    """A commit's change links to what the commit changed."""
+    if change.kind != "config" or not change.subject.startswith("commit "):
+        return ()
+    commit = change.subject.split(" ", 1)[1]
+    return (
+        Link(
+            label="config diff",
+            report="config_diff",
+            node=change.node,
+            # 'host', not 'node': a page's URL keeps the nodes a view is
+            # narrowed to under 'node'.
+            params=(("host", change.node), ("commit", commit)),
+        ),
+    )
+
+
+# --------------------------------------------------------------------------- #
+# config_diff: what one commit changed
+# --------------------------------------------------------------------------- #
+
+
+@dataclass(frozen=True)
+class ConfigLine:
+    """One line a commit added to or removed from a node's configuration."""
+
+    node: str
+    commit: int
+    #: The commit whose configuration this one is compared with; ``None``
+    #: where none was kept before it.
+    against: Optional[int]
+    #: ``+`` added, ``-`` removed.
+    op: str
+    line: str
+    username: str = ""
+    comment: str = ""
+
+
+def lens_config_diff(state: FabricState, host: str = "", commit: str = "", against: str = "") -> List[ConfigLine]:
+    """What a commit changed in a node's configuration, from the history the server keeps.
+
+    Only the live server keeps configurations, and only with a history.
+    """
+    history = state.history
+    if history is None or not hasattr(history, "config_diff"):
+        return []
+    node = str(host or "").strip()
+    if not node:
+        raise ValueError("give the node whose configuration to compare")
+
+    def number(raw: Any, what: str) -> Optional[int]:
+        text = str(raw or "").strip()
+        if not text:
+            return None
+        try:
+            return int(text)
+        except ValueError:
+            raise ValueError(f"{what} '{raw}' is not a commit id") from None
+
+    return history.config_diff(node, number(commit, "commit"), number(against, "against"))
+
+
+CONFIG_DIFF_COLUMNS: Tuple[Column, ...] = (
+    Column("Commit", "commit"),
+    Column("Against", "against"),
+    Column("Op", "op"),
+    Column("Line", "line"),
+)
+
+
+def tree_config_diff(lines: List[ConfigLine]) -> List[Card]:
+    """One card for the commit, its lines inside: removed in red, added in green."""
+    if not lines:
+        return []
+    first = lines[0]
+    added = sum(1 for line in lines if line.op == "+")
+    removed = len(lines) - added
+    title = f"commit {first.commit}"
+    subtitle = f"by {first.username or '?'}" + (f" - '{first.comment}'" if first.comment else "")
+    subtitle += f", against commit {first.against}" if first.against is not None else ", nothing kept before it"
+    items = tuple(
+        Item(
+            title=f"{line.op} {line.line}",
+            state=_UP if line.op == "+" else _DOWN,
+            label="added" if line.op == "+" else "removed",
+        )
+        for line in lines
+    )
+    return [
+        Card(
+            title=title,
+            subtitle=subtitle,
+            icon="📝",
+            label="changed",
+            badge=f"+{added} -{removed}",
+            entries=(Entry(title=first.node, label="config", badge=_count(len(items), "line"), items=items),),
+        )
+    ]
 
 
 # --------------------------------------------------------------------------- #
@@ -2006,8 +2155,36 @@ LENSES: Tuple[LensSpec, ...] = (
             ParamSpec(
                 name="since",
                 label="Since",
-                placeholder="15m, 2h or baseline",
-                help="How far back to look, or 'baseline' for the drift from the baseline",
+                placeholder="15m, 2h, baseline...",
+                help=(
+                    "How far back to look: a span like 90s, 15m, 2h or 1d (a bare number is "
+                    "minutes), 'baseline' for the drift from the baseline, or 'all' (or "
+                    "nothing) for everything the timeline holds"
+                ),
+                suggestions=(
+                    ("15m", "last 15 minutes"),
+                    ("1h", "last hour"),
+                    ("6h", "last 6 hours"),
+                    ("1d", "last day"),
+                    ("baseline", "drift from the baseline"),
+                    ("all", "everything the timeline holds"),
+                ),
+            ),
+            ParamSpec(
+                name="kind",
+                label="Kind",
+                placeholder="all",
+                help="Only these kinds of change: bgp, interface, config, finding, ...",
+                kind="choices",
+                choices=CHANGE_KINDS,
+            ),
+            ParamSpec(
+                name="severity",
+                label="Severity",
+                placeholder="all",
+                help="Only changes of these severities",
+                kind="choices",
+                choices=("error", "warning", "ok", "info"),
             ),
         ),
         mcp_name="recent_changes",
@@ -2103,6 +2280,50 @@ LENSES: Tuple[LensSpec, ...] = (
             ),
         ),
         mcp_name="service_detail",
+    ),
+    LensSpec(
+        name="config_diff",
+        title="Config Diff",
+        description=(
+            "What one commit changed in a node's configuration, as SR Linux set "
+            "lines, from the configurations the server keeps after every commit. "
+            "Secrets are redacted: a changed password reads as changed, never as "
+            "what it was."
+        ),
+        # The configurations are kept by the server as it watches, not read here.
+        requires=(),
+        columns=CONFIG_DIFF_COLUMNS,
+        run=lens_config_diff,
+        tree=tree_config_diff,
+        params=(
+            ParamSpec(
+                # Not 'node': a page's URL keeps the nodes a view is narrowed
+                # to under that name.
+                name="host",
+                label="Node",
+                placeholder="choose a node",
+                help="The node whose configuration",
+                kind="config-node",
+                required=True,
+            ),
+            ParamSpec(
+                name="commit",
+                label="Commit",
+                placeholder="newest",
+                help="The commit whose change to show; the newest kept if none is chosen",
+                kind="commit",
+            ),
+            ParamSpec(
+                name="against",
+                label="Against",
+                placeholder="the one before",
+                help="The commit whose configuration to compare with, instead of the one kept before it",
+                kind="commit",
+            ),
+        ),
+        # Only the live server keeps configurations; the CLI has config-history
+        # and MCP config_diff, which read the same history.
+        surfaces=frozenset({SERVER}),
     ),
 )
 

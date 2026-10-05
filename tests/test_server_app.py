@@ -1131,6 +1131,7 @@ def test_reports_endpoint_lists_the_lenses_as_what_they_are(client):
         "where",
         "path",
         "service",
+        "config_diff",
     }
     assert all(r["category"] == "Lenses" for r in lenses.values())
     required = {name: [p["name"] for p in r["params"] if p["required"]] for name, r in lenses.items()}
@@ -1140,6 +1141,7 @@ def test_reports_endpoint_lists_the_lenses_as_what_they_are(client):
         "where": ["target"],
         "path": ["source", "destination"],
         "service": ["name"],
+        "config_diff": ["host"],
     }
 
 
@@ -1149,6 +1151,15 @@ def test_reports_endpoint_returns_topo_name(fabric):
     with TestClient(app) as test_client:
         payload = test_client.get("/api/reports").json()
         assert payload["topo_name"] == "dc1"
+        assert payload["fabric_source"] == "clab"
+
+
+def test_reports_endpoint_says_where_the_fabric_name_came_from(fabric):
+    nornir, _devices = fabric
+    app = create_app(nornir, resync_interval=0, topo_name="dc7", fabric_source="nornir")
+    with TestClient(app) as test_client:
+        payload = test_client.get("/api/reports").json()
+        assert (payload["topo_name"], payload["fabric_source"]) == ("dc7", "nornir")
 
 
 def test_inventory_endpoint(client):
@@ -1295,9 +1306,17 @@ def test_reports_endpoint_describes_the_arguments_a_report_takes(client):
             "help": "Longest prefix matching this address, per node and route table",
             "kind": "address",
             "required": False,
+            "choices": [],
+            "suggestions": [],
         }
     ]
     assert by_name["lldp"]["params"] == []
+    # A parameter of fixed values says which.
+    severity = next(p for p in by_name["changes"]["params"] if p["name"] == "severity")
+    assert (severity["kind"], severity["choices"]) == ("choices", ["error", "warning", "ok", "info"])
+    # A free-text parameter can offer presets, each saying what it means.
+    since = next(p for p in by_name["changes"]["params"] if p["name"] == "since")
+    assert {"value": "baseline", "label": "drift from the baseline"} in since["suggestions"]
 
 
 def test_unknown_report_is_a_404(client):

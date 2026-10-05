@@ -28,6 +28,7 @@ from .connections.srlinux import CONNECTION_NAME
 from .connections.routing import BGP_RIB_ROUTE_FAM_ALIASES
 from .connections.helpers import clean_structured_key
 from .fabric import collect_fabric_state as collect_lens_state
+from .history import DEFAULT_RETENTION_DAYS
 from .lenses import LensSpec, get_lens
 from .records import as_dict
 from .reports import ReportSpec, get_report
@@ -111,7 +112,8 @@ def _report_failure(resource: str) -> Callable[[str, Optional[BaseException]], N
     """Report a host that failed, and leave it out of the table."""
 
     def on_error(node: str, exception: Optional[BaseException]) -> None:
-        typer.echo(f"Failed to get {resource} for {node}. Exception: {exception}")
+        # stderr, so -o json|yaml|csv on stdout still parses with a node down.
+        typer.echo(f"Failed to get {resource} for {node}. Exception: {exception}", err=True)
 
     return on_error
 
@@ -336,6 +338,15 @@ def main(
         exists=True,
         help="CLAB topology file, mutually exclusive with -c",
     ),
+    fabric_name: Optional[str] = typer.Option(
+        None,
+        "--fabric",
+        envvar="FCLI_FABRIC",
+        help=(
+            "Name the fabric's history, snapshots, acks and cabling are kept under. "
+            "Defaults to the topology's name, or the directory of the Nornir config file"
+        ),
+    ),
     cert_file: Optional[Path] = typer.Option(
         None,
         "--cert-file",
@@ -493,7 +504,19 @@ def main(
     ctx.obj["box_type"] = box_type.upper() if box_type else None
     ctx.obj["output"] = output
     ctx.obj["log_level"] = log_level.value
-    ctx.obj["topo_name"] = lab_name if topo_file else None
+    # Whatever the inventory came from, the state kept on disk belongs to one
+    # fabric: named on the command line, after the lab, or after the directory
+    # the Nornir config lives in, so two inventories never share a history.
+    if fabric_name:
+        fabric_source = "option"
+    elif topo_file and lab_name:
+        fabric_name, fabric_source = lab_name, "clab"
+    else:
+        fabric_name = (cfg.resolve().parent.name if cfg else "") or None
+        fabric_source = "nornir" if fabric_name else None
+    logger.debug("fabric '%s' (%s)", fabric_name, fabric_source or "-")
+    ctx.obj["topo_name"] = fabric_name
+    ctx.obj["fabric_source"] = fabric_source
     ctx.obj["node_prefix"] = node_prefix
 
 
@@ -853,6 +876,25 @@ def server(
         "or ECMP width - the timeline reports one by one, in any network-instance. "
         "Repeatable; more can be added in the browser",
     ),
+    history: bool = typer.Option(
+        True,
+        "--history/--no-history",
+        help="Keep the timeline, the baselines and every configuration the nodes "
+        "commit on disk, one SQLite file per fabric, so they outlive a restart. "
+        "Needs --watch-interval",
+    ),
+    history_dir: Optional[Path] = typer.Option(
+        None,
+        "--history-dir",
+        help="Where the history files are kept (default: ~/.local/state/fcli/history, "
+        "next to --snapshot-dir)",
+    ),
+    history_days: float = typer.Option(
+        DEFAULT_RETENTION_DAYS,
+        "--history-days",
+        help="Days of changes the history keeps; 0 keeps them all. Baselines and "
+        "configurations are kept until deleted",
+    ),
 ) -> None:
     """Serves live report tables over HTTP, fed by gNMI subscriptions"""
     from .server.app import serve
@@ -883,10 +925,14 @@ def server(
         idle_timeout=idle_timeout,
         log_level=ctx.obj["log_level"],
         topo_name=ctx.obj.get("topo_name"),
+        fabric_source=ctx.obj.get("fabric_source"),
         snapshot_dir=snapshot_dir,
         watch_interval=watch_interval,
         persist_acks=persist_acks,
         watch_prefixes=watched,
+        history=history,
+        history_dir=history_dir,
+        retention_days=history_days,
     )
 
 
@@ -906,6 +952,15 @@ def sys_info(
 ) -> None:
     """Displays System Info of nodes"""
     run_report(ctx, "sys_info", field_filter)
+
+
+@app.command()
+def config_commits(
+    ctx: typer.Context,
+    field_filter: Optional[List[str]] = FIELD_FILTER,
+) -> None:
+    """Displays the commits each node logged to its configuration"""
+    run_report(ctx, "config_commits", field_filter)
 
 
 @app.command()
@@ -1245,6 +1300,250 @@ def checks(
     # as the last step of a deployment as well as by hand.
     if any(f.severity == "error" for f in findings):
         raise typer.Exit(1)
+
+
+# ------------------------- history -------------------------
+
+HISTORY_DIR = typer.Option(
+    None,
+    "--history-dir",
+    help="Where the server keeps its history files (default: ~/.local/state/fcli/history)",
+)
+
+
+def _history(ctx: typer.Context, directory: Optional[Path]) -> Any:
+    """The history file of the fabric in use, as the server names it."""
+    from .history import HistoryError
+    from .oneshot import open_history
+
+    try:
+        return open_history(ctx.obj.get("topo_name"), directory)
+    except (HistoryError, OSError) as exc:
+        typer.echo(f"history: {exc}", err=True)
+        raise typer.Exit(1) from None
+
+
+def _print_plain(ctx: typer.Context, title: str, columns: List[str], rows: List[Dict[str, Any]]) -> None:
+    """Rows that are not one node's report: a table, or JSON/YAML/CSV as asked."""
+    output = ctx.obj["output"]
+    if output != OutputFormat.TABLE:
+        if output == OutputFormat.JSON:
+            typer.echo(json.dumps(rows, indent=2, default=str))
+        elif output == OutputFormat.YAML:
+            typer.echo(yaml.safe_dump(rows, default_flow_style=False).rstrip())
+        else:
+            buf = io.StringIO()
+            writer = csv.DictWriter(buf, fieldnames=columns, extrasaction="ignore")
+            writer.writeheader()
+            for row in rows:
+                writer.writerow({k: str(v) for k, v in row.items()})
+            typer.echo(buf.getvalue().rstrip())
+        return
+    console = Console(theme=TABLE_THEME)
+    if not rows:
+        console.print(f"[i]{title}: nothing[/i]")
+        return
+    table = Table(title=title, highlight=True, box=_box(ctx.obj["box_type"]))
+    for column in columns:
+        table.add_column(column)
+    prefix = ctx.obj.get("node_prefix") or ""
+    for row in rows:
+        values = []
+        for column in columns:
+            value = row.get(column, "")
+            text = str(value) if value is not None else ""
+            if column in ("node", "Node") and prefix and text.startswith(prefix):
+                text = text[len(prefix):]
+            values.append(_cell(text))
+        table.add_row(*values)
+    console.print(table)
+
+
+def _when(at: Optional[float]) -> str:
+    return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(at)) if at else ""
+
+
+@app.command()
+def history(
+    ctx: typer.Context,
+    since: str = typer.Option("1d", "--since", "-s", help="How far back: 15m, 2h, 7d"),
+    kind: Optional[List[str]] = typer.Option(
+        None, "--kind", "-k", help="Only changes of this kind (bgp, interface, config, server, ...). Repeatable"
+    ),
+    limit: int = typer.Option(500, "--limit", "-n", help="At most this many changes, newest first"),
+    history_dir: Optional[Path] = HISTORY_DIR,
+) -> None:
+    """Lists what the server's timeline recorded, from its history on disk"""
+    from .changes import as_row, parse_since
+
+    try:
+        start = parse_since(since)
+    except ValueError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(1) from None
+    kept = _history(ctx, history_dir)
+    nodes = list(ctx.obj["target"].inventory.hosts) if ctx.obj.get("i_filter") else None
+    found = kept.changes(since=start, nodes=nodes, kinds=kind or None, limit=limit)
+    rows = [dict(as_row(c)) for c in found]
+    _print_plain(ctx, f"History since {since}", ["time", "node", "severity", "kind", "subject", "before", "after", "detail"], rows)
+
+
+@app.command()
+def baseline(
+    ctx: typer.Context,
+    name: str = typer.Argument("baseline", help="What to keep it as"),
+    note: str = typer.Option("", "--note", help="Why it was taken: a change ticket, a maintenance window"),
+    activate: bool = typer.Option(
+        True, "--activate/--keep-only", help="Make it the baseline the server compares against"
+    ),
+    history_dir: Optional[Path] = HISTORY_DIR,
+) -> None:
+    """Keeps the fabric as it is now as a named baseline, to compare against later"""
+    from .oneshot import keep_baseline
+
+    kept = _history(ctx, history_dir)
+    try:
+        saved, state, findings = keep_baseline(kept, ctx.obj["target"], name, note=note, activate=activate)
+    except ValueError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(1) from None
+    for (report, node), error in sorted(state.errors.items()):
+        typer.echo(f"{node}: {report} not collected: {error}", err=True)
+    typer.echo(
+        f"baseline '{saved.name}' kept: {saved.nodes} node(s), {len(findings)} finding(s), in {kept.path}"
+        + (" (active)" if activate else "")
+    )
+
+
+@app.command()
+def baselines(ctx: typer.Context, history_dir: Optional[Path] = HISTORY_DIR) -> None:
+    """Lists the baselines kept for this fabric"""
+    kept = _history(ctx, history_dir)
+    active = kept.get_meta("baseline")
+    rows = [
+        {**r.as_dict(), "taken": _when(r.at), "active": "yes" if r.name == active else ""}
+        for r in kept.readings()
+    ]
+    _print_plain(ctx, "Baselines", ["name", "taken", "nodes", "findings", "active", "note"], rows)
+
+
+@app.command()
+def drift(
+    ctx: typer.Context,
+    name: Optional[str] = typer.Argument(None, help="The baseline to compare with (default: the active one)"),
+    watch_prefix: Optional[List[str]] = typer.Option(
+        None, "--watch-prefix", help="A prefix to report one by one as well. Repeatable"
+    ),
+    history_dir: Optional[Path] = HISTORY_DIR,
+) -> None:
+    """Shows how the fabric now differs from a kept baseline; exits non-zero if anything stopped working"""
+    from .changes import as_row, normalize_prefix
+    from .oneshot import drift as compute_drift
+
+    kept = _history(ctx, history_dir)
+    try:
+        watched = [normalize_prefix(p) for p in watch_prefix or []]
+        saved, changes = compute_drift(kept, ctx.obj["target"], name, watched=watched)
+    except (KeyError, ValueError) as exc:
+        typer.echo(exc.args[0] if exc.args else str(exc), err=True)
+        raise typer.Exit(1) from None
+    rows = [dict(as_row(c)) for c in changes]
+    _print_plain(
+        ctx,
+        f"Drift from baseline '{saved.name}' ({_when(saved.at)})",
+        ["node", "severity", "kind", "subject", "before", "after", "detail"],
+        rows,
+    )
+    if any(c.severity == "error" for c in changes):
+        raise typer.Exit(1)
+
+
+@app.command()
+def config_history(
+    ctx: typer.Context,
+    diff: bool = typer.Option(False, "--diff", "-d", help="Show what a commit changed rather than the list"),
+    commit: Optional[int] = typer.Option(None, "--commit", help="The commit to show (default: the newest kept)"),
+    against: Optional[int] = typer.Option(
+        None, "--against", help="Compare with the configuration after this commit, not the one before"
+    ),
+    history_dir: Optional[Path] = HISTORY_DIR,
+) -> None:
+    """Lists the configurations the server kept after each commit, or what one changed"""
+    from . import configs as config_module
+
+    kept = _history(ctx, history_dir)
+    nodes = list(ctx.obj["target"].inventory.hosts)
+    if not diff:
+        rows = [
+            {**v.as_dict(), "kept": _when(v.at)}
+            for node in nodes
+            for v in kept.config_versions(node)
+        ]
+        _print_plain(ctx, "Configurations kept", ["node", "commit", "kept", "username", "comment"], rows)
+        return
+    status = 0
+    for node in nodes:
+        after = kept.config(node, commit)
+        if after is None:
+            typer.echo(f"{node}: no configuration kept" + (f" after commit {commit}" if commit else ""), err=True)
+            status = 1
+            continue
+        if against is not None:
+            before = kept.config(node, against)
+        else:
+            older = kept.latest_config(node, before=after[0].commit_id)
+            before = kept.config(node, older.commit_id) if older else None
+        result = config_module.diff_trees(before[1] if before else None, after[1])
+        if ctx.obj["output"] != OutputFormat.TABLE:
+            _print_plain(
+                ctx,
+                node,
+                ["node", "commit", "against", "op", "line"],
+                [
+                    {"node": node, "commit": after[0].commit_id, "against": before[0].commit_id if before else "", "op": op, "line": line}
+                    for op, line in result.lines
+                ],
+            )
+            continue
+        header = f"# {node}: commit {after[0].commit_id} by {after[0].username or '?'}"
+        if after[0].comment:
+            header += f" '{after[0].comment}'"
+        header += f" against commit {before[0].commit_id}" if before else " (nothing kept before it)"
+        typer.echo(f"{header}: {result.summary}")
+        if result.lines:
+            typer.echo(result.text())
+    if status:
+        raise typer.Exit(status)
+
+
+@app.command()
+def running_config(
+    ctx: typer.Context,
+    match: Optional[str] = typer.Option(None, "--match", "-m", help="Only the lines matching this regex"),
+    history_dir: Optional[Path] = HISTORY_DIR,
+) -> None:
+    """Prints each node's running configuration as set lines, with secrets redacted"""
+    import re
+
+    from . import configs as config_module
+    from .oneshot import running_configs
+
+    salt = _history(ctx, history_dir).salt()
+    pattern = re.compile(match, re.IGNORECASE) if match else None
+    status = 0
+    for node, tree in running_configs(ctx.obj["target"], salt=salt).items():
+        if isinstance(tree, str):
+            typer.echo(f"{node}: {tree}", err=True)
+            status = 1
+            continue
+        lines = [line for line in config_module.flatten(tree) if pattern is None or pattern.search(line)]
+        if ctx.obj["output"] != OutputFormat.TABLE:
+            _print_plain(ctx, node, ["node", "line"], [{"node": node, "line": line} for line in lines])
+            continue
+        typer.echo(f"# {node}")
+        typer.echo("\n".join(lines))
+    if status:
+        raise typer.Exit(status)
 
 
 # ------------------------- lenses -------------------------

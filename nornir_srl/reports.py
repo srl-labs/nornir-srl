@@ -120,6 +120,8 @@ ON_CHANGE_PATHS: FrozenSet[str] = frozenset(
         "/network-instance[name=*]/protocols/bgp/neighbor",
         "/system/name/host-name",
         "/platform/chassis",
+        # The commit log: a line per commit, and nothing in between.
+        "/system/configuration/commit",
         # Route tables: a route is re-sent when it changes, and only then.
         "/network-instance[name=*]/route-table/ipv4-unicast",
         "/network-instance[name=*]/route-table/ipv6-unicast",
@@ -167,11 +169,21 @@ class ParamSpec:
     #: ``text``; ``address`` for one that has to parse as an IP address; ``ni``
     #: for the name of a network-instance, which a surface offers from the
     #: ones the fabric has - its placeholder being the one taken when none is
-    #: chosen.
+    #: chosen. ``config-node`` for a node whose configurations the server
+    #: kept, and ``commit`` for one of the commits it kept a configuration
+    #: after, on the node the report's ``config-node`` parameter names (never
+    #: called ``node``, which a page's URL keeps the inventory scope in): a
+    #: surface offers both from the history.
     kind: str = "text"
     #: True where nothing can be answered without it: a report renders in full
     #: without any of its parameters, but a lens is a question about something.
     required: bool = False
+    #: For ``choices``: the values it takes, any number of them, given
+    #: comma-separated; none chosen means all of them.
+    choices: Tuple[str, ...] = ()
+    #: For ``text``: values a surface offers to pick, as (value, what it
+    #: means); anything else can still be typed.
+    suggestions: Tuple[Tuple[str, str], ...] = ()
 
     def as_dict(self) -> Dict[str, Any]:
         return {
@@ -181,6 +193,8 @@ class ParamSpec:
             "help": self.help,
             "kind": self.kind,
             "required": self.required,
+            "choices": list(self.choices),
+            "suggestions": [{"value": value, "label": label} for value, label in self.suggestions],
         }
 
     def coerce(self, value: Any) -> Optional[str]:
@@ -199,6 +213,18 @@ class ParamSpec:
                 raise ValueError(
                     f"{self.label}: '{text}' is not an IP address"
                 ) from None
+        if self.kind == "commit":
+            if not text.isdigit():
+                raise ValueError(f"{self.label}: '{text}' is not a commit id")
+            return text
+        if self.kind == "choices":
+            chosen = [part.strip().lower() for part in text.split(",") if part.strip()]
+            unknown = [part for part in chosen if part not in self.choices]
+            if unknown:
+                raise ValueError(
+                    f"{self.label}: {', '.join(unknown)} is not one of {', '.join(self.choices)}"
+                )
+            return ",".join(dict.fromkeys(chosen)) or None
         return text
 
 
@@ -468,6 +494,19 @@ SYS_INFO_TABLE = Table(
         Column("part-number", "part_number"),
         Column("serial-number", "serial_number"),
         Column("software-version", "software_version"),
+    ),
+)
+
+CONFIG_COMMITS_TABLE = Table(
+    columns=(
+        Column("id", "id"),
+        Column("status", "status"),
+        Column("user", "username"),
+        Column("comment", "comment"),
+        Column("session", "session"),
+        Column("type", "type"),
+        Column("started", "started"),
+        Column("ended", "ended"),
     ),
 )
 
@@ -1079,7 +1118,7 @@ def _bgp_rib_variants() -> List[ReportSpec]:
             description=description,
             getter=_bound_bgp_rib("evpn", route_type),
             table=_bgp_rib_table_for("evpn", route_type),
-            category="BGP RIB",
+            category="BGP",
             surfaces=STREAMING,
         )
         for route_type, label, description in evpn
@@ -1092,7 +1131,7 @@ def _bgp_rib_variants() -> List[ReportSpec]:
             description=f"{noun} routes in the BGP RIB-in-post.",
             getter=_bound_bgp_rib(route_fam),
             table=_bgp_rib_table_for(route_fam),
-            category="BGP RIB",
+            category="BGP",
             surfaces=STREAMING,
         )
         for suffix, route_fam, label, noun in families
@@ -1310,6 +1349,21 @@ REPORTS: List[ReportSpec] = [
         ),
     ),
     ReportSpec(
+        name="config_commits",
+        table=CONFIG_COMMITS_TABLE,
+        resource="config_commits",
+        key_columns=("Node", "id"),
+        title="Config Commits",
+        description="The commits each node logged to its running configuration: "
+        "when, by whom, with which comment. The node keeps a bounded log, so the "
+        "oldest age out.",
+        getter=lambda d: d.get_commits(),
+        category="System",
+        subscribe=(
+            SubscriptionSpec("/system/configuration/commit", datatype="state"),
+        ),
+    ),
+    ReportSpec(
         name="ifstats",
         table=IFSTATS_TABLE,
         resource="ifstats",
@@ -1393,7 +1447,7 @@ REPORTS: List[ReportSpec] = [
         description="Routes in the BGP RIB-in-post with their path attributes.",
         getter=_bgp_rib,
         table=_bgp_rib_table_for(),
-        category="BGP RIB",
+        category="BGP",
         surfaces=INTERACTIVE,
     ),
     *_bgp_rib_variants(),
@@ -1405,7 +1459,7 @@ REPORTS: List[ReportSpec] = [
             description=description,
             getter=_peer_rib(rib),
             table=table,
-            category="BGP RIB",
+            category="BGP",
             surfaces=STREAMING,
             params=(
                 ParamSpec(

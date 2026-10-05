@@ -28,6 +28,8 @@ class FakeGnmiClient:
 def fake_gnmi(monkeypatch):
     FakeGnmiClient.last_kwargs = {}
     monkeypatch.setattr(srlinux, "gNMIclient", FakeGnmiClient)
+    # Nothing to connect to: the reachability probe would try a real socket.
+    monkeypatch.setattr(srlinux, "_probe", lambda *args, **kwargs: None)
     # Every test wants to see the warning decided fresh.
     monkeypatch.setattr(srlinux, "_warned_unverified", False)
     return FakeGnmiClient

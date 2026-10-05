@@ -33,7 +33,8 @@ from __future__ import annotations
 
 import ipaddress
 import re
-from dataclasses import dataclass
+import time
+from dataclasses import dataclass, replace
 from typing import Any, Dict, FrozenSet, Iterable, List, Optional, Sequence, Set, Tuple
 
 from .aliases import resolve
@@ -53,8 +54,12 @@ ROOT_PRIORITY: Tuple[str, ...] = (
     "mtu_mismatch",
     "itf_errors",
     "underlay_unreachable",
+    # A configuration that cannot work explains the adjacency or the session
+    # it keeps down.
+    "igp_peer_mismatch",
     "igp_adjacency_down",
     "igp_no_adjacency",
+    "bgp_peer_mismatch",
     "bfd_down",
     "bgp_down",
     "bgp_af_down",
@@ -67,10 +72,19 @@ ROOT_PRIORITY: Tuple[str, ...] = (
 
 #: Checks whose subject is a port or a subinterface.
 _PORT_CHECKS = frozenset(
-    {"itf_down", "itf_errors", "lldp_one_sided", "mtu_mismatch", "optic_dom", "igp_adjacency_down", "igp_no_adjacency"}
+    {
+        "itf_down",
+        "itf_errors",
+        "lldp_one_sided",
+        "mtu_mismatch",
+        "optic_dom",
+        "igp_adjacency_down",
+        "igp_no_adjacency",
+        "igp_peer_mismatch",
+    }
 )
 #: Checks whose subject is ``<ni>/<peer address>``.
-_SESSION_CHECKS = frozenset({"bgp_down", "bgp_af_down", "bgp_no_routes", "bfd_down"})
+_SESSION_CHECKS = frozenset({"bgp_down", "bgp_af_down", "bgp_no_routes", "bfd_down", "bgp_peer_mismatch"})
 #: Checks about the node itself rather than about anything on it.
 _PLATFORM_CHECKS = frozenset({"hardware_fault", "resource_high"})
 #: Flap kinds whose subject is a port or subinterface.
@@ -91,6 +105,8 @@ _NOUNS = {
     "bfd_down": ("BFD session down", "BFD sessions down"),
     "bgp_down": ("BGP session down", "BGP sessions down"),
     "bgp_af_down": ("BGP family down", "BGP families down"),
+    "bgp_peer_mismatch": ("BGP configuration mismatch", "BGP configuration mismatches"),
+    "igp_peer_mismatch": ("IGP configuration mismatch", "IGP configuration mismatches"),
     "bgp_no_routes": ("BGP family without routes", "BGP families without routes"),
     "es_df": ("ethernet-segment problem", "ethernet-segment problems"),
     "flapping": ("flap", "flaps"),
@@ -125,6 +141,14 @@ class Incident:
     #: (:mod:`nornir_srl.acks`): it is known, and kept out of the counts and
     #: colours that exist to draw the eye.
     acknowledged: bool = False
+    #: When the oldest of its findings was raised, and the newest: since when
+    #: it has been wrong, and when it last got worse. ``None`` where nothing
+    #: keeps a timeline - the one-shot surfaces.
+    first_seen: Optional[float] = None
+    last_seen: Optional[float] = None
+    #: The oldest finding was already there when watching began, so
+    #: *first_seen* is only when that was: it has been wrong since before.
+    since_before: bool = False
 
     @property
     def findings(self) -> Tuple[Finding, ...]:
@@ -405,10 +429,36 @@ def correlate(findings: Sequence[Finding], state: FabricState) -> List[Incident]
         groups.setdefault(("node", node), [])
 
     incidents = _patterns([_incident(anchor, members, fabric) for anchor, members in groups.items()])
+    incidents = _dated(incidents, state)
     incidents.sort(
         key=lambda i: (_SEVERITY_ORDER.get(i.severity, 9), -len(i.findings), i.node, i.title)
     )
     return incidents
+
+
+def _dated(incidents: List[Incident], state: FabricState) -> List[Incident]:
+    """*incidents* with when their findings were raised, where a timeline says.
+
+    A finding the timeline has not raised yet - it has been there one
+    reading, and is raised on the second - is from now.
+    """
+    history = state.history
+    raised_at = getattr(history, "raised_at", None)
+    if raised_at is None:
+        return incidents
+    known = raised_at()
+    now = time.time()
+    dated = []
+    for incident in incidents:
+        times = [known.get((f.check, f.node, f.subject), (now, False)) for f in incident.findings]
+        if not times:
+            dated.append(incident)
+            continue
+        first = min(times, key=lambda t: t[0])
+        dated.append(
+            replace(incident, first_seen=first[0], last_seen=max(t[0] for t in times), since_before=first[1])
+        )
+    return dated
 
 
 def _incident(anchor: Anchor, members: List[Finding], fabric: _Fabric) -> Incident:
@@ -438,12 +488,22 @@ def _root(anchor: Anchor, members: List[Finding], fabric: _Fabric) -> Finding:
     """The finding that explains the rest, synthesizing one where no check says it."""
     if anchor[0] == "node":
         node = anchor[1]
+        # Why, in the words the connection failed with: refused, no route,
+        # no answer, a name that does not resolve.
+        reason = next(
+            (
+                f.detail[len("not checked: "):]
+                for f in members
+                if f.check == "collection" and f.node == node and f.detail.startswith("not checked: ")
+            ),
+            "",
+        )
         return Finding(
             check="node_unreachable",
             severity=ERROR,
             node=node,
             subject="gnmi",
-            detail="no report could be collected: the node is down or unreachable",
+            detail=f"no report could be collected: {reason}" if reason else "no report could be collected: the node is down or unreachable",
         )
     if anchor[0] == "underlay":
         _kind, node, peer = anchor
@@ -523,8 +583,25 @@ PATTERN_MIN = 3
 _PLACES = {"link": "links", "port": "ports", "session": "sessions", "node": "nodes", "underlay": "node pairs"}
 
 
-def _template(detail: str) -> str:
+#: The states a BGP session passes through while it keeps trying and failing.
+#: A session refused for a wrong AS cycles active, connect, opensent,
+#: openconfirm and back every few seconds; which one a reading catches it in
+#: is chance, not a different cause.
+_BGP_TRYING = re.compile(r"\bsession is (?:idle|connect|active|opensent|openconfirm)\b")
+
+
+#: Checks whose detail says more than what kind of wrong it is, folded on
+#: the part that does. A BGP session down names its peer-group and the
+#: peer's AS after that, which a dynamic neighbour only knows once its
+#: handshake gets that far: the same down session reads 'peer-group fabric,
+#: AS 4200000004' in one reading and 'peer-group -, AS ?' in the next.
+_CAUSE_ONLY = {"bgp_down": lambda detail: detail.split(",", 1)[0]}
+
+
+def _template(detail: str, check: str = "") -> str:
     """A finding's detail with its names and numbers taken out: what kind of wrong it is."""
+    detail = _CAUSE_ONLY.get(check, lambda d: d)(detail)
+    detail = _BGP_TRYING.sub("session is not established", detail)
     return re.sub(r"\S*\d\S*", "#", detail)
 
 
@@ -538,18 +615,63 @@ def _patterns(incidents: List[Incident]) -> List[Incident]:
     """
     by_cause: Dict[Tuple[str, str, str], List[Incident]] = {}
     for incident in incidents:
-        if incident.kind in ("finding", "platform", "segment"):
+        if incident.root.check == FLAPPING:
+            # Whatever keeps changing - a session, a port, a DF, a MAC - is
+            # one thing to look at: the fabric is unsettled there.
+            key = (FLAPPING, "", "")
+        elif incident.kind in ("finding", "platform", "segment"):
             key = ("", incident.id, "")
         else:
-            key = (incident.root.check, _template(incident.root.detail), incident.root.severity)
+            key = (incident.root.check, _template(incident.root.detail, incident.root.check), incident.root.severity)
         by_cause.setdefault(key, []).append(incident)
     folded: List[Incident] = []
     for (check, template, _severity), members in by_cause.items():
+        if check == FLAPPING and len(members) >= 2:
+            folded.append(_flaps(members))
+            continue
         if not check or len(members) < PATTERN_MIN:
             folded.extend(members)
             continue
         folded.append(_pattern(check, template, members))
     return folded
+
+
+#: The check whose incidents fold into one, whatever flaps.
+FLAPPING = "flapping"
+
+
+def _flaps(members: List[Incident]) -> Incident:
+    """Every incident that is something flapping, as one: what flaps, and how much of each.
+
+    A flapping finding says what kind of thing it is about first -
+    ``bgp changed 4 times ...``, ``es-df changed 3 times ...`` - which is
+    what the summary counts.
+    """
+    members = sorted(members, key=lambda i: i.title)
+    flaps = [f for incident in members for f in incident.findings if f.check == FLAPPING]
+    root = max(flaps, key=lambda f: (_SEVERITY_ORDER.get(f.severity, 9) * -1, f.detail))
+    related = tuple(f for incident in members for f in incident.findings if f is not root)
+    kinds: Dict[str, int] = {}
+    for flap in flaps:
+        kind = flap.detail.split(" ", 1)[0] or "?"
+        kinds[kind] = kinds.get(kind, 0) + 1
+    what = ", ".join(f"{count} {kind}" for kind, count in sorted(kinds.items(), key=lambda kv: (-kv[1], kv[0])))
+    nodes = tuple(sorted({node for incident in members for node in incident.nodes}))
+    places = "places" if len({i.kind for i in members}) != 1 else _PLACES.get(members[0].kind, "places")
+    return Incident(
+        id=f"pattern|{FLAPPING}",
+        severity=min((i.severity for i in members), key=lambda s: _SEVERITY_ORDER.get(s, 9)),
+        kind="pattern",
+        title=f"Flapping in {len(members)} {places}",
+        node=root.node,
+        nodes=nodes,
+        root=root,
+        related=related,
+        explanation=(
+            f"Things that keep changing state, on {len(nodes)} node{'s' if len(nodes) != 1 else ''}: "
+            f"{what}. {1 + len(related)} findings in all."
+        ),
+    )
 
 
 def _pattern(check: str, template: str, members: List[Incident]) -> Incident:

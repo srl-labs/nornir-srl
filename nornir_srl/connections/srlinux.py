@@ -2,7 +2,10 @@ from typing import Any, List, Dict, Optional
 import difflib
 import json
 import logging
+import errno
 import re
+import socket
+import ssl
 import time
 
 
@@ -13,7 +16,7 @@ from nornir.core.exceptions import ConnectionException
 
 from .helpers import strip_modules, normalize_gnmi_resp
 from .interfaces import NetworkInstanceMixin
-from .routing import RoutingMixin
+from .routing import RoutingMixin, _suppress_pygnmi_client_logging
 from .layer2 import Layer2Mixin
 from .neighbor_discovery import NeighborDiscoveryMixin
 from .subscription import GnmiSubscription
@@ -44,6 +47,90 @@ def _resolve_skip_verify(extras: Dict[str, Any]) -> bool:
     if configured is not None:
         return bool(configured)
     return not extras.get("path_cert")
+
+
+class NodeUnreachable(ConnectionError):
+    """A node that could not be connected to at all: nothing answered, or it refused."""
+
+
+class TlsFailed(ConnectionError):
+    """A node that answered, and could not agree on TLS: not a gNMI port, or a bad certificate."""
+
+
+class _QuietUnreachable(logging.Filter):
+    """Nornir's traceback for a task on a node that cannot be connected to, unless debugging.
+
+    Nornir logs every failed task with its full traceback. For a node that
+    is down or unreachable that is thirty lines saying what the one line
+    fcli prints already says; at ``-l DEBUG`` it is kept, where a traceback
+    is what was asked for.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if logging.getLogger("nornir_srl").isEnabledFor(logging.DEBUG):
+            return True
+        message = record.getMessage()
+        return not any(name in message for name in _QUIET_FAILURES)
+
+
+#: The failures whose one-line reason says it all.
+_QUIET_FAILURES = (f"{__name__}.NodeUnreachable: ", f"{__name__}.TlsFailed: ")
+
+
+logging.getLogger("nornir.core.task").addFilter(_QuietUnreachable())
+
+
+#: How long a node has to accept a TCP connection on its gNMI port before it
+#: is reported as not responding. Without it, an address that drops packets
+#: takes the operating system's connect timeout - over two minutes - to fail.
+CONNECT_TIMEOUT = 10.0
+
+
+def _probe(host: Any, port: Any, timeout: float = CONNECT_TIMEOUT) -> None:
+    """Raise :class:`NodeUnreachable` unless *host* accepts a connection on *port* in time."""
+    try:
+        with socket.create_connection((host, int(port)), timeout=timeout):
+            return
+    except OSError as exc:
+        raise _unreachable(exc, host, port) from exc
+
+
+def _unreachable(cause: BaseException, host: Any, port: Any) -> Exception:
+    """What a failed connection to *host* says it was, in words about the node."""
+    where = f"{host} on gNMI port {port}"
+    if isinstance(cause, ssl.SSLError):
+        return TlsFailed(f"TLS handshake with {where} failed: {cause}")
+    if isinstance(cause, ConnectionRefusedError):
+        return NodeUnreachable(f"not reachable: {where} refused the connection - is gNMI enabled and listening there?")
+    if isinstance(cause, (socket.timeout, TimeoutError)):
+        return NodeUnreachable(f"not responding: no answer from {where}")
+    if isinstance(cause, socket.gaierror):
+        return NodeUnreachable(f"not reachable: {host} does not resolve ({cause.strerror or cause})")
+    if isinstance(cause, OSError):
+        reason = cause.strerror or str(cause)
+        if cause.errno in (errno.EHOSTUNREACH, errno.ENETUNREACH, errno.EHOSTDOWN):
+            return NodeUnreachable(f"not reachable: no route to {where} ({reason})")
+        if cause.errno == errno.ECONNRESET:
+            return NodeUnreachable(f"not responding: {where} closed the connection ({reason})")
+        return NodeUnreachable(f"not reachable: {where} ({reason})")
+    return NodeUnreachable(f"not reachable: {where} ({cause})")
+
+
+def _connect_failure(exc: BaseException, host: Any, port: Any) -> Optional[Exception]:
+    """What a failed connect really was, where pygnmi says it was something else.
+
+    Without certificate verification pygnmi first fetches the node's
+    certificate, and reports any failure to as 'The SSL certificate cannot
+    be retrieved' - a node that is down, unreachable or not listening reads
+    as a TLS problem. The socket error it wraps says which it was. A real
+    TLS failure is left one, in words that say so. ``None`` for anything
+    else, which is raised as it came.
+    """
+    if "certificate cannot be retrieved" not in str(exc.args[0] if exc.args else exc):
+        return None
+    # pygnmi keeps what went wrong underneath as orig_exc.
+    cause = getattr(exc, "orig_exc", None) or exc.__cause__ or exc.__context__
+    return _unreachable(cause or exc, host, port)
 
 
 class GnmiPath:
@@ -144,6 +231,14 @@ class SrLinux(
             grpc_options,
         )
         started = time.perf_counter()
+        # Whether anything answers at all, quickly and in its own words,
+        # before pygnmi takes minutes to call it a certificate problem.
+        if hostname and port:
+            try:
+                _probe(hostname, port)
+            except NodeUnreachable as exc:
+                logger.debug("%s: connect failed: %s", hostname, exc)
+                raise
         _connection = gNMIclient(
             target=target,
             username=username,
@@ -152,7 +247,17 @@ class SrLinux(
             grpc_options=grpc_options,
             **extras,  # type: ignore
         )
-        _connection.connect()
+        try:
+            # pygnmi logs its own error before raising, and calls a node that
+            # does not answer a certificate problem: said once, and right, below.
+            with _suppress_pygnmi_client_logging():
+                _connection.connect()
+        except Exception as exc:  # noqa: BLE001 - re-raised, clearer where it can be
+            clearer = _connect_failure(exc, hostname, port)
+            if clearer is None:
+                raise
+            logger.debug("%s: connect failed: %s (pygnmi: %s)", hostname, clearer, exc)
+            raise clearer from exc
         self._connection = _connection
         self.connection = self
         self.hostname = hostname

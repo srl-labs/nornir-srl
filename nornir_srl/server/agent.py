@@ -418,6 +418,12 @@ def system_prompt(context: Optional[Dict[str, Any]], topo_name: Optional[str]) -
         "when, since='baseline' for how the fabric drifted from its known-good "
         "state. A change that happened just before the incident is usually its "
         "trigger. Quote change times as given.",
+        "A change of kind 'config' is a commit to a node's configuration, with who "
+        "made it and how many lines it changed: when one precedes a fault, call "
+        "config_diff with that node and commit to see exactly what it changed, and "
+        "name the commit, the user and the lines in your answer. A 'server' change "
+        "is fcli itself stopping or starting; changes found on its restart say "
+        "'while fcli was not running' and happened at some point in that gap.",
         "For 'where is this address', 'how does A reach B' and 'show me this "
         "service everywhere' use locate_address, trace_path and service_detail: "
         "each joins several reports across every node in one call.",
@@ -448,7 +454,7 @@ def system_prompt(context: Optional[Dict[str, Any]], topo_name: Optional[str]) -
     name = ctx.get("topo_name") or topo_name
     extra = []
     if name:
-        extra.append(f"topology={name}")
+        extra.append(f"fabric={name}")
     if viewing:
         extra.append(f"user is viewing report '{viewing}'")
     if inv:
