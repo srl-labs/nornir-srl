@@ -31,11 +31,14 @@ column name is written.
 
 from __future__ import annotations
 
+import inspect
 import ipaddress
 from dataclasses import dataclass, replace
 from typing import Any, Callable, Dict, FrozenSet, List, Mapping, Optional, Sequence, Tuple, Union
 
-from .connections.routing import BGP_RIB_ROUTE_FAM_ALIASES
+from .connections.layer2 import ES_DEST_PATH, VXLAN_DEST_PATH, VXLAN_VNI_PATH
+from .connections.routing import BGP_RIB_KEYS, BGP_RIB_ROUTE_FAM_ALIASES
+from .connections.routing import _BGP_RIB_FAMILY as _BGP_RIB_FAMILY_OF
 from .records import (
     BgpRib,
     BgpRoute,
@@ -89,10 +92,17 @@ class SubscriptionSpec:
 #: state of a few hundred services on every node is most of what a large
 #: fabric's server does. These change rarely and carry no counters, so a
 #: change is all they send; measured on SR Linux, they are silent at steady
-#: state. What does carry counters - interface and subinterface statistics,
-#: BFD, the control plane's CPU - stays sampled: ON_CHANGE would send every
-#: tick of every counter. So do the ARP and ND caches, which live under the
-#: sampled subinterfaces.
+#: state. What is mostly counters - port statistics, BFD, the control plane's
+#: CPU - stays sampled: ON_CHANGE would send every tick of every counter.
+#:
+#: Subinterfaces are ON_CHANGE all the same, counters and all. Sampled, a leaf
+#: with a thousand of them re-sends ninety thousand leaves every 25 seconds -
+#: more than a server streaming a dozen such nodes keeps up with, which then
+#: falls minutes behind. On change, the ones carrying no traffic say nothing,
+#: and those that do send their counters about as often as sampling would
+#: (measured on SR Linux 26.7: 125 updates in 94s, from four subinterfaces).
+#: The ARP and ND caches under them go with them, and so do the MAC tables,
+#: whose entries carry no counters at all.
 #:
 #: A path is streamed one way or the other on every report that reads it,
 #: and never overlaps a sampled one (tests/test_registry.py).
@@ -103,6 +113,18 @@ ON_CHANGE_PATHS: FrozenSet[str] = frozenset(
         "/network-instance[name=*]/oper-state",
         "/network-instance[name=*]/interface",
         "/network-instance[name=*]/vxlan-interface",
+        "/network-instance[name=*]/bridge-table/mac-table/mac",
+        "/interface[name=*]/subinterface",
+        "/interface[name=irb*]/subinterface",
+        "/network-instance[name=*]/interface[name=irb*]",
+        "/interface[name=*]/subinterface[index=*]/ipv4/arp/neighbor",
+        "/interface[name=*]/subinterface[index=*]/ipv6/neighbor-discovery/neighbor",
+        # The VTEPs a vxlan-interface sends to, and its VNI: what changes there
+        # is a VTEP coming or going, and sampled, every node re-sends every
+        # one of its thousand bridge-domains' worth every interval.
+        "/tunnel-interface[name=*]/vxlan-interface[index=*]/ingress",
+        "/tunnel-interface[name=*]/vxlan-interface[index=*]/bridge-table/unicast-destinations/destination",
+        "/tunnel-interface[name=*]/vxlan-interface[index=*]/bridge-table/unicast-destinations/es-destination[esi=*]/vtep",
         "/network-instance[name=*]/protocols/bgp/router-id",
         "/network-instance[name=*]/protocols/bgp-vpn",
         "/network-instance[name=*]/protocols/bgp-evpn",
@@ -131,8 +153,6 @@ ON_CHANGE_PATHS: FrozenSet[str] = frozenset(
         "/network-instance[name=*]/route-table/ipv6-unicast/statistics/active-routes",
         "/network-instance[name=default]/route-table/ipv4-unicast",
         "/network-instance[name=default]/route-table/ipv6-unicast",
-        "/network-instance[name=default]/route-table/next-hop-group[index=*]",
-        "/network-instance[name=default]/route-table/next-hop[index=*]",
         "/network-instance[name=default]/route-table/ipv4-unicast/route/ipv4-prefix",
         "/network-instance[name=default]/route-table/ipv6-unicast/route/ipv6-prefix",
     }
@@ -140,8 +160,13 @@ ON_CHANGE_PATHS: FrozenSet[str] = frozenset(
 
 
 def subscription_mode(path: str) -> str:
-    """How *path* is streamed: ``on_change`` or ``sample``; see :data:`ON_CHANGE_PATHS`."""
-    return "on_change" if path in ON_CHANGE_PATHS else "sample"
+    """How *path* is streamed: ``on_change`` or ``sample``; see :data:`ON_CHANGE_PATHS`.
+
+    The BGP RIB is ON_CHANGE wherever it is read: the routes and their
+    attribute sets of a fabric run to tens of thousands per node, and
+    sampled, each node would send all of them again every interval.
+    """
+    return "on_change" if path in ON_CHANGE_PATHS or "/bgp-rib/" in path else "sample"
 
 
 def _streamed(report: "ReportSpec") -> "ReportSpec":
@@ -272,6 +297,19 @@ class ReportSpec:
     #: The report whose records this one collects a narrower cut of, and
     #: whose place it takes in a fabric reading; see :func:`reading_reports`.
     stands_in_for: Optional[str] = None
+    #: True where reading all of it is the exception: a surface waits for one
+    #: of its ``rib-key`` parameters, or for ``scope`` to be ``all``, before
+    #: running it. A BGP RIB of a large fabric is tens of thousands of routes
+    #: per node, where a route asked for by key is one Get away.
+    needs_query: bool = False
+    #: The parameters that change which paths the getter reads, rather than
+    #: what it makes of them: the server discovers - and so streams - the
+    #: report's paths for each value of them apart.
+    path_params: Tuple[str, ...] = ()
+    #: The keys of everything the report would list, one dict per row, read
+    #: as cheaply as the node allows: what a surface offers its ``rib-key``
+    #: parameters from. Called as ``keys(device)``.
+    keys: Optional[Callable[[Any], List[Dict[str, Any]]]] = None
 
     @property
     def tool_name(self) -> str:
@@ -295,6 +333,7 @@ class ReportSpec:
             "category": self.category,
             "sample_interval": self.sample_interval,
             "params": [p.as_dict() for p in self.params],
+            "needs_query": self.needs_query,
             # The browser offers a comparison either way, and says which kind
             # it can be: without keys, a change reads as an add and a remove.
             "key_columns": list(self.key_columns),
@@ -325,12 +364,40 @@ def _bound_bgp_rib(
 ) -> Callable[..., Dict[str, Any]]:
     """A ``bgp_rib`` getter with its address family already chosen."""
 
-    def getter(device: Any, detail: bool = False) -> Dict[str, Any]:
-        kwargs: Dict[str, Any] = {"route_fam": route_fam, "detail": detail}
+    def getter(
+        device: Any,
+        detail: bool = False,
+        paths: Optional[str] = None,
+        scope: Optional[str] = None,
+        **keys: Optional[str],
+    ) -> Dict[str, Any]:
+        chosen = _rib_keys(keys)
+        if not chosen and scope != "all":
+            # Nothing asked yet: no Get either, and nothing for the server to
+            # subscribe to when it discovers the report's paths.
+            return {"bgp_rib": []}
+        kwargs: Dict[str, Any] = {
+            "route_fam": route_fam,
+            "detail": detail,
+            "used_only": _used_only(paths),
+            "keys": chosen,
+        }
         if route_type is not None:
             kwargs["route_type"] = route_type
         return device.get_bgp_rib(**kwargs)
 
+    # The keys by name, as a surface hands them on: what the getter takes is
+    # checked against what the report declares.
+    named = [inspect.Parameter("device", inspect.Parameter.POSITIONAL_OR_KEYWORD)] + [
+        inspect.Parameter(name, inspect.Parameter.KEYWORD_ONLY, default=default)
+        for name, default in (
+            ("detail", False),
+            ("paths", None),
+            ("scope", None),
+            *((key.replace("-", "_"), None) for key in BGP_RIB_KEYS[(_BGP_RIB_FAMILY_OF[BGP_RIB_ROUTE_FAM_ALIASES.get(route_fam, route_fam)], route_type or "")]),
+        )
+    ]
+    getter.__signature__ = inspect.Signature(named)  # type: ignore[attr-defined]
     return getter
 
 
@@ -339,11 +406,84 @@ def _bgp_rib(
     route_fam: str = "evpn",
     route_type: Optional[str] = None,
     detail: bool = False,
+    paths: Optional[str] = None,
+    keys: Optional[Mapping[str, str]] = None,
 ) -> Dict[str, Any]:
-    kwargs: Dict[str, Any] = {"route_fam": route_fam, "detail": detail}
+    kwargs: Dict[str, Any] = {
+        "route_fam": route_fam,
+        "detail": detail,
+        "used_only": _used_only(paths),
+        "keys": _rib_keys(keys or {}),
+    }
     if route_type is not None:
         kwargs["route_type"] = route_type
     return device.get_bgp_rib(**kwargs)
+
+
+def _rib_keys(keys: Mapping[str, Optional[str]]) -> Dict[str, str]:
+    """The route keys asked for, by the name the model gives them."""
+    return {name.replace("_", "-"): str(value) for name, value in keys.items() if value}
+
+
+def _used_only(paths: Optional[str]) -> bool:
+    """Whether a BGP RIB keeps the used (or best) paths alone: unless asked for ``all``."""
+    choice = (paths or "used").strip().lower()
+    if choice not in ("used", "all"):
+        raise ValueError(f"paths: '{paths}' is not one of used, all")
+    return choice == "used"
+
+
+#: Which received paths a BGP RIB lists. The used ones by default - or best,
+#: on a route reflector, which uses none of what it reflects: every route of a
+#: fabric arrives from each route reflector, and only one of its paths is used.
+BGP_RIB_PATHS_PARAM = ParamSpec(
+    name="paths",
+    label="Paths",
+    placeholder="used",
+    help="used: the paths the node uses or picked as best (the default); all: every path received",
+    suggestions=(("used", "the paths the node uses or picked as best"), ("all", "every path received")),
+)
+
+#: Reading a whole BGP RIB rather than the routes asked for by key.
+BGP_RIB_SCOPE_PARAM = ParamSpec(
+    name="scope",
+    label="List all",
+    placeholder="by key",
+    help="Every route of every node, no key asked: on a large fabric tens of "
+    "thousands per node, and minutes to read and stream",
+    kind="choices",
+    choices=("all",),
+)
+
+#: How each key of a route is asked for: its label, and what a value looks like.
+_RIB_KEY_LABELS: Dict[str, Tuple[str, str]] = {
+    "mac-address": ("MAC", "1A:A4:02:FF:00:01 or 1A:A4:*"),
+    "ip-address": ("IP", "10.1.1.1"),
+    "route-distinguisher": ("RD", "10.0.1.2:*"),
+    "esi": ("ESI", "00:00:00:00:01:*"),
+    "ethernet-tag-id": ("Tag", "0"),
+    "neighbor": ("Peer", "10.0.0.1"),
+    "originating-router": ("Originator", "10.0.1.2"),
+    "ip-prefix": ("Prefix", "10.1.0.0/24"),
+    "prefix": ("Prefix", "10.0.0.0/8"),
+    "origin-protocol": ("Protocol", "bgp"),
+}
+
+
+def _rib_key_params(family: str, route_type: Optional[str]) -> Tuple[ParamSpec, ...]:
+    """A parameter for each key of the route list, the one a route is most
+    often looked up by first."""
+    return tuple(
+        ParamSpec(
+            name=key.replace("-", "_"),
+            label=_RIB_KEY_LABELS[key][0],
+            placeholder=_RIB_KEY_LABELS[key][1],
+            help=f"The route's {key} key, matched as gNMI matches one: a value, "
+            "or a pattern with * - the node does the matching",
+            kind="rib-key",
+        )
+        for key in BGP_RIB_KEYS[(family, route_type or "")]
+    )
 
 
 def _lpm_param(example: str) -> ParamSpec:
@@ -1117,9 +1257,13 @@ def _bgp_rib_variants() -> List[ReportSpec]:
             title=f"BGP RIB - EVPN {label}",
             description=description,
             getter=_bound_bgp_rib("evpn", route_type),
+            keys=lambda d, t=route_type: d.get_bgp_rib_keys("evpn", t),
             table=_bgp_rib_table_for("evpn", route_type),
             category="BGP",
             surfaces=STREAMING,
+            params=(*_rib_key_params("evpn", route_type), BGP_RIB_PATHS_PARAM, BGP_RIB_SCOPE_PARAM),
+            needs_query=True,
+            path_params=("scope",),
         )
         for route_type, label, description in evpn
     ]
@@ -1130,9 +1274,13 @@ def _bgp_rib_variants() -> List[ReportSpec]:
             title=f"BGP RIB - {label}",
             description=f"{noun} routes in the BGP RIB-in-post.",
             getter=_bound_bgp_rib(route_fam),
+            keys=lambda d, f=route_fam: d.get_bgp_rib_keys(f),
             table=_bgp_rib_table_for(route_fam),
             category="BGP",
             surfaces=STREAMING,
+            params=(*_rib_key_params(_BGP_RIB_FAMILY_OF[route_fam], None), BGP_RIB_PATHS_PARAM, BGP_RIB_SCOPE_PARAM),
+            needs_query=True,
+            path_params=("scope",),
         )
         for suffix, route_fam, label, noun in families
     )
@@ -1168,39 +1316,45 @@ def _peer_rib(rib: str) -> Callable[..., Dict[str, Any]]:
 
     *rib* ``in`` is what peers sent, read out of the same RIB the BGP RIB
     reports show; ``out`` is what was sent to them, out of the rib-out-post.
-    Either keeps the routes whose neighbor is *peer*, or without one every
-    peer's. Without a *family* every family is read - which is also what the
-    server discovers the paths to stream from, as it calls a getter without
-    arguments - and EVPN is every route type.
+    Both a *peer* and a *family* are needed, and only that peer's routes of
+    that family are read: the peer is named in the Get, as the ``neighbor``
+    key of the route lists, so the node picks them. Without both, nothing
+    is read. EVPN is every route type, each its own Get.
     """
 
     def getter(device: Any, peer: Optional[str] = None, family: Optional[str] = None) -> Dict[str, Any]:
-        if family:
-            wanted = _RECEIVED_ALIASES.get(family.lower(), family.lower())
-            if wanted not in _RECEIVED_FAMILIES:
-                raise ValueError(
-                    f"family: '{family}' is not one of {', '.join(_RECEIVED_FAMILIES)}"
-                )
-            families = [wanted]
-        else:
-            families = list(_RECEIVED_FAMILIES)
+        if not peer or not family:
+            # Never the whole RIB of every family: on a large fabric that is
+            # hundreds of thousands of routes per node, read - and streamed,
+            # as the server discovers what to stream by calling a getter
+            # without arguments - only to keep one peer's.
+            return {"bgp_rib": []}
+        wanted = _RECEIVED_ALIASES.get(family.lower(), family.lower())
+        if wanted not in _RECEIVED_FAMILIES:
+            raise ValueError(f"family: '{family}' is not one of {', '.join(_RECEIVED_FAMILIES)}")
+        route_fam = _RECEIVED_FAMILIES[wanted]
         ribs: List[BgpRib] = []
-        for name in families:
-            route_fam = _RECEIVED_FAMILIES[name]
-            for route_type in ("1", "2", "3", "4", "5") if name == "evpn" else (None,):
-                kwargs: Dict[str, Any] = {"route_fam": route_fam, "rib": rib}
-                if route_type is not None:
-                    kwargs["route_type"] = route_type
-                for table in device.get_bgp_rib(**kwargs).get("bgp_rib", []):
-                    routes = tuple(
-                        route
-                        for route in table.routes
-                        # A locally originated route names no peer.
-                        if route.neighbor not in ("", "0.0.0.0", "::")
-                        and (not peer or _same_address(route.neighbor, peer))
-                    )
-                    if routes:
-                        ribs.append(replace(table, routes=routes))
+        for route_type in ("1", "2", "3", "4", "5") if wanted == "evpn" else (None,):
+            # The peer is a key of every route list, in and out: the node
+            # picks its routes, in the Get. What it sent, used or not.
+            kwargs: Dict[str, Any] = {
+                "route_fam": route_fam,
+                "rib": rib,
+                "used_only": False,
+                "keys": {"neighbor": peer},
+            }
+            if route_type is not None:
+                kwargs["route_type"] = route_type
+            for table in device.get_bgp_rib(**kwargs).get("bgp_rib", []):
+                routes = tuple(
+                    route
+                    for route in table.routes
+                    # A locally originated route names no peer; and the node
+                    # matched the key as written, where an address can be.
+                    if route.neighbor not in ("", "0.0.0.0", "::") and _same_address(route.neighbor, peer)
+                )
+                if routes:
+                    ribs.append(replace(table, routes=routes))
         return {"bgp_rib": ribs}
 
     return getter
@@ -1271,6 +1425,9 @@ REPORTS: List[ReportSpec] = [
             SubscriptionSpec("/interface[name=*]/ethernet", datatype="all", sample_interval=10),
             SubscriptionSpec("/network-instance[name=*]/type", datatype="all", sample_interval=10),
             SubscriptionSpec("/network-instance[name=*]/oper-state", sample_interval=10),
+            # Which subinterfaces each service holds: a service up with some
+            # of them down counts as degraded.
+            SubscriptionSpec("/network-instance[name=*]/interface", datatype="all", sample_interval=30),
             SubscriptionSpec("/network-instance[name=*]/protocols/bgp/neighbor", datatype="all", sample_interval=10),
             SubscriptionSpec("/network-instance[name=*]/protocols/bgp-vpn", datatype="all", sample_interval=10),
         ),
@@ -1462,11 +1619,15 @@ REPORTS: List[ReportSpec] = [
             category="BGP",
             surfaces=STREAMING,
             params=(
+                # Both required: the routes of every peer, or of every
+                # family, are the whole RIB, which on a large fabric hangs
+                # whatever reads it. The node picks the peer's routes itself.
                 ParamSpec(
                     name="peer",
                     label="Peer",
                     placeholder="10.0.0.1",
-                    help="The peer address whose routes to list; empty lists every peer's",
+                    help="The peer address whose routes to list, as the BGP peers table names it",
+                    required=True,
                     # Not 'address': an unnumbered peer is a link-local address
                     # scoped to its interface, fe80::1%ethernet-1/1.0, which does
                     # not parse as one.
@@ -1474,16 +1635,18 @@ REPORTS: List[ReportSpec] = [
                 ParamSpec(
                     name="family",
                     label="Family",
-                    placeholder="all",
-                    help="evpn, ipv4-unicast, ipv6-unicast, l3vpn-ipv4-unicast or l3vpn-ipv6-unicast; empty is every family",
+                    placeholder="evpn",
+                    help="evpn, ipv4-unicast, ipv6-unicast, l3vpn-ipv4-unicast or l3vpn-ipv6-unicast",
+                    required=True,
+                    suggestions=tuple((f, "") for f in _RECEIVED_FAMILIES),
                 ),
             ),
         )
         for direction, rib, table, description in (
             ("received", "in", BGP_RECEIVED_TABLE,
-             "Routes a BGP peer sent, in every family or the one chosen, from the RIB-in-post."),
+             "Routes a BGP peer sent in one family, from the RIB-in-post - asked of the node by peer."),
             ("advertised", "out", BGP_ADVERTISED_TABLE,
-             "Routes sent to a BGP peer, in every family or the one chosen, from the RIB-out-post."),
+             "Routes sent to a BGP peer in one family, from the RIB-out-post - asked of the node by peer."),
         )
     ),
     ReportSpec(
@@ -1608,6 +1771,10 @@ REPORTS: List[ReportSpec] = [
         category="EVPN / L2",
         mcp_name="mac_table",
         sample_interval=10,
+        subscribe=(
+            SubscriptionSpec("/system/features", "state", "sample", 60),
+            SubscriptionSpec("/network-instance[name=*]/bridge-table/mac-table/mac", "state", "on_change", 10),
+        ),
     ),
     ReportSpec(
         name="irb",
@@ -1622,7 +1789,7 @@ REPORTS: List[ReportSpec] = [
         sample_interval=30,
         subscribe=(
             SubscriptionSpec("/interface[name=irb*]/subinterface", datatype="all", sample_interval=30),
-            SubscriptionSpec("/network-instance[name=*]/interface", datatype="config", sample_interval=30),
+            SubscriptionSpec("/network-instance[name=*]/interface[name=irb*]", datatype="config", sample_interval=30),
         ),
     ),
     ReportSpec(
@@ -1648,6 +1815,10 @@ REPORTS: List[ReportSpec] = [
         category="EVPN / L2",
         mcp_name="es_destinations",
         sample_interval=20,
+        subscribe=(
+            SubscriptionSpec("/system/features", "state", "sample", 60),
+            SubscriptionSpec(ES_DEST_PATH, "state", subscription_mode(ES_DEST_PATH), 20),
+        ),
     ),
     ReportSpec(
         name="vxlan",
@@ -1660,6 +1831,14 @@ REPORTS: List[ReportSpec] = [
         category="EVPN / L2",
         mcp_name="vxlan_tunnels",
         sample_interval=20,
+        # Declared rather than discovered: these are what keep the server up
+        # with a fabric of a thousand bridge-domains - see get_vxlan.
+        subscribe=(
+            SubscriptionSpec("/system/features", "state", "sample", 60),
+            SubscriptionSpec("/network-instance[name=*]/vxlan-interface", "config", "on_change", 20),
+            SubscriptionSpec(VXLAN_VNI_PATH, "all", subscription_mode(VXLAN_VNI_PATH), 20),
+            SubscriptionSpec(VXLAN_DEST_PATH, "all", subscription_mode(VXLAN_DEST_PATH), 20),
+        ),
     ),
     ReportSpec(
         name="lldp",
@@ -1840,10 +2019,11 @@ def _underlay_rib(afi: str, family: str, title: str) -> ReportSpec:
         category="Routing",
         # Surfaces offer the whole table; this one only stands in for it.
         surfaces=frozenset(),
+        # The routes only: their next-hops are looked up by key. The default
+        # instance of an EVPN fabric holds a group and a next-hop per remote
+        # VTEP and VNI, tens of thousands, of which the underlay uses a few.
         subscribe=(
             SubscriptionSpec(f"/network-instance[name={_UNDERLAY}]/route-table/{afi}", datatype="state"),
-            SubscriptionSpec(f"/network-instance[name={_UNDERLAY}]/route-table/next-hop-group[index=*]", datatype="state"),
-            SubscriptionSpec(f"/network-instance[name={_UNDERLAY}]/route-table/next-hop[index=*]", datatype="state"),
         ),
         stands_in_for=f"{family}_rib",
     )

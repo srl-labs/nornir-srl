@@ -21,16 +21,21 @@ A reading read back has no ``ifstats``, and so no ``itf_errors`` findings.
 
 from __future__ import annotations
 
+import copy
 import logging
+import re
 import time
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from ..checks import run_checks
+from ..connections.helpers import as_list
+from ..connections.routing import _instances, pick_entries
 from ..fabric import FabricState
 from ..incidents import correlate
 from ..reports import get_report
 from .devices import CachedDevice, DirectDevice, MixinDevice
 from .stream import HostStream
+from .tree import select_path
 
 logger = logging.getLogger(__name__)
 
@@ -41,8 +46,18 @@ FORMAT = 1
 #: Reports a recording cannot hold, because their getter reads no Get.
 NOT_RECORDED = frozenset({"ifstats"})
 
+#: A next-hop or next-hop-group asked for by key, and the table it is in.
+_KEYED_ENTRY = re.compile(
+    r"^/network-instance\[name=([^\]]+)\]/(route-table/(next-hop-group|next-hop))\[index=([^\]*]+)\]$"
+)
+
 #: One Get as written down: the paths, the datatype, and what it answered.
 Call = Dict[str, Any]
+
+
+def _loose(path: str) -> str:
+    """*path* without its ``[key=*]`` predicates, which match what no predicate does."""
+    return re.sub(r"\[[^=\]]+=\*\]", "", path).rstrip("/")
 
 
 def _key(paths: Sequence[str], datatype: Optional[str]) -> Tuple[Tuple[str, ...], str]:
@@ -94,6 +109,18 @@ class TapDevice(CachedDevice):
         _write_down(self._calls, paths, datatype, response)
         return response
 
+    def lookup(
+        self, paths: List[str], datatype: Optional[str] = "state", table: Optional[str] = None
+    ) -> List[Dict[str, Any]]:
+        response = super().lookup(paths, datatype, table)
+        _write_down(self._calls, paths, datatype, response)
+        return response
+
+    def query(self, paths: List[str], datatype: Optional[str] = "state") -> List[Dict[str, Any]]:
+        response = super().query(paths, datatype)
+        _write_down(self._calls, paths, datatype, response)
+        return response
+
 
 class TapDirectDevice(DirectDevice):
     """:class:`DirectDevice`, with every Get written down."""
@@ -109,6 +136,18 @@ class TapDirectDevice(DirectDevice):
         strip_mod: Optional[bool] = True,
     ) -> List[Dict[str, Any]]:
         response = super().get(paths, datatype, strip_mod)
+        _write_down(self._calls, paths, datatype, response)
+        return response
+
+    def lookup(
+        self, paths: List[str], datatype: Optional[str] = "state", table: Optional[str] = None
+    ) -> List[Dict[str, Any]]:
+        response = super().lookup(paths, datatype, table)
+        _write_down(self._calls, paths, datatype, response)
+        return response
+
+    def query(self, paths: List[str], datatype: Optional[str] = "state") -> List[Dict[str, Any]]:
+        response = super().query(paths, datatype)
         _write_down(self._calls, paths, datatype, response)
         return response
 
@@ -155,9 +194,71 @@ class ReplayDevice(MixinDevice):
         strip_mod: Optional[bool] = True,
     ) -> List[Dict[str, Any]]:
         key = _key(paths, datatype)
-        if key not in self._answers:
-            raise ReplayMissing(f"not in the recording: {', '.join(paths)} ({key[1]})")
-        return self._answers[key]
+        if key in self._answers:
+            return self._answers[key]
+        if len(paths) == 1:
+            narrowed = self._from_wider(paths[0], key[1])
+            if narrowed is not None:
+                return narrowed
+        raise ReplayMissing(f"not in the recording: {', '.join(paths)} ({key[1]})")
+
+    def _from_wider(self, path: str, datatype: str) -> Optional[List[Dict[str, Any]]]:
+        """*path* cut out of a wider one the recording holds, as the node would cut it.
+
+        A reading kept before a getter learned to ask for less - the VNIs of
+        the vxlan-interfaces rather than all of them, a line card's state rather
+        than its forwarding tables - still reads back. A key matched by ``*``
+        is no key at all, and a subtree recorded as state holds its config
+        leaves as well.
+        """
+        wanted = _loose(path)
+        kinds = (datatype, "state") if datatype == "all" else (datatype,)
+        best: Optional[Tuple[str, Any]] = None
+        for (recorded_paths, kind), response in self._answers.items():
+            if len(recorded_paths) != 1 or kind not in kinds:
+                continue
+            wider = _loose(recorded_paths[0])
+            if wanted != wider and wanted.startswith((wider + "/", wider + "[")) and (best is None or len(wider) > len(_loose(best[0]))):
+                best = (recorded_paths[0], response)
+        if best is None:
+            return None
+        return [
+            {env: select_path(copy.deepcopy(value), path, "" if env in ("/", "") else env) for env, value in item.items()}
+            for item in best[1]
+            if isinstance(item, dict)
+        ]
+
+    def lookup(
+        self, paths: List[str], datatype: Optional[str] = "state", table: Optional[str] = None
+    ) -> List[Dict[str, Any]]:
+        """Entries by key, as recorded - or out of the whole table, in a reading
+        taken before getters looked them up by key and read it all instead."""
+        key = _key(paths, datatype)
+        if key in self._answers:
+            return self._answers[key]
+        if table is not None:
+            whole = _key([table], datatype)
+            if whole in self._answers:
+                return pick_entries(table, self._answers[whole], paths)
+        return [self._entry_from_table(path, key[1]) for path in paths]
+
+    def _entry_from_table(self, path: str, datatype: str) -> Dict[str, Any]:
+        match = _KEYED_ENTRY.match(path)
+        if match is None:
+            raise ReplayMissing(f"not in the recording: {path} ({datatype})")
+        ni_name, list_path, list_name, index = match.groups()
+        for table_ni in (ni_name, "*"):
+            table = _key([f"/network-instance[name={table_ni}]/{list_path}[index=*]"], datatype)
+            if table not in self._answers:
+                continue
+            for ni in _instances(self._answers[table]):
+                if str(ni.get("name", "")) != ni_name:
+                    continue
+                for entry in as_list((ni.get("route-table") or {}).get(list_name)):
+                    if isinstance(entry, dict) and str(entry.get("index")) == index:
+                        return {path.lstrip("/"): entry}
+            return {}
+        raise ReplayMissing(f"not in the recording: {path} ({datatype})")
 
 
 def payload(

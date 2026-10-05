@@ -8,7 +8,7 @@ import time
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Set, Tuple
 
 from nornir.core import Nornir
 
@@ -31,6 +31,7 @@ from .readings import NOT_RECORDED, Recorder, TapDevice, TapDirectDevice
 from .stream import HostStream
 from .timeline import Reading, Timeline, Watcher
 from .topology import annotate_aliasing, annotate_health, build_topology, node_facts
+from .tree import key_matches
 
 logger = logging.getLogger(__name__)
 
@@ -121,6 +122,16 @@ class FabricStore:
             self.timeline.load_cabling(cabling_file)
         self.watch_interval = watch_interval
         self.watcher = Watcher(self, self.timeline, interval=watch_interval)
+        #: Work a page started without waiting for it to finish - a report's
+        #: first activation, a health reading - by what it is, so that a page
+        #: asking again joins it rather than starting it over.
+        self._background: Dict[Any, "Future[Any]"] = {}
+        self._background_pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="fcli-bg")
+        #: The keys of a report's rows on a node, when they were read; see key_values().
+        self._keys_cache: Dict[Tuple[str, str], Tuple[float, List[Dict[str, Any]]]] = {}
+        self._keys_fetching: Dict[Tuple[str, str], "Future[List[Dict[str, Any]]]"] = {}
+        #: Set once the dashboards' reports have been read; see start().
+        self.warmed = threading.Event()
         #: inv_filter key -> (when, reading), for health asked with no fresh
         #: watcher reading to answer from.
         self._health_cache: Dict[Any, Tuple[float, Reading]] = {}
@@ -133,9 +144,13 @@ class FabricStore:
     # ------------------------------------------------------------------ #
 
     def _on_host_update(self) -> None:
-        """Callback invoked when a HostStream receives a telemetry update."""
-        with self._lock:
-            self._last_state_change = time.time()
+        """Callback invoked when a HostStream receives a telemetry update.
+
+        Without the store's lock: every notification of every node lands here,
+        and queueing the subscription threads behind a slow render is what lets
+        their updates back up. Rebinding a float is atomic all the same.
+        """
+        self._last_state_change = time.time()
 
     def start(self) -> None:
         """Open a gNMI connection to every node in the inventory."""
@@ -161,7 +176,65 @@ class FabricStore:
                 target=self._resync_loop, name="fcli-resync", daemon=True
             )
             self._resync_thread.start()
+        threading.Thread(target=self._warm_up, name="fcli-warm", daemon=True).start()
         self.watcher.start()
+
+    #: The reports read first at start-up: what the dashboards draw. A node
+    #: answers one Get at a time, and the checks read tables far larger than
+    #: these, so behind the checks the dashboards stay empty for a minute.
+    WARM_UP_REPORTS: Tuple[str, ...] = ("overview", "topology")
+
+    def _warm_up(self) -> None:
+        """Read the dashboards' reports, in order, then let the watcher start."""
+        try:
+            names = self._targets(None)
+            for report in self.WARM_UP_REPORTS:
+                if self._stop.is_set():
+                    return
+                started = time.perf_counter()
+                self._activate_within(report, names, wait=None)
+                logger.debug("warm-up: '%s' read in %.2fs", report, time.perf_counter() - started)
+        except Exception as exc:  # noqa: BLE001 - the pages still activate on demand
+            logger.warning("warming up the dashboards failed: %s", exc)
+        finally:
+            self.warmed.set()
+
+    def _in_background(self, key: Any, work: Any) -> "Future[Any]":
+        """Run *work* once in the background: a run already under way for *key* is joined."""
+        with self._lock:
+            running = self._background.get(key)
+            if running is not None and not running.done():
+                return running
+            future = self._background_pool.submit(work)
+            self._background[key] = future
+            for done in [k for k, f in self._background.items() if f.done()]:
+                del self._background[done]
+            return future
+
+    def _activate_within(self, report_name: str, names: List[str], wait: Optional[float]) -> bool:
+        """Activate *report_name* on *names*, waiting at most *wait* seconds.
+
+        Returns whether it is done. A report already read only has its paths
+        re-asserted, which is quick; the first activation - the Gets of every
+        path on every node - goes on in the background past *wait*, and a page
+        asking meanwhile renders what has come in so far.
+        """
+        report = get_report(report_name)
+        with self._lock:
+            done = all((n, report_name) in self._activated for n in names if n in self._streams)
+        if done:
+            self.activate(report, names)
+            return True
+        future = self._in_background(
+            ("activate", report_name, tuple(sorted(names))), lambda: self.activate(report, names)
+        )
+        try:
+            future.result(timeout=wait)
+        except TimeoutError:
+            return False
+        except Exception as exc:  # noqa: BLE001 - what streams still renders
+            logger.warning("activating the %s report failed: %s", report_name, exc)
+        return True
 
     def _connect(self, name: str, host: Any) -> None:
         if self._stop.is_set():
@@ -322,6 +395,7 @@ class FabricStore:
         """
         self._stop.set()
         self.watcher.stop()
+        self._background_pool.shutdown(wait=False, cancel_futures=True)
         with self._shutdown_lock:
             if self._stopped:
                 return
@@ -456,22 +530,37 @@ class FabricStore:
     # report activation
     # ------------------------------------------------------------------ #
 
-    def activate(self, report: ReportSpec, hosts: Optional[List[str]] = None) -> None:
+    def activate(
+        self,
+        report: ReportSpec,
+        hosts: Optional[List[str]] = None,
+        params: Optional[Mapping[str, Any]] = None,
+    ) -> None:
         """Make sure every node streams the paths *report* needs.
 
         This runs on every render, not just the first one: re-asserting the paths
         is what marks them as still in use, so a report someone is watching is
         never retired from under it.
+
+        Of *params*, those the report reads other paths with - its
+        :attr:`~ReportSpec.path_params` - are a report of their own here: the
+        paths are discovered, streamed and counted for each value of them apart.
         """
         with self._lock:
             names = hosts if hosts is not None else list(self._streams)
             pending = [n for n in names if n in self._streams]
         if not pending:
             return
-        list(self._pool.map(lambda n: self._activate_host(report, n), pending))
+        list(self._pool.map(lambda n: self._activate_host(report, n, params), pending))
 
-    def _activate_host(self, report: ReportSpec, name: str) -> None:
-        key = (name, report.name)
+    @staticmethod
+    def activation_name(report: ReportSpec, params: Optional[Mapping[str, Any]] = None) -> str:
+        """What *report*, run with *params*, is activated and counted under."""
+        shaping = sorted((k, str(v)) for k, v in (params or {}).items() if k in report.path_params and v)
+        return report.name + ("?" + "&".join(f"{k}={v}" for k, v in shaping) if shaping else "")
+
+    def _activate_host(self, report: ReportSpec, name: str, params: Optional[Mapping[str, Any]] = None) -> None:
+        key = (name, self.activation_name(report, params))
         with self._lock:
             stream = self._streams.get(name)
             if stream is None:
@@ -496,7 +585,7 @@ class FabricStore:
         try:
             if specs is None:
                 started = time.perf_counter()
-                specs = self._discover(report, stream)
+                specs = self._discover(report, stream, {k: v for k, v in (params or {}).items() if k in report.path_params})
                 logger.debug(
                     "%s: report '%s' needs %d path(s), discovered in %.3fs: %s",
                     name,
@@ -521,6 +610,75 @@ class FabricStore:
                 self._activation_errors[key] = (time.time(), str(exc))
                 self._activated.add(key)
 
+    #: How long the keys a node's routes are looked up by are kept: they are a
+    #: Get of their own, and offering them is about what exists, not what changed.
+    KEYS_TTL = 300.0
+
+    def key_values(
+        self,
+        report: ReportSpec,
+        param: str,
+        inv_filter: Optional[Dict[str, str]] = None,
+        chosen: Optional[Mapping[str, str]] = None,
+        typed: str = "",
+        limit: int = 100,
+    ) -> Dict[str, Any]:
+        """The values the key *param* of *report*'s rows takes, to pick one from.
+
+        Across the (filtered) nodes, among the rows the other keys in *chosen*
+        already match, and that hold *typed* - or match it, when it is a
+        pattern. The most common first, at most *limit* of them; ``total``
+        says how many there are. A node's keys are read once per
+        :attr:`KEYS_TTL`, and by one request at a time.
+        """
+        if report.keys is None:
+            raise KeyError(f"report '{report.name}' has no keys to offer")
+        key = param.replace("_", "-")
+        names = [n for n in self._targets(inv_filter) if n in self._streams]
+        others = {k.replace("_", "-"): str(v) for k, v in (chosen or {}).items() if v and k != param}
+        rows = [row for rows in self._pool.map(lambda n: self._node_keys(report, n), names) for row in rows]
+        pattern = typed.strip()
+        counts: Dict[str, int] = {}
+        for row in rows:
+            if key not in row or not all(key_matches(v, str(row.get(k, ""))) for k, v in others.items()):
+                continue
+            value = str(row[key])
+            if pattern and pattern.lower() not in value.lower() and not key_matches(pattern, value):
+                continue
+            counts[value] = counts.get(value, 0) + 1
+        ranked = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
+        return {
+            "param": param,
+            "values": [{"value": v, "routes": n} for v, n in ranked[:limit]],
+            "total": len(counts),
+        }
+
+    def _node_keys(self, report: ReportSpec, name: str) -> List[Dict[str, Any]]:
+        """The keys of *report*'s rows on node *name*, as recently as :attr:`KEYS_TTL`."""
+        cache_key = (name, report.name)
+        with self._lock:
+            cached = self._keys_cache.get(cache_key)
+            if cached is not None and time.time() - cached[0] < self.KEYS_TTL:
+                return cached[1]
+            running = self._keys_fetching.get(cache_key)
+            leader = running is None
+            if leader:
+                running = self._keys_fetching[cache_key] = Future()
+            stream = self._streams.get(name)
+        if not leader:
+            return running.result()
+        rows: List[Dict[str, Any]] = []
+        try:
+            if stream is not None and report.keys is not None:
+                rows = report.keys(DirectDevice(stream))
+        except Exception as exc:  # noqa: BLE001 - the other nodes still offer theirs
+            logger.debug("%s: reading the keys of '%s' failed: %s", name, report.name, exc)
+        with self._lock:
+            self._keys_cache[cache_key] = (time.time(), rows)
+            del self._keys_fetching[cache_key]
+        running.set_result(rows)
+        return rows
+
     def progress(
         self,
         reports: Sequence[str],
@@ -539,7 +697,9 @@ class FabricStore:
             done = sum(1 for n in nodes for r in reports if (n, r) in self._activated)
         return {"ready": done, "total": len(nodes) * len(reports), "nodes": len(nodes)}
 
-    def _discover(self, report: ReportSpec, stream: HostStream) -> List[SubscriptionSpec]:
+    def _discover(
+        self, report: ReportSpec, stream: HostStream, params: Optional[Mapping[str, Any]] = None
+    ) -> List[SubscriptionSpec]:
         """Determine which gNMI paths a report needs on this node."""
         if report.subscribe:
             interval = self.sample_interval
@@ -552,7 +712,7 @@ class FabricStore:
                 for s in report.subscribe
             ]
         recorder = RecordingDevice(stream.device, stream.discovery_get)
-        report.getter(recorder)
+        report.getter(recorder, **(params or {}))
         interval = self.sample_interval or report.sample_interval
         return [
             SubscriptionSpec(path=path, datatype=datatype, mode=subscription_mode(path), sample_interval=interval)
@@ -591,7 +751,7 @@ class FabricStore:
             }
         names = self._targets(inv_filter, hosts)
         self._heal_connections(names)
-        self.activate(report, names)
+        self.activate(report, names, params)
 
         inv_key = tuple(sorted(inv_filter.items())) if inv_filter else None
         param_key = tuple(sorted((params or {}).items())) or None
@@ -734,7 +894,7 @@ class FabricStore:
             stream = self._streams.get(name)
             if stream is None:
                 return name, None, self._connect_errors.get(name, "not connected")
-            activation_error = self._activation_errors.get((name, report.name))
+            activation_error = self._activation_errors.get((name, self.activation_name(report, params)))
         if activation_error:
             return name, None, activation_error[1]
         if self._stop.is_set():
@@ -926,6 +1086,10 @@ class FabricStore:
     #: How long an on-demand health reading is reused for.
     HEALTH_TTL = 10.0
 
+    #: How long the dashboards wait for what is still being read before they
+    #: answer with what there is.
+    PAGE_WAIT = 2.0
+
     def health(self, inv_filter: Optional[Dict[str, str]] = None) -> Reading:
         """The findings and incidents of the (filtered) fabric, as recently as they are known.
 
@@ -954,6 +1118,34 @@ class FabricStore:
                 self._health_cache.clear()
             self._health_cache[key] = (now, reading)
         return reading
+
+    def health_within(self, inv_filter: Optional[Dict[str, str]], wait: float) -> Optional[Reading]:
+        """:meth:`health`, waiting at most *wait* seconds for it.
+
+        What a dashboard draws while the checks are still reading the fabric:
+        the latest reading there is, however old, or ``None`` before the first
+        one. A fresher one is read in the background meanwhile - by the
+        watcher, when it is the one keeping them.
+        """
+        deadline = time.time() + max(wait, 0.0)
+        if self.watch_interval > 0 and not inv_filter:
+            while self.timeline.latest is None and time.time() < deadline and not self._stop.is_set():
+                time.sleep(0.05)
+            return self.timeline.latest
+        key = tuple(sorted(inv_filter.items())) if inv_filter else None
+        with self._lock:
+            cached = self._health_cache.get(key)
+        if cached is not None and time.time() - cached[0] < self.HEALTH_TTL:
+            return cached[1]
+        future = self._in_background(("health", key), lambda: self.health(inv_filter))
+        try:
+            return future.result(timeout=max(deadline - time.time(), 0.0))
+        except TimeoutError:
+            return cached[1] if cached is not None else None
+
+    def health_progress(self, inv_filter: Optional[Dict[str, str]] = None) -> Dict[str, int]:
+        """How far the reports the checks read are in answering for the first time."""
+        return self.progress(reading_reports(REQUIRED_REPORTS), inv_filter)
 
     # ------------------------------------------------------------------ #
     # acknowledging
@@ -1241,13 +1433,18 @@ class FabricStore:
         }
 
     def overview(self, inv_filter: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
-        """Aggregate fabric-wide health and topology metrics for the dashboard."""
+        """Aggregate fabric-wide health and topology metrics for the dashboard.
+
+        Answers within :attr:`PAGE_WAIT` however far the fabric has been read:
+        the counts are of what the nodes have streamed so far, ``loading`` says
+        how many have yet to, and the health card is the latest reading there
+        is - ``health_loading`` saying how far the next one is, while there is
+        none. A page polling it fills in as the nodes answer.
+        """
+        deadline = time.time() + self.PAGE_WAIT
         names = self._targets(inv_filter)
         self._heal_connections(names)
-        try:
-            self.activate(get_report("overview"), names)
-        except Exception as exc:  # noqa: BLE001 - the summary still renders
-            logger.warning("activating the overview report failed: %s", exc)
+        ready = self._activate_within("overview", names, wait=self.PAGE_WAIT)
 
         hosts = self.inventory()
         with self._lock:
@@ -1263,13 +1460,16 @@ class FabricStore:
         # error counters say nothing about the fabric; see check_itf_errors.
         virtual = containerlab_nodes(self.nornir.inventory.hosts)
         for stream in streams:
-            snapshot = stream.snapshot_roots(_OVERVIEW_ROOTS)
+            snapshot = stream.snapshot_paths(_report_paths("overview"))
             itfs = snapshot.get("interface")
             _tally_interfaces(health, itfs, count_errors=stream.name not in virtual)
             _tally_network_instances(health, snapshot.get("network-instance"), itfs)
 
+        summary = self._health_summary(inv_filter, names, wait=deadline - time.time())
         return {
-            "health": self._health_summary(inv_filter, names),
+            "health": summary,
+            "health_loading": None if summary is not None else self.health_progress(inv_filter),
+            "loading": None if ready else self.progress(["overview"], inv_filter),
             "nodes": {
                 "total": len(hosts),
                 "connected": sum(1 for h in hosts if h["connected"]),
@@ -1296,13 +1496,18 @@ class FabricStore:
         }
 
     def _health_summary(
-        self, inv_filter: Optional[Dict[str, str]], names: List[str]
+        self, inv_filter: Optional[Dict[str, str]], names: List[str], wait: float
     ) -> Optional[Dict[str, Any]]:
-        """The incidents and recent changes, counted, for the dashboard."""
+        """The incidents and recent changes, counted, for the dashboard.
+
+        ``None`` while there is no reading yet to count them from.
+        """
         try:
-            reading = self.health(inv_filter)
+            reading = self.health_within(inv_filter, wait)
         except Exception as exc:  # noqa: BLE001 - the rest of the dashboard still renders
             logger.warning("summarizing fabric health failed: %s", exc)
+            return None
+        if reading is None:
             return None
         recent = self.timeline.changes(since=time.time() - 900, nodes=names)
         baseline = self.timeline.baseline
@@ -1329,14 +1534,16 @@ class FabricStore:
         Nodes that are down or have not streamed anything yet are still part of
         the answer, as unclassified ones - a topology missing the node that
         failed would be the opposite of useful.
+
+        Like :meth:`overview`, it answers within :attr:`PAGE_WAIT`: the nodes
+        drawn as far as they have streamed (``loading``), coloured by the latest
+        health reading there is (``health_loading`` while there is none).
         """
         started = time.time()
+        deadline = started + self.PAGE_WAIT
         names = self._targets(inv_filter)
         self._heal_connections(names)
-        try:
-            self.activate(get_report("topology"), names)
-        except Exception as exc:  # noqa: BLE001 - the graph still renders
-            logger.warning("activating the topology report failed: %s", exc)
+        ready = self._activate_within("topology", names, wait=self.PAGE_WAIT)
 
         hosts = {h["name"]: h for h in self.inventory()}
         with self._lock:
@@ -1354,7 +1561,7 @@ class FabricStore:
                     labels=(host.data if host else None) or {},
                     # Taken under this node's lock only, so summarizing the
                     # fabric does not stall the renders running on the others.
-                    snapshot=stream.snapshot_roots(_TOPOLOGY_ROOTS) if stream else None,
+                    snapshot=stream.snapshot_paths(_report_paths("topology")) if stream else None,
                     connected=bool(status.get("connected")),
                     error=status.get("error"),
                     egress=_interface_egress(stream),
@@ -1363,8 +1570,16 @@ class FabricStore:
             )
 
         graph = build_topology(facts)
+        graph["loading"] = None if ready else self.progress(["topology"], inv_filter)
         try:
-            health = self.health(inv_filter)
+            health = self.health_within(inv_filter, deadline - time.time())
+        except Exception as exc:  # noqa: BLE001 - the drawing is worth having without its colours
+            logger.warning("reading the fabric health for the topology failed: %s", exc)
+            health = None
+        graph["health_loading"] = None if health is not None else self.health_progress(inv_filter)
+        try:
+            if health is None:
+                raise _NoReading
             acked = self.acks.keys()
             annotate_health(
                 graph,
@@ -1375,7 +1590,16 @@ class FabricStore:
             graph["health_at"] = health.at
             # The route tables the checks read are also what says which
             # remote VTEPs load-balance over a virtual segment.
-            annotate_aliasing(graph, self._service_ribs(graph, health.state))
+            # Fetched with Gets of their own, so in the background like the
+            # rest: the drawing goes without it until they are in.
+            key = tuple(sorted(inv_filter.items())) if inv_filter else None
+            ribs = self._in_background(("aliasing", key), lambda: self._service_ribs(graph, health.state))
+            try:
+                annotate_aliasing(graph, ribs.result(timeout=max(deadline - time.time(), 0.0)))
+            except TimeoutError:
+                pass
+        except _NoReading:
+            pass
         except Exception as exc:  # noqa: BLE001 - the drawing is worth having without its colours
             logger.warning("annotating the topology with health failed: %s", exc)
             logger.debug("annotating the topology failed", exc_info=exc)
@@ -1385,18 +1609,19 @@ class FabricStore:
         return graph
 
 
-#: Tree roots the overview summarizes.
-_OVERVIEW_ROOTS: Tuple[str, ...] = ("interface", "network-instance")
+class _NoReading(Exception):
+    """No health reading yet to colour the topology with."""
 
-#: Tree roots the topology is inferred from: LLDP and the host-name under
-#: ``system``, the services under ``network-instance``, port states under
-#: ``interface``, chassis type under ``platform``.
-_TOPOLOGY_ROOTS: Tuple[str, ...] = (
-    "system",
-    "network-instance",
-    "interface",
-    "platform",
-)
+
+def _report_paths(name: str) -> Tuple[str, ...]:
+    """The paths a dashboard report subscribes to: all it summarizes.
+
+    Its own paths, not the roots they are under: those also hold every table
+    the other reports stream - routes, MACs, thousands of subinterfaces'
+    counters - and rendering them on every poll is what kept the dashboards
+    from answering on a large fabric.
+    """
+    return tuple(spec.path for spec in get_report(name).subscribe)
 
 
 def _interface_egress(stream: Optional[HostStream]) -> Dict[str, int]:

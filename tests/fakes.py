@@ -30,6 +30,10 @@ class FakeSubscriber:
         self.error: Optional[BaseException] = None
         self.closed = False
 
+    #: What GnmiSubscription.backlog would say; set by a test playing a
+    #: stream that is behind.
+    backlog = 0
+
     def get_update(self, timeout: Optional[float] = None) -> Dict[str, Any]:
         try:
             message = self._updates.get(timeout=timeout)
@@ -449,7 +453,10 @@ HEALTH_RESPONSES: Dict[str, List[Dict[str, Any]]] = {
         "/platform/control[slot=*]/memory",
         "/platform/linecard[slot=*]/forwarding-complex[name=*]/datapath",
         "/platform/control[slot=*]",
-        "/platform/linecard[slot=*]",
+        "/platform/linecard[slot=*]/oper-state",
+        "/platform/linecard[slot=*]/healthz",
+        "/platform/linecard[slot=*]/type",
+        "/platform/linecard[slot=*]/serial-number",
         "/platform/fan-tray[id=*]",
         "/platform/power-supply[id=*]",
         "/interface[name=*]/transceiver",

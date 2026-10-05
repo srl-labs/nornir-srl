@@ -16,6 +16,8 @@ from nornir_srl.server.tree import (
     parse_elem,
     parse_path,
     prune,
+    select_many,
+    select_materialized,
     select_path,
     split_path,
     strip_module,
@@ -474,3 +476,101 @@ def test_a_list_key_from_a_get_response_keeps_its_type():
     )
     route = materialize(tree)["network-instance"]["route"][0]
     assert route["ethernet-tag-id"] == 0
+
+
+def _streamed_tree() -> dict:
+    """A shared tree as streamed updates leave it: keyed lists are ListNodes."""
+    root: dict = {}
+    for ni in ("default", "mac-vrf-1", "mac-vrf-2"):
+        insert(root, f"network-instance[name={ni}]/type", "mac-vrf" if "mac" in ni else "default")
+        insert(root, f"network-instance[name={ni}]/ip-addresses", ["10.0.0.1", "10.0.0.2"])
+        insert(root, f"network-instance[name={ni}]/bridge-table/mac-table/mac[address=00:00:00:00:00:01]/type", "learnt")
+    insert(root, "network-instance[name=default]/router-id", "10.0.0.1")
+    insert(root, "network-instance[name=default]/bgp-rib/attr-sets/attr-set[index=1]/origin", "igp")
+    insert(
+        root,
+        "network-instance[name=default]/bgp-rib/afi-safi[afi-safi-name=evpn]/evpn/rib-in-out/rib-in-post/mac-ip-route",
+        [{"attr-id": 1, "used-route": True}],
+    )
+    insert(
+        root,
+        "network-instance[name=default]/bgp-rib/afi-safi[afi-safi-name=evpn]/evpn/rib-in-out/rib-in-pre/mac-ip-route",
+        [{"attr-id": 2}],
+    )
+    for itf in ("lag1", "ethernet-1/1", "ethernet-1/49"):
+        insert(root, f"interface[name={itf}]/oper-state", "up")
+        insert(root, f"interface[name={itf}]/statistics/in-octets", "1")
+        for index in range(3):
+            insert(root, f"interface[name={itf}]/subinterface[index={index}]/admin-state", "enable")
+    insert(root, "interface[name=lag1]/subinterface[index=7]", {})
+    insert(root, "platform/control[slot=A]/software-version", "v24.10.1")
+    return root
+
+
+@pytest.mark.parametrize(
+    "request_path, envelope",
+    [
+        (RIB_REQUEST, "network-instance"),
+        (RIB_REQUEST, ""),
+        (ATTR_SETS_REQUEST, "network-instance"),
+        (ATTR_SETS_REQUEST, "network-instance[name=default]"),
+        ("/network-instance[name=mac-vrf-*]/bridge-table/mac-table/mac", "network-instance"),
+        ("/network-instance[name=*]/type", "network-instance"),
+        ("/network-instance[name=nope]/type", "network-instance"),
+        ("/network-instance/protocols/bgp", "network-instance"),
+        ("/interface[name=lag*]", "interface"),
+        ("/interface[name=*]/statistics", "interface"),
+        ("/interface[name=lag*]/subinterface", ""),
+        ("/interface[name=*]/subinterface[index=1]/admin-state", "interface"),
+        ("/interface[name=lag1]/subinterface", "interface[name=lag1]"),
+        ("/interface", "interface[name=lag1]"),
+        ("/platform/control[slot=A]", "platform/control[slot=A]"),
+        ("/platform/control[slot=*]/software-version", "platform"),
+    ],
+)
+def test_select_materialized_answers_like_select_path(request_path, envelope):
+    """Selecting on the tree is an optimization only: the answer is the same."""
+    root = _streamed_tree()
+    node = root if envelope == "" else get_node(root, envelope)
+    expected = select_path(materialize(node), request_path, envelope)
+    assert select_materialized(node, request_path, envelope) == expected
+
+
+def test_select_materialized_does_not_share_state_with_the_tree():
+    root = _streamed_tree()
+    node = get_node(root, "network-instance")
+    selected = select_materialized(node, "/network-instance[name=*]/ip-addresses", "network-instance")
+    selected[0]["ip-addresses"].append("mutated")
+    assert "mutated" not in materialize(node)[0]["ip-addresses"]
+
+
+@pytest.mark.parametrize(
+    "request_path",
+    [RIB_REQUEST, ATTR_SETS_REQUEST, "/interface[name=lag*]/subinterface", "/network-instance[name=*]/type", "/nope"],
+)
+def test_select_many_with_one_path_is_select_path(request_path):
+    root = _streamed_tree()
+    assert select_many(root, [request_path]) == select_path(materialize(root), request_path, "")
+
+
+def test_select_many_keeps_what_each_path_names_and_nothing_else():
+    root = _streamed_tree()
+    selected = select_many(
+        root,
+        ["/interface[name=*]/statistics", "/network-instance[name=*]/type", "/platform/control[slot=*]"],
+    )
+    assert set(selected) == {"interface", "network-instance", "platform"}
+    assert all("subinterface" not in itf and "statistics" in itf for itf in selected["interface"])
+    assert [ni["name"] for ni in selected["network-instance"]] == ["default", "mac-vrf-1", "mac-vrf-2"]
+    assert all("bridge-table" not in ni and "bgp-rib" not in ni for ni in selected["network-instance"])
+    # Leaves along the way stay, as a Get of either path would have them.
+    assert selected["network-instance"][0]["ip-addresses"] == ["10.0.0.1", "10.0.0.2"]
+
+
+def test_select_many_merges_paths_into_the_same_entries():
+    root = _streamed_tree()
+    selected = select_many(root, ["/interface[name=lag1]/statistics", "/interface[name=*]/subinterface[index=7]"])
+    (lag1,) = selected["interface"]
+    assert lag1["name"] == "lag1"
+    assert lag1["statistics"] == {"in-octets": "1"}
+    assert lag1["subinterface"] == [{"index": "7"}]

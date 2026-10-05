@@ -445,8 +445,13 @@ def bgp_rib(
     route_type: Optional[Literal["1", "2", "3", "4", "5"]] = None,
     inv_filter: Optional[str] = None,
     field_filter: Optional[str] = None,
+    all_routes: bool = False,
+    keys: Optional[str] = None,
 ) -> str:
     """Get BGP RIB (Routing Information Base) entries.
+
+    Only the routes each node uses, unless *all_routes*: every NLRI usually
+    arrives from more than one peer, and only one of those paths is used.
 
     Returns one object per network-instance per node: node, ni, family,
     route_type (EVPN only) and routes. A route carries the peer it came from
@@ -468,6 +473,16 @@ def bgp_rib(
             'show_topology' to see available keys. Omit to target all nodes.
         field_filter: Field filter as comma-separated key=value pairs to filter output rows
             (e.g. 'state=up'). Values are case-insensitive regexes.
+        all_routes: Every path received, not only the used ones.
+        keys: Route keys to look up by, as comma-separated key=value pairs matched by the
+            node in the gNMI Get itself - e.g. 'mac-address=1A:A4:02:FF:00:01' or
+            'esi=00:00:00:00:01:*'. Far quicker than reading a large RIB whole. The keys are
+            EVPN 1: esi, route-distinguisher, ethernet-tag-id, neighbor; 2: mac-address,
+            ip-address, route-distinguisher, ethernet-tag-id, neighbor; 3: originating-router,
+            route-distinguisher, ethernet-tag-id, neighbor; 4: esi, originating-router,
+            route-distinguisher, neighbor; 5: ip-prefix, route-distinguisher, ethernet-tag-id,
+            neighbor; IPv4/IPv6: prefix, neighbor, origin-protocol; L3VPN: prefix,
+            route-distinguisher, neighbor.
     """
     return _run_report(
         "bgp_rib",
@@ -475,6 +490,8 @@ def bgp_rib(
         field_filter,
         route_fam=route_fam,
         route_type=route_type,
+        paths="all" if all_routes else "used",
+        keys={k.strip(): v.strip() for k, v in (item.split("=", 1) for item in (keys or "").split(",") if "=" in item)},
         detail=True,
     )
 

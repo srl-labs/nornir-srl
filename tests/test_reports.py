@@ -18,6 +18,7 @@ from nornir_srl.reports import (
     LAG_TABLE,
     TUNNEL_TABLE,
     bgp_rib_table,
+    _used_only,
     coerce_params,
     get_report,
 )
@@ -3285,8 +3286,12 @@ def test_received_routes_takes_a_link_local_peer_scoped_to_its_interface():
     peer = "fe80::1863:eff:feff:1%ethernet-1/29.0"
     other = "fe80::1863:eff:feff:1%ethernet-1/30.0"
 
+    asked = []
+
     class Device:
-        def get_bgp_rib(self, route_fam, route_type=None, rib="in"):
+        def get_bgp_rib(self, route_fam, route_type=None, rib="in", used_only=True, keys=None):
+            assert not used_only, "a peer's routes are every one it sent"
+            asked.append(keys)
             routes = (BgpRoute(peer, prefix="10.0.0.1/32"), BgpRoute(other), BgpRoute("0.0.0.0"))
             return {"bgp_rib": [BgpRib("default", route_fam, route_type or "", routes)]}
 
@@ -3295,10 +3300,14 @@ def test_received_routes_takes_a_link_local_peer_scoped_to_its_interface():
     assert params == {"peer": peer, "family": "ipv4"}
     (rib,) = spec.getter(Device(), **params)["bgp_rib"]
     assert [r.neighbor for r in rib.routes] == [peer]
-    # Without a peer: what every peer sent, and nothing originated locally.
-    ribs = spec.getter(Device())["bgp_rib"]
-    assert len(ribs) == 9  # five EVPN route types and four other families
-    assert {r.neighbor for rib in ribs for r in rib.routes} == {peer, other}
+    assert asked == [{"neighbor": peer}], "the node is asked for the peer's routes alone"
+    # Without a peer, or a family, nothing is read: that would be the whole RIB.
+    asked.clear()
+    assert spec.getter(Device())["bgp_rib"] == []
+    assert spec.getter(Device(), peer=peer)["bgp_rib"] == []
+    assert spec.getter(Device(), family="evpn")["bgp_rib"] == []
+    assert asked == []
+    assert all(p.required for p in spec.params)
 
 
 def test_get_bgp_rib_out_reads_what_was_sent_to_each_peer():
@@ -3344,11 +3353,161 @@ def test_peer_routes_read_their_own_side_of_the_rib(name, rib):
     asked = []
 
     class Device:
-        def get_bgp_rib(self, route_fam, route_type=None, rib="in"):
+        def get_bgp_rib(self, route_fam, route_type=None, rib="in", used_only=True, keys=None):
             asked.append(rib)
+            assert keys == {"neighbor": "10.0.0.6"}
             return {"bgp_rib": [BgpRib("default", route_fam, route_type or "", (BgpRoute("10.0.0.6"),))]}
 
     ribs = get_report(name).getter(Device(), peer="10.0.0.6", family="evpn")["bgp_rib"]
     assert [r.route_type for r in ribs] == ["1", "2", "3", "4", "5"]
     assert set(asked) == {rib}
     assert ("st" in get_report(name).table_for({}).column_names) == (rib == "in")
+
+
+def test_get_rib_looks_up_only_the_next_hops_its_routes_use():
+    """The default instance of an EVPN fabric holds a group and a next-hop per
+    remote VTEP and VNI; its underlay routes use a handful of them. An indirect
+    next-hop is followed through its resolving route's group, by key as well."""
+    base = "/network-instance[name=default]/route-table"
+    device = _PathRouting(
+        {
+            f"{base}/ipv4-unicast": [
+                {
+                    "network-instance[name=default]/route-table/ipv4-unicast": {
+                        "route": [
+                            {"ipv4-prefix": "10.0.0.2/32", "active": True, "next-hop-group": "1"},
+                            {"ipv4-prefix": "192.0.2.0/24", "active": True, "next-hop-group": "2"},
+                        ]
+                    }
+                }
+            ],
+            f"{base}/next-hop-group[index=1]": [
+                {"network-instance[name=default]/route-table/next-hop-group[index=1]": {"next-hop": [{"id": 0, "next-hop": "11"}]}}
+            ],
+            f"{base}/next-hop-group[index=2]": [
+                {"network-instance[name=default]/route-table/next-hop-group[index=2]": {"next-hop": [{"id": 0, "next-hop": "12"}]}}
+            ],
+            f"{base}/next-hop[index=11]": [
+                {"network-instance[name=default]/route-table/next-hop[index=11]": {"type": "direct", "ip-address": "fe80::1", "subinterface": "ethernet-1/49.0"}}
+            ],
+            f"{base}/next-hop[index=12]": [
+                {
+                    "network-instance[name=default]/route-table/next-hop[index=12]": {
+                        "type": "indirect",
+                        "ip-address": "10.0.0.2",
+                        "resolving-route": {"ip-prefix": "10.0.0.2/32", "next-hop-group": "3"},
+                    }
+                }
+            ],
+            f"{base}/next-hop-group[index=3]": [
+                {"network-instance[name=default]/route-table/next-hop-group[index=3]": {"next-hop": [{"id": 0, "next-hop": "11"}]}}
+            ],
+        }
+    )
+    (table,) = device.get_rib(afi="ipv4-unicast", network_instance="default")["ip_rib"]
+    egress = {r.prefix: [e.label for h in r.next_hops for e in h.egress] for r in table.routes}
+    assert egress == {"10.0.0.2/32": ["ethernet-1/49.0"], "192.0.2.0/24": ["ethernet-1/49.0"]}
+    assert not any(p.endswith("[index=*]") for p in device.asked), "never the whole next-hop tables"
+    assert device.asked.count(f"{base}/next-hop[index=11]") == 1, "a next-hop is looked up once"
+
+
+
+def _evpn_rib_device(routes: List[Dict[str, Any]], attr_sets: List[Dict[str, Any]]) -> "_PathRouting":
+    base = "/network-instance[name=*]/bgp-rib/afi-safi[afi-safi-name=evpn]/evpn/rib-in-out/rib-in-post/imet-route"
+    responses: Dict[str, List[Dict[str, Any]]] = {
+        base: [{"network-instance": [{"name": "default", "bgp-rib": {"afi-safi": [{"afi-safi-name": "evpn", "evpn": {"rib-in-out": {"rib-in-post": {"imet-route": routes}}}}]}}]}],
+        "/network-instance[name=*]/bgp-rib/attr-sets/attr-set[index=*]": [
+            {"network-instance": [{"name": "default", "bgp-rib": {"attr-sets": {"attr-set": attr_sets}}}]}
+        ],
+    }
+    for attr in attr_sets:
+        responses[f"/network-instance[name=default]/bgp-rib/attr-sets/attr-set[index={attr['index']}]"] = [
+            {f"network-instance[name=default]/bgp-rib/attr-sets/attr-set[index={attr['index']}]": {k: v for k, v in attr.items() if k != "index"}}
+        ]
+    device = _PathRouting(responses)
+    device.capabilities = {"supported_models": [{"name": "urn:nokia.com:srlinux:bgp:rib-bgp", "version": "2025-10-31"}]}
+    return device
+
+
+def _imet(rd: str, neighbor: str, attr: str, used: bool, best: bool) -> Dict[str, Any]:
+    return {"route-distinguisher": rd, "ethernet-tag-id": 0, "originating-router": "10.0.0.2", "neighbor": neighbor,
+            "path-id": 0, "attr-id": attr, "used-route": used, "best-route": best, "valid-route": True}
+
+
+def test_the_bgp_rib_keeps_the_used_paths_and_looks_up_only_their_attributes():
+    """Every route arrives from both reflectors; the table is the one the node uses."""
+    device = _evpn_rib_device(
+        [_imet("10.0.0.2:1", "10.0.0.11", "1", True, True), _imet("10.0.0.2:1", "10.0.0.12", "2", False, False)],
+        [{"index": "1", "next-hop": "10.0.0.2"}, {"index": "2", "next-hop": "10.0.0.2"}],
+    )
+    (rib,) = device.get_bgp_rib("evpn", route_type="3")["bgp_rib"]
+    assert [r.neighbor for r in rib.routes] == ["10.0.0.11"]
+    assert rib.routes[0].next_hop == "10.0.0.2", "joined with its attribute set"
+    assert "/network-instance[name=default]/bgp-rib/attr-sets/attr-set[index=1]" in device.asked
+    assert not any("attr-set[index=2]" in p or p.endswith("attr-set[index=*]") for p in device.asked)
+
+    (every,) = device.get_bgp_rib("evpn", route_type="3", used_only=False)["bgp_rib"]
+    assert [r.neighbor for r in every.routes] == ["10.0.0.11", "10.0.0.12"]
+
+
+def test_a_route_reflector_keeps_its_best_paths():
+    """A reflector uses none of the EVPN routes it passes on: best is what it picked."""
+    device = _evpn_rib_device(
+        [_imet("10.0.0.2:1", "10.0.0.2", "1", False, True), _imet("10.0.0.2:1", "10.0.0.3", "2", False, False)],
+        [{"index": "1"}, {"index": "2"}],
+    )
+    (rib,) = device.get_bgp_rib("evpn", route_type="3")["bgp_rib"]
+    assert [r.neighbor for r in rib.routes] == ["10.0.0.2"]
+
+
+def test_many_attribute_sets_are_read_as_one_table(monkeypatch):
+    from nornir_srl.connections import routing
+
+    monkeypatch.setattr(routing, "LOOKUP_BY_KEY_LIMIT", 1)
+    device = _evpn_rib_device(
+        [_imet(f"10.0.0.2:{i}", "10.0.0.11", str(i), True, True) for i in range(3)],
+        [{"index": str(i), "next-hop": f"10.0.0.{i}"} for i in range(3)],
+    )
+    (rib,) = device.get_bgp_rib("evpn", route_type="3")["bgp_rib"]
+    assert [r.next_hop for r in rib.routes] == ["10.0.0.0", "10.0.0.1", "10.0.0.2"]
+    assert "/network-instance[name=*]/bgp-rib/attr-sets/attr-set[index=*]" in device.asked
+    assert not any("attr-set[index=0]" in p for p in device.asked)
+
+
+def test_the_bgp_rib_reports_take_which_routes_to_list():
+    spec = get_report("bgp_rib_evpn_2")
+    assert coerce_params(spec, {"paths": "all"}) == {"paths": "all"}
+    with pytest.raises(ValueError):
+        _used_only("some")
+
+
+
+def test_a_bgp_rib_looked_up_by_key_names_the_keys_in_its_get():
+    """The node matches the keys; a value can be a pattern, as gNMI allows."""
+    device = _evpn_rib_device([], [])
+    device.get_bgp_rib("evpn", route_type="3", keys={"originating-router": "10.0.0.*", "neighbor": "10.0.0.11"})
+    (asked,) = [p for p in device.asked if "imet-route" in p]
+    assert asked.endswith("/imet-route[originating-router=10.0.0.*][neighbor=10.0.0.11]")
+
+
+def test_a_bgp_rib_rejects_what_is_not_a_key_of_its_routes():
+    device = _evpn_rib_device([], [])
+    with pytest.raises(ValueError, match="not a key"):
+        device.get_bgp_rib("evpn", route_type="3", keys={"mac-address": "1A:*"})
+
+
+def test_a_bgp_rib_report_reads_nothing_until_asked_for_a_key_or_everything():
+    device = _evpn_rib_device([_imet("10.0.0.2:1", "10.0.0.11", "1", True, True)], [{"index": "1"}])
+    getter = get_report("bgp_rib_evpn_3").getter
+    assert getter(device) == {"bgp_rib": []}
+    assert device.asked == []
+    getter(device, originating_router="10.0.0.2")
+    assert any(p.endswith("imet-route[originating-router=10.0.0.2]") for p in device.asked)
+    assert getter(device, scope="all")["bgp_rib"]
+
+
+def test_the_bgp_rib_reports_offer_their_route_keys_main_one_first():
+    names = [p.name for p in get_report("bgp_rib_evpn_2").params if p.kind == "rib-key"]
+    assert names[:2] == ["mac_address", "ip_address"]
+    assert get_report("bgp_rib_evpn_2").needs_query
+    assert get_report("bgp_rib_evpn_2").as_dict()["needs_query"] is True

@@ -780,8 +780,9 @@ body {
   background: var(--panel);
   /* Its menus open over the table below, but a z-index makes the toolbar a
      stacking context of its own: it has to sit above the grid's sticky header
-     cells (5, 7) for them to, and below the sidebar and chat drawer. */
-  z-index: 8;
+     cells (5, 7) for them to, above the key row under it (8), and below the
+     sidebar and chat drawer. */
+  z-index: 9;
 }
 
 .field {
@@ -826,6 +827,72 @@ body {
 
 .grow {
   flex: 1 1 240px;
+}
+
+/* The keys a report is looked up by, on a row of their own under the toolbar. */
+.key-row {
+  display: flex;
+  gap: 10px 14px;
+  align-items: center;
+  flex-wrap: wrap;
+  padding: 8px 20px;
+  border-bottom: 1px solid var(--border);
+  background: var(--panel);
+  /* Its drop-downs open over the table, like the toolbar's: above the grid's
+     sticky header cells (5, 7) - at 7 the Node column's covered them, being
+     later in the page - and below the toolbar's menus (9). */
+  position: relative;
+  z-index: 8;
+}
+
+.key-fields {
+  display: flex;
+  gap: 8px 12px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.key-fields .input {
+  width: 190px;
+}
+
+.key-fields .input:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* Two buttons that read as one control, the chosen one filled. */
+.segmented {
+  display: inline-flex;
+}
+
+.segmented .segment {
+  border-radius: 0;
+}
+
+.segmented .segment:first-child {
+  border-radius: var(--radius-sm) 0 0 var(--radius-sm);
+}
+
+.segmented .segment:last-child {
+  border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+  margin-left: -1px;
+}
+
+.segmented .segment.is-active {
+  background: rgba(var(--accent-rgb), 0.14);
+  border-color: var(--accent);
+  color: var(--accent);
+  position: relative;
+  z-index: 1;
+}
+
+.key-note {
+  font-size: 12px;
+}
+
+.key-note.is-warning {
+  color: var(--warn);
 }
 
 .btn {
@@ -1429,6 +1496,39 @@ th.filtered::after {
 .kpi-card.kpi-err {
   border-color: rgba(var(--err-rgb), 0.4);
   background: linear-gradient(145deg, var(--err-soft) 0%, var(--panel) 75%);
+}
+
+/* A key field while the values the fabric has for it are being read. */
+.input.is-loading {
+  background-image: linear-gradient(90deg, transparent, rgba(var(--accent-rgb), 0.12), transparent);
+  background-size: 200% 100%;
+  animation: key-loading 1.2s linear infinite;
+}
+
+@keyframes key-loading {
+  from { background-position: 100% 0; }
+  to { background-position: -100% 0; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .input.is-loading { animation: none; }
+}
+
+/* Counted from the nodes that have answered so far, while the rest are read. */
+.kpi-card.kpi-loading {
+  border-style: dashed;
+  animation: kpi-loading 1.6s ease-in-out infinite;
+}
+
+@keyframes kpi-loading {
+  50% { opacity: 0.7; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .kpi-card.kpi-loading {
+    animation: none;
+    opacity: 0.8;
+  }
 }
 
 .kpi-card.kpi-ok .kpi-value { color: var(--ok); }
@@ -3285,6 +3385,17 @@ button.pill-jump:hover {
   .report-params {
     flex: 1 1 100%;
   }
+  .key-row {
+    padding: 8px 16px;
+  }
+  .key-fields,
+  .key-fields .field {
+    flex: 1 1 100%;
+  }
+  .key-fields .input {
+    flex: 1;
+    width: auto;
+  }
   /* One argument per row, its input taking what the label leaves. */
   .report-params > .field {
     flex: 1 1 100%;
@@ -3387,6 +3498,45 @@ button.pill-jump:hover {
   max-height: 60vh;
   overflow-y: auto;
   min-width: 180px;
+}
+
+/* A route key's values on the fabric, to pick one from. */
+.key-menu {
+  max-height: 50vh;
+  min-width: 280px;
+  padding: 4px;
+}
+
+.key-option {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 12px;
+  width: 100%;
+  padding: 5px 8px;
+  border: 0;
+  border-radius: var(--radius-xs);
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: 12.5px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.key-option.is-active,
+.key-option:hover {
+  background: var(--panel-2);
+}
+
+.key-option-value {
+  font-family: var(--mono, ui-monospace, monospace);
+  overflow-wrap: anywhere;
+}
+
+.key-option-count {
+  flex: none;
+  font-size: 11.5px;
 }
 
 .choices-all {

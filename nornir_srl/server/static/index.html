@@ -210,6 +210,10 @@
           </div>
         </section>
 
+        <!-- A report looked up by key - a BGP RIB - asks for its keys here, on
+             a row of their own, with whether to list by key or everything. -->
+        <section id="key-row" class="key-row" hidden></section>
+
         <!-- While a report's first answer is still being worked out: a BGP RIB
              can take a while, and a blank page would say nothing. -->
         <div id="query-progress" class="query-progress" role="status" aria-live="polite" hidden>

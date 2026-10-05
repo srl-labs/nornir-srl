@@ -336,6 +336,18 @@ def test_a_candidate_the_target_stopped_sending_is_dropped(es_stream):
     ]
 
 
+def test_nothing_is_evicted_while_the_stream_is_behind_its_node(es_stream):
+    """Applied late, every entry is refreshed late - long enough after the last
+    time to read as gone, in the middle of the sample about to refresh it."""
+    stream, device = es_stream
+    for subscriber in device.subscribers:
+        subscriber.backlog = stream_module.MAX_EVICTION_BACKLOG + 1
+    assert not _sample_until(device, ["192.168.255.1"], lambda: len(_df_candidates(stream)) == 1, timeout=1.0)
+    for subscriber in device.subscribers:
+        subscriber.backlog = 0
+    assert _sample_until(device, ["192.168.255.1"], lambda: len(_df_candidates(stream)) == 1)
+
+
 _ES_CANDIDATE_WITH_MODULES = (
     "srl_nokia-system:system/srl_nokia-system-network-instance:network-instance"
     "/protocols/srl_nokia-system-network-instance-bgp-evpn-ethernet-segments:evpn"
@@ -1337,3 +1349,144 @@ def test_a_sampled_only_subscription_needs_no_heartbeat(lldp_stream):
     stream, device = lldp_stream
     assert wait_for(lambda: device.subscribe_requests)
     assert stream_module.HEARTBEAT.as_gnmi() not in device.subscribe_requests[-1]["subscription"]
+
+
+# --------------------------------------------------------------------------- #
+# lookups by key
+# --------------------------------------------------------------------------- #
+
+NHG_TABLE = "/network-instance[name=*]/route-table/next-hop-group[index=*]"
+NHG_7 = "/network-instance[name=default]/route-table/next-hop-group[index=7]"
+NHG_8 = "/network-instance[name=default]/route-table/next-hop-group[index=8]"
+NHG_7_PAYLOAD = {"network-instance[name=default]/route-table/next-hop-group[index=7]": {"next-hop": [{"id": 0, "next-hop": "9"}]}}
+
+
+def test_a_lookup_is_one_get_answered_per_path_and_then_cached():
+    device = FakeDevice({NHG_7: [NHG_7_PAYLOAD], NHG_8: [{}]})
+    stream = HostStream("leaf1", device, restart_debounce=TEST_DEBOUNCE)
+    try:
+        assert stream.lookup([NHG_7, NHG_8], "state") == [NHG_7_PAYLOAD, {}]
+        assert stream.lookup([NHG_8, NHG_7], "state") == [{}, NHG_7_PAYLOAD]
+        assert stream.gets == 1, "both keys in one Get, then out of the cache"
+        assert not stream._paths, "nothing is subscribed for a key"
+    finally:
+        stream.stop()
+
+
+def test_a_lookup_cache_outlives_the_notifications_that_clear_the_get_cache(lldp_stream):
+    stream, device = lldp_stream
+    device.responses[NHG_7] = [NHG_7_PAYLOAD]
+    stream.lookup([NHG_7], "state")
+    gets = stream.gets
+    stream._apply({"update": {"prefix": "", "update": [{"path": "system/lldp/interface[name=ethernet-1/1]/admin-state", "val": "enable"}]}})
+    stream.lookup([NHG_7], "state")
+    assert stream.gets == gets
+
+
+def test_a_lookup_is_read_off_a_streamed_table():
+    table = [{"network-instance": [{"name": "default", "route-table": {"next-hop-group": [{"index": "7", "next-hop": [{"id": 0, "next-hop": "9"}]}]}}]}]
+    device = FakeDevice({NHG_TABLE: table})
+    stream = HostStream("leaf1", device, restart_debounce=TEST_DEBOUNCE)
+    try:
+        stream.ensure_paths([SubscriptionSpec(NHG_TABLE, "state", mode="on_change")])
+        gets = stream.gets
+        assert stream.lookup([NHG_7, NHG_8], "state") == [NHG_7_PAYLOAD, {}]
+        assert stream.gets == gets
+    finally:
+        stream.stop()
+
+
+def test_discovery_does_not_subscribe_to_what_a_getter_looks_up_by_key(lldp_stream):
+    stream, device = lldp_stream
+    device.responses[NHG_7] = [NHG_7_PAYLOAD]
+    recorder = RecordingDevice(device, stream.discovery_get)
+    assert recorder.lookup([NHG_7, NHG_8]) == [NHG_7_PAYLOAD, {}]
+    assert recorder.recorded == []
+
+
+def test_a_reading_taken_before_lookups_answers_them_from_the_table():
+    from nornir_srl.server.readings import ReplayDevice
+
+    table = [{"network-instance": [{"name": "default", "route-table": {"next-hop-group": [{"index": "7", "next-hop": [{"next-hop": "9"}]}]}}]}]
+    old = [{"paths": ["/network-instance[name=default]/route-table/next-hop-group[index=*]"], "datatype": "state", "response": table}]
+    device = ReplayDevice(old)
+    (found, gone) = device.lookup([NHG_7, NHG_8], "state")
+    assert found == {NHG_7.lstrip("/"): {"index": "7", "next-hop": [{"next-hop": "9"}]}}
+    assert gone == {}
+
+
+ATTR_TABLE = "/network-instance[name=*]/bgp-rib/attr-sets/attr-set[index=*]"
+ATTR_TABLE_RESPONSE = [
+    {"network-instance": [{"name": "default", "bgp-rib": {"attr-sets": {"attr-set": [{"index": str(i), "med": i} for i in range(5)]}}}]}
+]
+
+
+def _attr(i: int) -> str:
+    return f"/network-instance[name=default]/bgp-rib/attr-sets/attr-set[index={i}]"
+
+
+def test_lookups_in_a_streamed_table_are_read_off_it_by_key():
+    device = FakeDevice({ATTR_TABLE: ATTR_TABLE_RESPONSE})
+    stream = HostStream("leaf1", device, restart_debounce=TEST_DEBOUNCE)
+    try:
+        stream.ensure_paths([SubscriptionSpec(ATTR_TABLE, "state", mode="on_change")])
+        gets = stream.gets
+        found = stream.lookup([_attr(3), _attr(9)], "state", ATTR_TABLE)
+        assert found == [{_attr(3).lstrip("/"): {"med": 3}}, {}]
+        assert stream.gets == gets
+    finally:
+        stream.stop()
+
+
+def test_many_lookups_in_a_table_nothing_streams_are_one_get_of_it(monkeypatch):
+    monkeypatch.setattr(stream_module, "LOOKUP_BY_KEY_LIMIT", 2)
+    device = FakeDevice({ATTR_TABLE: ATTR_TABLE_RESPONSE})
+    stream = HostStream("leaf1", device, restart_debounce=TEST_DEBOUNCE)
+    try:
+        found = stream.lookup([_attr(0), _attr(1), _attr(4)], "state", ATTR_TABLE)
+        assert [next(iter(f.values()))["med"] for f in found] == [0, 1, 4]
+        assert device.gets == [(ATTR_TABLE, "state")]
+    finally:
+        stream.stop()
+
+
+def test_discovery_subscribes_to_the_table_a_getter_looks_entries_up_in(lldp_stream):
+    stream, device = lldp_stream
+    device.responses[_attr(1)] = [{_attr(1).lstrip("/"): {"med": 1}}]
+    recorder = RecordingDevice(device, stream.discovery_get)
+    recorder.lookup([_attr(1)], "state", ATTR_TABLE)
+    assert recorder.recorded == [(ATTR_TABLE, "state")]
+
+
+def test_a_reading_kept_before_a_getter_narrowed_its_paths_still_reads_back():
+    """A reading recorded the whole vxlan-interface subtree; the getter now asks
+    for the VNIs and the destinations alone, and is answered from it."""
+    from nornir_srl.server.readings import ReplayDevice
+
+    whole = [
+        {
+            "tunnel-interface": [
+                {
+                    "name": "vxlan0",
+                    "vxlan-interface": [
+                        {
+                            "index": 10,
+                            "ingress": {"vni": 10010},
+                            "bridge-table": {
+                                "statistics": {"active-entries": 4},
+                                "unicast-destinations": {"destination": [{"vtep": "10.0.0.2", "vni": 10010}]},
+                            },
+                        }
+                    ],
+                }
+            ]
+        }
+    ]
+    old = [
+        {"paths": ["/system/features"], "datatype": "state", "response": [{"system/features": ["vxlan"]}]},
+        {"paths": ["/network-instance[name=*]/vxlan-interface"], "datatype": "config", "response": [{"network-instance": [{"name": "mac-vrf-1", "vxlan-interface": [{"name": "vxlan0.10"}]}]}]},
+        {"paths": ["/tunnel-interface[name=*]/vxlan-interface"], "datatype": "all", "response": whole},
+    ]
+    (record,) = ReplayDevice(old).get_vxlan()["vxlan"]
+    assert (record.name, record.ni, record.vni) == ("vxlan0.10", "mac-vrf-1", 10010)
+    assert [d.vtep for d in record.destinations] == ["10.0.0.2"]

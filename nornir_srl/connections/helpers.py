@@ -30,6 +30,7 @@ def as_list(value: Any) -> List[Any]:
 
 def instances_by_interface(
     get: Callable[..., List[Dict[str, Any]]],
+    interfaces: str = "*",
 ) -> Dict[str, Tuple[str, ...]]:
     """Map ``<interface>.<index>`` to the network-instances that bind it.
 
@@ -38,8 +39,13 @@ def instances_by_interface(
     network-instance subtree streams every node's BGP RIBs and statistics
     along with it - enough to fall behind on, and then everything on that
     node's stream goes stale.
+
+    *interfaces* is a pattern the node matches the subinterface names to:
+    ``irb*`` answers with the instances an IRB is in alone, where a fabric
+    of a thousand bridge-domains binds a thousand other subinterfaces.
     """
-    resp = get(paths=["/network-instance[name=*]/interface"], datatype="config")
+    path = "/network-instance[name=*]/interface" + ("" if interfaces == "*" else f"[name={interfaces}]")
+    resp = get(paths=[path], datatype="config")
     bound: Dict[str, List[str]] = {}
     for ni in as_list(first_payload(resp).get("network-instance")):
         if not isinstance(ni, dict):
@@ -239,17 +245,17 @@ def filter_fields(d: Dict, *fields: str) -> Dict:
     return {k: v for k, v in d.items() if k in [f.replace("_", "-") for f in fields]}
 
 
-def strip_modules(d: Dict) -> Any:
-    p = re.compile(r"srl_nokia-[^:]+:")
+_MODULE_PREFIX = re.compile(r"srl_nokia-[^:]+:")
 
+
+def strip_modules(d: Dict) -> Any:
     if isinstance(d, list):
         return [strip_modules(x) for x in d]
     elif isinstance(d, dict):
         return {strip_modules(k): strip_modules(v) for k, v in d.items()}
     elif isinstance(d, str):
         if d.startswith("srl_nokia-") and ":" in d:
-            #            return d[(d.index(":") + 1):]
-            return re.sub(p, "", d)
+            return _MODULE_PREFIX.sub("", d)
         return d
     else:
         return d

@@ -61,6 +61,7 @@
     globalSearch: el("global-search"),
     invFilter: el("inv-filter"),
     reportParams: el("report-params"),
+    keyRow: el("key-row"),
     scopeChip: el("scope-chip"),
     clearFiltersBtn: el("clear-filters-btn"),
     filterBadge: el("filter-badge"),
@@ -236,6 +237,41 @@
   let topologyTimer = null;
   let navSeq = 0;
 
+  // The dashboards poll every PANEL_POLL_MS once the server has read the
+  // fabric, and every PANEL_LOADING_POLL_MS while it is still reading it, so
+  // each card fills in as its nodes answer. Never two requests at a time: a
+  // slow answer is not asked for again while it is under way - one asked for
+  // meanwhile is made as soon as it is in.
+  const PANEL_POLL_MS = 5000;
+  const PANEL_LOADING_POLL_MS = 1000;
+
+  /** *load* as a poll: one request at a time, due sooner while loading. */
+  function panelPoller(load) {
+    const poll = { busy: false, again: false, next: 0 };
+    async function run() {
+      if (poll.busy) {
+        poll.again = true;
+        return;
+      }
+      poll.busy = true;
+      let loading = false;
+      try {
+        loading = Boolean(await load());
+      } finally {
+        poll.busy = false;
+        poll.next = Date.now() + (loading ? PANEL_LOADING_POLL_MS : PANEL_POLL_MS);
+      }
+      if (poll.again) {
+        poll.again = false;
+        run();
+      }
+    }
+    run.tick = () => {
+      if (!poll.busy && Date.now() >= poll.next) run();
+    };
+    return run;
+  }
+
   /* ------------------------------------------------------------ helpers */
 
   const debounce = (fn, ms) => {
@@ -370,7 +406,19 @@
   // The arguments a lens cannot answer without, still to be typed.
   function missingParams() {
     const specs = (state.report && state.report.params) || [];
-    return specs.filter((spec) => spec.required && !state.reportParams.get(spec.name));
+    const missing = specs.filter((spec) => spec.required && !state.reportParams.get(spec.name));
+    // A report too large to read whole by default - a BGP RIB - waits for a
+    // key to look routes up by, or for being asked to list them all.
+    if (state.report && state.report.needs_query && !listsAll()) {
+      const keyed = specs.some((spec) => spec.kind === "rib-key" && state.reportParams.get(spec.name));
+      if (!keyed) missing.push({ label: "a key, or choose List all" });
+    }
+    return missing;
+  }
+
+  /** Whether the report was asked to list everything rather than look up by key. */
+  function listsAll() {
+    return (state.reportParams.get("scope") || "").split(",").includes("all");
   }
 
   // The chip saying a page is about some nodes only, and letting it be about
@@ -386,11 +434,20 @@
   function renderReportParams() {
     renderScope();
     dom.reportParams.replaceChildren();
-    const specs = (state.report && state.report.params) || [];
+    const keyed = Boolean(state.report && state.report.needs_query);
+    const all = (state.report && state.report.params) || [];
+    // A report looked up by key has its keys, and whether to list by key or
+    // everything, on a row of their own; its other arguments stay here.
+    renderKeyRow(keyed ? all.filter((spec) => spec.kind === "rib-key") : []);
+    const specs = keyed ? all.filter((spec) => spec.kind !== "rib-key" && spec.name !== "scope") : all;
     dom.reportParams.hidden = !specs.length;
     for (const spec of specs) {
       if (spec.kind === "choices") {
         dom.reportParams.append(choicesParam(spec));
+        continue;
+      }
+      if (spec.kind === "rib-key") {
+        dom.reportParams.append(keyParam(spec));
         continue;
       }
       const field = document.createElement("label");
@@ -462,6 +519,250 @@
     }
     if (specs.some((spec) => spec.kind === "ni")) refreshInstanceOptions();
     if (specs.some((spec) => spec.kind === "config-node" || spec.kind === "commit")) refreshConfigOptions();
+  }
+
+  /**
+   * The keys a report is looked up by, and [List by key] [List all]: by key,
+   * the node is asked for the routes the keys match; all reads every route of
+   * every node, which on a large fabric takes minutes. The keys are cleared
+   * and set aside while everything is listed.
+   */
+  function renderKeyRow(keySpecs) {
+    if (!dom.keyRow) return;
+    dom.keyRow.replaceChildren();
+    dom.keyRow.hidden = !keySpecs.length;
+    if (!keySpecs.length) return;
+    const everything = listsAll();
+
+    const fields = document.createElement("div");
+    fields.className = "key-fields";
+    for (const spec of keySpecs) {
+      const field = keyParam(spec);
+      const input = field.querySelector("input");
+      if (everything) {
+        input.disabled = true;
+        input.title = "Not used while listing all: choose List by key to look routes up";
+      }
+      fields.append(field);
+    }
+
+    const mode = document.createElement("div");
+    mode.className = "segmented key-mode";
+    mode.setAttribute("role", "radiogroup");
+    mode.setAttribute("aria-label", "How to list the routes");
+    const choose = (listAll) => {
+      if (listAll === listsAll()) return;
+      if (listAll) {
+        state.reportParams.set("scope", "all");
+        for (const spec of keySpecs) state.reportParams.delete(spec.name);
+      } else {
+        state.reportParams.delete("scope");
+      }
+      renderKeyRow(keySpecs);
+      updateFilterUI();
+      connect();
+      syncCurrentVisit();
+      if (!listAll) {
+        const first = dom.keyRow.querySelector(".key-fields input");
+        if (first) first.focus();
+      }
+    };
+    for (const [label, listAll, title] of [
+      ["List by key", false, "Ask the nodes for the routes the keys match: quick, whatever the size of the RIB"],
+      ["List all", true, "Every route of every node, no key asked: on a large fabric tens of thousands per node, and minutes to read and stream"],
+    ]) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "btn segment";
+      button.textContent = label;
+      button.title = title;
+      button.setAttribute("role", "radio");
+      button.setAttribute("aria-checked", listAll === everything ? "true" : "false");
+      button.classList.toggle("is-active", listAll === everything);
+      button.addEventListener("click", () => choose(listAll));
+      mode.append(button);
+    }
+
+    const note = document.createElement("span");
+    note.className = "muted key-note";
+    note.textContent = everything
+      ? "every route of every node - slow on a large fabric"
+      : "a value, or a pattern with * - the node does the matching";
+    note.classList.toggle("is-warning", everything);
+
+    dom.keyRow.append(fields, mode, note);
+  }
+
+  // A route key, typed or picked from the values it takes on the fabric: a
+  // drop-down of them, the most common first, each with how many routes have
+  // it. The server reads every node's keys - and nothing else of its routes -
+  // once in a while, and narrows them to what is typed. A pattern with * is
+  // kept as typed; the node matches it.
+  const KEY_OPTIONS_DELAY_MS = 250;
+
+  function keyParam(spec) {
+    const field = document.createElement("div");
+    field.className = "field menu key-param";
+    const name = document.createElement("span");
+    name.className = "muted";
+    name.textContent = spec.label;
+    const input = document.createElement("input");
+    input.className = "input";
+    input.type = "search";
+    input.placeholder = spec.placeholder || "";
+    input.autocomplete = "off";
+    input.spellcheck = false;
+    input.value = state.reportParams.get(spec.name) || "";
+    input.title = spec.help || "";
+    input.setAttribute("role", "combobox");
+    input.setAttribute("aria-autocomplete", "list");
+    input.setAttribute("aria-expanded", "false");
+    const panel = document.createElement("div");
+    panel.className = "menu-panel opens-right key-menu";
+    panel.id = `param-${spec.name}-values`;
+    panel.setAttribute("role", "listbox");
+    panel.hidden = true;
+    input.setAttribute("aria-controls", panel.id);
+
+    let options = [];
+    let active = -1;
+    let asked = null;
+    let timer = null;
+
+    const commit = (value) => {
+      const text = value.trim();
+      if (text) state.reportParams.set(spec.name, text);
+      else state.reportParams.delete(spec.name);
+      updateFilterUI();
+      connect();
+      syncCurrentVisit();
+    };
+    const close = () => {
+      panel.hidden = true;
+      input.setAttribute("aria-expanded", "false");
+      active = -1;
+    };
+    const highlight = (index) => {
+      active = index;
+      panel.querySelectorAll(".key-option").forEach((row, i) => {
+        row.classList.toggle("is-active", i === index);
+        row.setAttribute("aria-selected", i === index ? "true" : "false");
+        if (i === index) row.scrollIntoView({ block: "nearest" });
+      });
+    };
+    const pick = (value) => {
+      input.value = value;
+      close();
+      commit(value);
+    };
+    const draw = (found, note) => {
+      panel.replaceChildren();
+      const head = document.createElement("div");
+      head.className = "menu-heading";
+      head.textContent = note;
+      panel.append(head);
+      options = (found && found.values) || [];
+      options.forEach((option, index) => {
+        const row = document.createElement("button");
+        row.type = "button";
+        row.className = "key-option";
+        row.setAttribute("role", "option");
+        const value = document.createElement("span");
+        value.className = "key-option-value";
+        value.textContent = option.value;
+        const count = document.createElement("span");
+        count.className = "muted key-option-count";
+        count.textContent = `${option.routes} route${option.routes === 1 ? "" : "s"}`;
+        row.append(value, count);
+        // Before the input's blur takes the menu away.
+        row.addEventListener("mousedown", (event) => event.preventDefault());
+        row.addEventListener("click", () => pick(option.value));
+        row.addEventListener("mousemove", () => highlight(index));
+        panel.append(row);
+      });
+      active = -1;
+    };
+    const load = async () => {
+      const params = queryParams();
+      params.delete(spec.name);
+      params.set("param", spec.name);
+      params.set("q", input.value.trim());
+      const query = params.toString();
+      if (query === asked) return;
+      asked = query;
+      if (!options.length) draw(null, "reading the keys on the fabric…");
+      input.classList.add("is-loading");
+      try {
+        const res = await fetch(`/api/keys/${encodeURIComponent(state.report.name)}?${query}`);
+        if (asked !== query) return;
+        if (!res.ok) {
+          draw(null, "no values to offer: type one");
+          return;
+        }
+        const found = await res.json();
+        if (asked !== query) return;
+        const shown = (found.values || []).length;
+        draw(
+          found,
+          !found.total
+            ? input.value.trim()
+              ? "no such value on the fabric"
+              : "no values on the fabric"
+            : found.total > shown
+              ? `${found.total} values - the ${shown} most common`
+              : `${found.total} value${found.total === 1 ? "" : "s"}`
+        );
+      } catch {
+        if (asked === query) draw(null, "no values to offer: type one");
+      } finally {
+        if (asked === query) input.classList.remove("is-loading");
+      }
+    };
+    const open = () => {
+      // One open at a time.
+      for (const other of document.querySelectorAll(".key-menu, .choices-menu")) {
+        if (other !== panel) other.hidden = true;
+      }
+      panel.hidden = false;
+      input.setAttribute("aria-expanded", "true");
+      load();
+    };
+
+    input.addEventListener("focus", open);
+    input.addEventListener("click", () => {
+      if (panel.hidden) open();
+    });
+    input.addEventListener("input", () => {
+      if (panel.hidden) open();
+      clearTimeout(timer);
+      timer = setTimeout(load, KEY_OPTIONS_DELAY_MS);
+    });
+    input.addEventListener("keydown", (event) => {
+      if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+        event.preventDefault();
+        if (panel.hidden) open();
+        if (!options.length) return;
+        const step = event.key === "ArrowDown" ? 1 : -1;
+        highlight((active + step + options.length) % options.length);
+      } else if (event.key === "Enter") {
+        event.preventDefault();
+        if (!panel.hidden && active >= 0 && options[active]) pick(options[active].value);
+        else {
+          close();
+          commit(input.value);
+        }
+      } else if (event.key === "Escape") {
+        close();
+      }
+    });
+    input.addEventListener("blur", () => {
+      close();
+      // A value typed and left is as good as one picked.
+      if ((state.reportParams.get(spec.name) || "") !== input.value.trim()) commit(input.value);
+    });
+
+    field.append(name, input, panel);
+    return field;
   }
 
   // Parameters chosen from a list rather than typed. A function, not a
@@ -850,8 +1151,11 @@
     }
   }
 
-  async function loadOverview() {
-    if (!state.report || state.report.name !== "overview") return;
+  const loadOverview = panelPoller(fetchOverview);
+
+  /** Draw the dashboard; returns whether the server is still reading for it. */
+  async function fetchOverview() {
+    if (!state.report || state.report.name !== "overview") return false;
     try {
       const params = new URLSearchParams();
       const inv = dom.invFilter.value.trim();
@@ -859,7 +1163,12 @@
       const url = "/api/overview" + (inv ? `?${params}` : "");
       const res = await fetch(url);
       const data = await res.json();
-      renderHealthKpi(data.health);
+      renderHealthKpi(data.health, data.health_loading);
+      // Counted from what the nodes have streamed so far: marked as such
+      // until every node has answered.
+      for (const card of [dom.kpiCardBgp, dom.kpiCardItf, dom.kpiCardBd, dom.kpiCardRouters]) {
+        if (card) card.classList.toggle("kpi-loading", Boolean(data.loading));
+      }
       dom.kpiNodesTotal.textContent = data.nodes.total;
       dom.kpiNodesConnected.textContent = `${data.nodes.connected} connected`;
       dom.kpiNodesStreaming.textContent = `${data.nodes.streaming} streaming`;
@@ -959,20 +1268,34 @@
 
       setLive("live", "live");
       dom.rowCount.textContent = "Executive Dashboard";
-      dom.streamInfo.textContent = "KPI overview metrics";
+      dom.streamInfo.textContent = data.loading
+        ? `KPI overview metrics · reading the fabric: ${readingProgress(data.loading)}`
+        : "KPI overview metrics";
       dom.updated.textContent = "updated " + new Date().toLocaleTimeString();
+      return Boolean(data.loading || data.health_loading);
     } catch (_err) {
       setLive("error", "error");
+      return false;
     }
   }
 
+  /** "3 of 12 nodes" - how far the server is in reading the fabric for a page. */
+  function readingProgress(progress) {
+    const reports = progress.nodes ? progress.total / progress.nodes : 1;
+    const nodes = Math.floor(progress.ready / (reports || 1));
+    return `${nodes} of ${progress.nodes} node${progress.nodes === 1 ? "" : "s"}`;
+  }
+
   /** The Fabric Health card: incidents by severity, the worst, and what changed. */
-  function renderHealthKpi(health) {
+  function renderHealthKpi(health, loading) {
     if (!dom.kpiCardHealth) return;
     dom.kpiCardHealth.classList.remove("kpi-ok", "kpi-warn", "kpi-err");
+    dom.kpiCardHealth.classList.toggle("kpi-loading", Boolean(!health && loading));
     if (!health) {
       dom.kpiHealthValue.textContent = "—";
-      dom.kpiHealthSub.textContent = "checks not available";
+      dom.kpiHealthSub.textContent = loading
+        ? `checks running: ${loading.ready} of ${loading.total} report reads in`
+        : "checks not available";
       dom.kpiHealthWorst.textContent = "";
       dom.kpiHealthChanges.textContent = "";
       return;
@@ -1064,8 +1387,11 @@
 
   const shortPort = (port) => String(port || "").replace(/^ethernet-/, "e");
 
-  async function loadTopology() {
-    if (!state.report || state.report.name !== "topology" || state.paused) return;
+  const loadTopology = panelPoller(fetchTopology);
+
+  /** Draw the topology; returns whether the server is still reading for it. */
+  async function fetchTopology() {
+    if (!state.report || state.report.name !== "topology" || state.paused) return false;
     try {
       const inv = dom.invFilter.value.trim();
       const params = new URLSearchParams();
@@ -1073,8 +1399,16 @@
       const res = await fetch("/api/topology" + (inv ? `?${params}` : ""));
       const graph = await res.json();
       setLive("live", "live");
-      dom.streamInfo.textContent = `LLDP topology, rendered in ${graph.render_ms} ms`;
+      // Drawn as far as the nodes have answered, and coloured once the
+      // checks have read the fabric: until then the line says how far each is.
+      const pending = [];
+      if (graph.loading) pending.push(`reading the fabric: ${readingProgress(graph.loading)}`);
+      if (graph.health_loading) {
+        pending.push(`checks running: ${graph.health_loading.ready} of ${graph.health_loading.total} report reads in`);
+      }
+      dom.streamInfo.textContent = [`LLDP topology, rendered in ${graph.render_ms} ms`, ...pending].join(" · ");
       dom.updated.textContent = "updated " + new Date().toLocaleTimeString();
+      const loading = pending.length > 0;
       // Re-drawing would drop the hover and lose the scroll position. Rates
       // change every poll; the cables themselves do not, so colour in place.
       state.topology = graph;
@@ -1086,12 +1420,14 @@
         if (state.topoSelection && state.topoSelection.kind === "link") {
           renderTopoLinkDetail(state.topoSelection.id);
         }
-        return;
+        return loading;
       }
       state.topoKey = key;
       renderTopology(graph);
+      return loading;
     } catch (_err) {
       setLive("error", "error");
+      return false;
     }
   }
 
@@ -2775,12 +3111,12 @@
       }
       if (report.name === "overview") {
         loadOverview();
-        overviewTimer = setInterval(loadOverview, 5000);
+        overviewTimer = setInterval(loadOverview.tick, PANEL_LOADING_POLL_MS);
       } else {
         state.topoKey = "";
         state.topoSelection = null;
         loadTopology();
-        topologyTimer = setInterval(loadTopology, 5000);
+        topologyTimer = setInterval(loadTopology.tick, PANEL_LOADING_POLL_MS);
       }
     } else {
       dom.overviewDashboard.hidden = true;
@@ -3037,6 +3373,10 @@
     }
     const params = queryParams();
     params.set("refresh", dom.refresh.value);
+    if (state.report.needs_query && listsAll()) {
+      dom.streamInfo.textContent =
+        "listing every route of every node: on a large fabric this takes minutes, and keeps them streaming";
+    }
     const source = new EventSource(
       `/api/stream/${encodeURIComponent(state.report.name)}?${params}`
     );
@@ -3796,8 +4136,10 @@
       return;
     }
     const [report, column] = target;
+    // The peer as the RIB's neighbor key: the node picks its routes, rather
+    // than the whole RIB being read for a table filtered in the browser.
     jumpToFilteredReport(report, [niName], [nodeName],
-      { [column]: peer, st: BGP_RIB_USED_FILTER }, null, [nodeName]);
+      { [column]: peer, st: BGP_RIB_USED_FILTER }, { neighbor: peerAddress }, [nodeName]);
   }
 
   /**

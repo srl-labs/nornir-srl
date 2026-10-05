@@ -6,7 +6,7 @@ import re
 import threading
 from contextlib import contextmanager
 from dataclasses import replace
-from typing import Any, Dict, Iterator, List, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterator, List, Optional, Sequence, Set, Tuple
 
 from ..records import (
     BgpPeers,
@@ -71,6 +71,22 @@ _BGP_RIB_FAMILY = {
     "ipv6": "ipv6-unicast",
     "l3vpn-ipv4-unicast": "l3vpn-ipv4-unicast",
     "l3vpn-ipv6-unicast": "l3vpn-ipv6-unicast",
+}
+
+#: The keys of each BGP RIB route list, as the YANG model names them - the
+#: same from 25.3 to 26.7 - the one a route is most often looked up by first.
+#: ``path-id`` and ``mac-length`` are left out: one is 0 unless add-path is
+#: on, the other always 48, and a key left out of a path is a wildcard.
+BGP_RIB_KEYS: Dict[Tuple[str, str], Tuple[str, ...]] = {
+    ("evpn", "1"): ("esi", "route-distinguisher", "ethernet-tag-id", "neighbor"),
+    ("evpn", "2"): ("mac-address", "ip-address", "route-distinguisher", "ethernet-tag-id", "neighbor"),
+    ("evpn", "3"): ("originating-router", "route-distinguisher", "ethernet-tag-id", "neighbor"),
+    ("evpn", "4"): ("esi", "originating-router", "route-distinguisher", "neighbor"),
+    ("evpn", "5"): ("ip-prefix", "route-distinguisher", "ethernet-tag-id", "neighbor"),
+    ("ipv4-unicast", ""): ("prefix", "neighbor", "origin-protocol"),
+    ("ipv6-unicast", ""): ("prefix", "neighbor", "origin-protocol"),
+    ("l3vpn-ipv4-unicast", ""): ("prefix", "route-distinguisher", "neighbor"),
+    ("l3vpn-ipv6-unicast", ""): ("prefix", "route-distinguisher", "neighbor"),
 }
 
 #: The container holding each EVPN route type, in the singular the newer model
@@ -284,6 +300,44 @@ _KEYED_INSTANCE = re.compile(r"^/?network-instance\[name=([^\]]+)\](?:/(.*))?$")
 _STEP = re.compile(r"([^/\[]+)((?:\[[^\]]*\])*)")
 
 
+#: The BGP attribute sets of every instance, as a table entries are looked up in.
+ATTR_SETS_TABLE = "/network-instance[name=*]/bgp-rib/attr-sets/attr-set[index=*]"
+
+#: Up to how many keys a lookup names them in its Get; past it, the table is
+#: read whole and the entries picked out of it. Measured on SR Linux 26.7: a
+#: Get takes about a millisecond per key it names - 1000 attribute sets in
+#: 0.6s, 10000 in 11s - where reading all 80000 of a node takes 30s.
+LOOKUP_BY_KEY_LIMIT = 10000
+
+_KEYED_ENTRY = re.compile(r"^/?network-instance\[name=([^\]]+)\]/(.+)/([^/\[]+)\[([^=\]]+)=([^\]]*)\]$")
+
+
+def pick_entries(table: str, payloads: Sequence[Any], paths: Sequence[str]) -> List[Dict[str, Any]]:
+    """Each of *paths* - one entry of *table*, by key - as a Get of it would answer.
+
+    *payloads* is what a Get of *table* answered. An entry it does not hold
+    answers with the empty payload a Get of a missing key has.
+    """
+    shape = _KEYED_ENTRY.match(table)
+    if shape is None:
+        raise ValueError(f"not a keyed list under a network-instance: {table}")
+    _ni, middle, name, key, _value = shape.groups()
+    index: Dict[Tuple[str, str], Dict[str, Any]] = {}
+    for ni in _instances(payloads):
+        node: Any = ni
+        for step in middle.split("/"):
+            node = node.get(step) if isinstance(node, dict) else None
+        for entry in as_list(node.get(name) if isinstance(node, dict) else None):
+            if isinstance(entry, dict) and key in entry:
+                index[(str(ni.get("name", "")), str(entry[key]))] = entry
+    answers: List[Dict[str, Any]] = []
+    for path in paths:
+        match = _KEYED_ENTRY.match(path)
+        entry = index.get((match.group(1), match.group(5))) if match else None
+        answers.append({path.lstrip("/"): entry} if entry is not None else {})
+    return answers
+
+
 def _instances(payloads: Sequence[Any]) -> Iterator[Dict[str, Any]]:
     """The network-instances in Get payloads, whichever envelope they came in.
 
@@ -380,16 +434,19 @@ def _route_tables(
                 entry["resolving-route"] = resolving_route.get("ip-prefix")
                 # The resolving route names its own next-hop-group, which is
                 # what lets an indirect next-hop be followed to a real port.
-                entry["resolving-nhg"] = resolving_route.get("next-hop-group")
-            tmp_map[nh.get("index")] = entry
+                via = resolving_route.get("next-hop-group")
+                entry["resolving-nhg"] = str(via) if via is not None else None
+            # Keys as text: a Get types them, a key looked up comes back as
+            # the path spelled it, and either has to find the other.
+            tmp_map[str(nh.get("index"))] = entry
 
     nhgroup_mapping: Dict[str, Dict[str, List[Any]]] = {}
     for ni in _instances(nhgroups):
         ni_name = ni.get("name")
         nh_map: Dict[str, List[Any]] = nhgroup_mapping.setdefault(ni_name, {})
         for nhgroup in as_list(ni.get("route-table", {}).get("next-hop-group")):
-            nh_map[nhgroup.get("index")] = [
-                nh_mapping.get(ni_name, {}).get(nh.get("next-hop"), {})
+            nh_map[str(nhgroup.get("index"))] = [
+                nh_mapping.get(ni_name, {}).get(str(nh.get("next-hop")), {})
                 for nh in as_list(nhgroup.get("next-hop"))
             ]
 
@@ -449,7 +506,7 @@ def _route_tables(
             next_hops: List[RouteNextHop] = []
             if "next-hop-group" in route:
                 nhg_ni = str(route.get("next-hop-group-network-instance") or orig_ni)
-                for nh in nhgroup_mapping.get(nhg_ni, {}).get(route["next-hop-group"], []):
+                for nh in nhgroup_mapping.get(nhg_ni, {}).get(str(route["next-hop-group"]), []):
                     next_hops.append(
                         RouteNextHop(
                             address=str(nh.get("ip-address") or ""),
@@ -494,27 +551,115 @@ class RoutingMixin:
         """Placeholder method implemented in :class:`SrLinux`."""
         raise NotImplementedError
 
-    def get_bgp_rib(
-        self,
-        route_fam: str,
-        route_type: Optional[str] = "2",
-        network_instance: str = "*",
-        detail: bool = False,
-        rib: str = "in",
-    ) -> Dict[str, Any]:
-        """The BGP RIB of one family, as records carrying every path attribute.
+    def lookup(
+        self, paths: List[str], datatype: Optional[str] = "state", table: Optional[str] = None
+    ) -> List[Dict[str, Any]]:
+        """Get entries named by key - a few next-hop-groups out of thousands.
 
-        *detail* is accepted for the callers that used to ask for the extra
-        attributes: a record carries all of them, and the table declared for
-        the report decides which to show.
-
-        *rib* ``out`` reads the rib-out-post instead: the routes sent to each
-        peer, keyed by the peer they went to, with the attributes they were
-        sent with and none of the used/valid/best flags a received route has.
+        One payload per path, as a Get of each answers. *table* is the list
+        they are entries of, with its keys wildcarded: with more keys than
+        :data:`LOOKUP_BY_KEY_LIMIT` the table is read once and the entries
+        picked out of it, which beats a Get naming every one of them. The
+        server answers without subscribing to each key, which would make one
+        path of every entry a route happens to name; see
+        :meth:`HostStream.lookup`.
         """
-        if rib not in ("in", "out"):
-            raise ValueError(f"Invalid rib {rib}: 'in' or 'out'")
-        del detail
+        if table is not None and len(paths) > LOOKUP_BY_KEY_LIMIT:
+            return pick_entries(table, self.get(paths=[table], datatype=datatype), paths)
+        return self.get(paths=paths, datatype=datatype)
+
+    def query(self, paths: List[str], datatype: Optional[str] = "state") -> List[Dict[str, Any]]:
+        """Get a narrow read - a few routes picked by key - that is not to be streamed.
+
+        A Get here. The server answers it from what it streams when that holds
+        the whole table, or else with a Get of its own, and never subscribes
+        to it: a path per question asked would restart the node's subscription
+        every time.
+        """
+        return self.get(paths=paths, datatype=datatype)
+
+    def _attr_sets(self, wanted: Dict[str, Set[str]]) -> Dict[str, Dict[str, Dict[str, Any]]]:
+        """The BGP attribute sets *wanted* names, by instance and index.
+
+        By key: a node keeps a set for nearly every path it holds - tens of
+        thousands on an EVPN fabric, 30 MB and as many seconds to read whole -
+        where a table of one route type uses a fraction of them.
+        """
+        paths = [
+            f"/network-instance[name={ni}]/bgp-rib/attr-sets/attr-set[index={index}]"
+            for ni, indexes in sorted(wanted.items())
+            for index in sorted(indexes)
+        ]
+        found: Dict[str, Dict[str, Dict[str, Any]]] = {}
+        if not paths:
+            return found
+        for ni in _instances(self.lookup(paths, datatype="state", table=ATTR_SETS_TABLE)):
+            for attr_set in as_list(((ni.get("bgp-rib") or {}).get("attr-sets") or {}).get("attr-set")):
+                if isinstance(attr_set, dict):
+                    found.setdefault(str(ni.get("name", "")), {})[str(attr_set.get("index"))] = attr_set
+        return found
+
+    def _route_next_hops(
+        self, afi: str, route_payloads: Sequence[Dict[str, Any]]
+    ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+        """The next-hop-groups and next-hops the routes in *route_payloads* use.
+
+        By key, not as the tables: an EVPN fabric keeps a group and a next-hop
+        per remote VTEP and VNI in the default instance - tens of thousands -
+        where its dozen underlay routes use a handful. An indirect next-hop
+        names the group of the route it resolves through, which is followed
+        as far as :func:`_route_tables` follows it.
+        """
+        groups = {
+            (str(route.get("next-hop-group-network-instance") or route.get("origin-network-instance") or ni.get("name", "")), str(route["next-hop-group"]))
+            for ni in _instances(route_payloads)
+            for route in _afi_routes(ni, afi)
+            if route.get("next-hop-group") is not None
+        }
+        nhgroups: List[Dict[str, Any]] = []
+        nhs: List[Dict[str, Any]] = []
+        seen_groups: Set[Tuple[str, str]] = set()
+        seen_hops: Set[Tuple[str, str]] = set()
+        for _ in range(_MAX_NH_RESOLVE_DEPTH + 1):
+            groups -= seen_groups
+            if not groups:
+                break
+            seen_groups |= groups
+            fetched = self.lookup(
+                [f"/network-instance[name={ni}]/route-table/next-hop-group[index={index}]" for ni, index in sorted(groups)],
+                datatype="state",
+            )
+            nhgroups.extend(fetched)
+            hops = {
+                (str(ni.get("name", "")), str(member["next-hop"]))
+                for ni in _instances(fetched)
+                for nhgroup in as_list((ni.get("route-table") or {}).get("next-hop-group"))
+                for member in as_list(nhgroup.get("next-hop"))
+                if isinstance(member, dict) and member.get("next-hop") is not None
+            } - seen_hops
+            if not hops:
+                break
+            seen_hops |= hops
+            fetched = self.lookup(
+                [f"/network-instance[name={ni}]/route-table/next-hop[index={index}]" for ni, index in sorted(hops)],
+                datatype="state",
+            )
+            nhs.extend(fetched)
+            groups = set()
+            for ni in _instances(fetched):
+                for nh in as_list((ni.get("route-table") or {}).get("next-hop")):
+                    if not isinstance(nh, dict):
+                        continue
+                    via = (nh.get("indirect") or {}).get("resolving-route") or nh.get("resolving-route") or {}
+                    if isinstance(via, dict) and via.get("next-hop-group") is not None:
+                        groups.add((str(ni.get("name", "")), str(via["next-hop-group"])))
+        return nhgroups, nhs
+
+    def _bgp_rib_path(
+        self, route_fam: str, route_type: Optional[str], network_instance: str, rib: str = "in"
+    ) -> Tuple[str, Tuple[str, ...]]:
+        """The path of one BGP RIB route list on this node's release, and the
+        containers from the family down to it."""
         mod_version = model_version(
             self.capabilities, "bgp-rib", "urn:nokia.com:srlinux:bgp:rib-bgp"
         )
@@ -568,25 +713,63 @@ class RoutingMixin:
             )
             steps = ("local-rib", "route")
 
-        attribs: Dict[str, Dict[str, Any]] = {}
-        resp = self.get(
-            paths=[f"/network-instance[name={network_instance}]/bgp-rib/attr-sets/attr-set"],
-            datatype="state",
-        )
-        for ni in as_list(first_payload(resp).get("network-instance")):
-            ni_name = ni.get("name")
-            if ni_name is None:
-                continue
-            attribs.setdefault(ni_name, {})
-            for attr_set in ni.get("bgp-rib", {}).get("attr-sets", {}).get("attr-set", []):
-                attribs[ni_name][attr_set.get("index")] = attr_set
+        return path, steps
+
+    def get_bgp_rib(
+        self,
+        route_fam: str,
+        route_type: Optional[str] = "2",
+        network_instance: str = "*",
+        detail: bool = False,
+        rib: str = "in",
+        used_only: bool = True,
+        keys: Optional[Dict[str, str]] = None,
+    ) -> Dict[str, Any]:
+        """The BGP RIB of one family, as records carrying every path attribute.
+
+        *detail* is accepted for the callers that used to ask for the extra
+        attributes: a record carries all of them, and the table declared for
+        the report decides which to show.
+
+        *rib* ``out`` reads the rib-out-post instead: the routes sent to each
+        peer, keyed by the peer they went to, with the attributes they were
+        sent with and none of the used/valid/best flags a received route has.
+
+        *used_only* keeps the received paths the node uses or picked as best,
+        leaving out the other paths to the same NLRI - half the RIB of a fabric
+        where every route comes from two route reflectors. Best as well as
+        used: a route reflector uses none of the EVPN routes it reflects, and
+        would otherwise list none. gNMI cannot filter on a leaf that is not a
+        key, so the others are dropped as soon as they arrive, before their
+        attributes are looked up.
+
+        *keys* narrow the read to the routes whose list keys match - see
+        :data:`BGP_RIB_KEYS` - in the Get itself: a value is matched as gNMI
+        matches a key, ``*`` and globs included. A narrowed read is a
+        :meth:`query`, which the server does not subscribe to.
+        """
+        if rib not in ("in", "out"):
+            raise ValueError(f"Invalid rib {rib}: 'in' or 'out'")
+        del detail
+        route_fam = BGP_RIB_ROUTE_FAM_ALIASES.get(route_fam.lower(), route_fam)
+        path, steps = self._bgp_rib_path(route_fam, route_type, network_instance, rib)
+        family = _BGP_RIB_FAMILY[route_fam]
+
+        chosen = {k: str(v).strip() for k, v in (keys or {}).items() if str(v or "").strip()}
+        if chosen:
+            known = BGP_RIB_KEYS.get((family, str(route_type) if family == "evpn" else ""), ())
+            unknown = sorted(set(chosen) - set(known))
+            if unknown:
+                raise ValueError(f"{', '.join(unknown)}: not a key of this RIB; its keys are {', '.join(known)}")
+            path += "".join(f"[{k}={v}]" for k, v in chosen.items())
+        read = self.query if chosen else self.get
 
         # Leaves / platforms without IP-VPN have no l3vpn-* RIB path, and a
         # release that keeps no rib-out-post has none for what was sent.
         if family in ("l3vpn-ipv4-unicast", "l3vpn-ipv6-unicast") or rib == "out":
             with _suppress_pygnmi_client_logging():
                 try:
-                    resp = self.get(paths=[path], datatype="state")
+                    resp = read(paths=[path], datatype="state")
                 except BaseException as e:
                     if _gnmi_path_missing(e):
                         logger.debug(
@@ -598,15 +781,29 @@ class RoutingMixin:
                         return {"bgp_rib": []}
                     raise
         else:
-            resp = self.get(paths=[path], datatype="state")
+            resp = read(paths=[path], datatype="state")
 
+        tables: List[Tuple[str, List[Dict[str, Any]]]] = []
+        # Whichever envelope it came in: a read narrowed by key is answered
+        # under the path down to the route list, not the instance list.
+        for ni in _instances(resp):
+            routes = _rib_entries(ni, family, steps)
+            # A sent route carries no used flag: every one of them went out.
+            if used_only and rib == "in":
+                routes = [
+                    route for route in routes if route.get("used-route") is True or route.get("best-route") is True
+                ]
+            tables.append((str(ni.get("name", "")), routes))
+        attribs = self._attr_sets(
+            {
+                ni_name: {str(route["attr-id"]) for route in routes if route.get("attr-id") is not None}
+                for ni_name, routes in tables
+            }
+        )
         ribs = []
-        for ni in as_list(first_payload(resp).get("network-instance")):
-            if not isinstance(ni, dict):
-                continue
-            ni_name = str(ni.get("name", ""))
-            # A network-instance can appear in the RIB without a matching
-            # attr-set, e.g. when the two Gets straddle a routing change.
+        for ni_name, routes in tables:
+            # A route can name an attr-set that is gone by the time it is
+            # looked up, when the two reads straddle a routing change.
             attr_sets = attribs.get(ni_name, {})
             ribs.append(
                 BgpRib(
@@ -614,12 +811,36 @@ class RoutingMixin:
                     family=family,
                     route_type=str(route_type) if family == "evpn" else "",
                     routes=tuple(
-                        _bgp_route({**route, **attr_sets.get(route.get("attr-id"), {})})
-                        for route in _rib_entries(ni, family, steps)
+                        _bgp_route({**route, **attr_sets.get(str(route.get("attr-id")), {})})
+                        for route in routes
                     ),
                 )
             )
         return {"bgp_rib": ribs}
+
+    def get_bgp_rib_keys(self, route_fam: str, route_type: Optional[str] = None) -> List[Dict[str, Any]]:
+        """The keys of every route of one RIB, and nothing else of them.
+
+        What a surface offers to look a route up by. A Get of one key leaf of
+        the route list answers with each entry's keys alone - a few MB where
+        the routes with their attributes are tens.
+        """
+        route_fam = BGP_RIB_ROUTE_FAM_ALIASES.get(route_fam.lower(), route_fam)
+        family = _BGP_RIB_FAMILY[route_fam]
+        known = BGP_RIB_KEYS[(family, str(route_type) if family == "evpn" else "")]
+        path, steps = self._bgp_rib_path(route_fam, route_type, "*")
+        with _suppress_pygnmi_client_logging():
+            try:
+                resp = self.query(paths=[f"{path}/{known[0]}"], datatype="state")
+            except BaseException as e:
+                if _gnmi_path_missing(e):
+                    return []
+                raise
+        return [
+            {"ni": str(ni.get("name", "")), **{k: route[k] for k in known if k in route}}
+            for ni in _instances(resp)
+            for route in _rib_entries(ni, family, steps)
+        ]
 
     def get_sum_bgp(self, network_instance: Optional[str] = "*") -> Dict[str, Any]:
         mod_version = model_version(
@@ -687,27 +908,13 @@ class RoutingMixin:
         network_instance: Optional[str] = "*",
         lpm_address: Optional[str] = None,
     ) -> Dict[str, Any]:
-        nhgroups = self.get(
-            paths=[
-                f"/network-instance[name={network_instance}]/route-table/next-hop-group[index=*]"
-            ],
-            datatype="state",
-        )
-        nhs = self.get(
-            paths=[
-                f"/network-instance[name={network_instance}]/route-table/next-hop[index=*]"
-            ],
-            datatype="state",
-        )
         resp = self.get(
             paths=[f"/network-instance[name={network_instance}]/route-table/{afi}"],
             datatype="state",
         )
-        return {
-            "ip_rib": _route_tables(
-                afi, [first_payload(resp)], [first_payload(nhs)], [first_payload(nhgroups)], lpm_address
-            )
-        }
+        routes = [first_payload(resp)]
+        nhgroups, nhs = self._route_next_hops(afi, routes)
+        return {"ip_rib": _route_tables(afi, routes, nhs, nhgroups, lpm_address)}
 
     def get_routes(self, afi: str, prefixes: Sequence[str]) -> Dict[str, Any]:
         """Only *prefixes*, in whichever network-instances have them.

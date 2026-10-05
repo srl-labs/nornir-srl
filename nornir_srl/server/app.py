@@ -553,7 +553,35 @@ def create_app(
         if lens is not None and lens.on(SERVER):
             return lambda: store.progress(list(lens.requires), inv_filter)
         hosts = parse_nodes(request.query_params.get("node"))
-        return lambda: store.progress([name], inv_filter, hosts)
+        try:
+            report = streamable_report(name)
+            activated = store.activation_name(report, coerce_params(report, request.query_params))
+        except (KeyError, ValueError):
+            activated = name
+        return lambda: store.progress([activated], inv_filter, hosts)
+
+    async def report_keys(request: Request) -> Response:
+        """The values a key parameter of a report takes, for a surface to offer."""
+        try:
+            report = streamable_report(request.path_params["name"])
+        except KeyError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=404)
+        param = request.query_params.get("param", "")
+        if not any(spec.name == param and spec.kind == "rib-key" for spec in report.params):
+            return JSONResponse({"error": f"'{param}' is not a key of {report.name}"}, status_code=400)
+        inv_filter = parse_kv(request.query_params.get("inv_filter"))
+        try:
+            chosen = coerce_params(report, request.query_params)
+        except ValueError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400)
+        keys = {k: v for k, v in chosen.items() if any(s.name == k and s.kind == "rib-key" for s in report.params)}
+        try:
+            found = await anyio.to_thread.run_sync(
+                lambda: store.key_values(report, param, inv_filter, keys, request.query_params.get("q", ""))
+            )
+        except KeyError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=404)
+        return JSONResponse(found)
 
     async def report_once(request: Request) -> Response:
         try:
@@ -768,6 +796,7 @@ def create_app(
         Route("/api/ack", ack_change, methods=["POST"]),
         Route("/api/unack", ack_change, methods=["POST"]),
         Route("/api/ack-all", ack_all, methods=["POST"]),
+        Route("/api/keys/{name}", report_keys),
         Route("/api/report/{name}", report_once),
         Route("/api/stream/{name}", report_stream),
         Route("/api/diff/{name}", report_diff),

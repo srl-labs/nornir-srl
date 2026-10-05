@@ -613,7 +613,18 @@ class Watcher:
             self.timeline.mark_stopped(self.clock())
             self._thread = None
 
+    #: How long the first reading waits for the dashboards to be read.
+    WARM_UP_WAIT = 60.0
+
     def _run(self) -> None:
+        # A node answers one Get at a time: the first reading goes after the
+        # dashboards' reports, or its far larger tables keep them empty.
+        warmed = getattr(self.store, "warmed", None)
+        if warmed is not None:
+            deadline = time.monotonic() + self.WARM_UP_WAIT
+            while not warmed.wait(0.2) and time.monotonic() < deadline:
+                if self._stop.is_set():
+                    return
         while not self._stop.is_set():
             started = time.perf_counter()
             try:

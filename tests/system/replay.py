@@ -11,8 +11,10 @@ from __future__ import annotations
 import copy
 import datetime
 import gzip
+import inspect
 import itertools
 import json
+import re
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -24,6 +26,7 @@ from nornir_srl.connections import ifstats as ifstats_module
 from nornir_srl.connections import neighbor_discovery as nd_module
 from nornir_srl.reports import REPORTS_BY_NAME, ReportSpec
 from nornir_srl.connections.helpers import clean_structured_key
+from nornir_srl.connections.routing import pick_entries
 from nornir_srl.rows import clean_columns, flatten
 from nornir_srl.server.devices import MixinDevice
 from nornir_srl.server.tree import select_path, split_path
@@ -276,10 +279,17 @@ class Recording:
         out as they were recorded; calling the getter directly would not.
         """
         device = self.device(report)
+        getter = REPORTS_BY_NAME[report].getter
+        # Recorded before the BGP RIB kept its used paths alone by default:
+        # what the device gave then is every path.
+        params = inspect.signature(getter).parameters
+        kwargs = {"paths": "all"} if "paths" in params else {}
+        if "scope" in params:
+            kwargs["scope"] = "all"
         with deterministic_clock(
             self.captured_at, self.ifstats_interval, skip_sleep=True
         ):
-            return REPORTS_BY_NAME[report].getter(device) or {}
+            return getter(device, **kwargs) or {}
 
     def table(self, report: str) -> Tuple[List[str], List[Dict[str, Any]]]:
         """The ``(columns, rows)`` replaying *report* produces."""
@@ -342,14 +352,67 @@ class ReplayDevice(MixinDevice):
             response.extend(payload)
         return response
 
+    def lookup(
+        self, paths: List[str], datatype: Optional[str] = "state", table: Optional[str] = None
+    ) -> List[Dict[str, Any]]:
+        """Entries by key, picked out of the recorded *table* in one pass.
+
+        Recordings read the table whole, keys and all; answering each key on
+        its own through :meth:`get` would narrow a copy of it once per key.
+        """
+        datatype = datatype or "state"
+        if table is not None and not all((path, datatype) in self._calls for path in paths):
+            for recorded in (table, table.rsplit("[", 1)[0]):
+                if (recorded, datatype) in self._calls:
+                    payload = self.get([recorded], datatype)
+                    return pick_entries(table, payload, paths)
+        return self.get(paths, datatype)
+
     def _recorded_ancestor(self, path: str, datatype: str) -> Optional[Tuple[str, str]]:
-        """The longest recorded path *path* lies under, with the same datatype."""
+        """The longest recorded path *path* lies under, with the same datatype.
+
+        A wildcard key holds every entry a literal one names, so a list read
+        whole - ``next-hop-group[index=*]`` - answers for the entries a getter
+        now looks up one by one.
+        """
+        # A key matched by * is no key at all: the lists a getter now names
+        # its wildcard keys on were recorded without them.
+        loose = {(_drop_wildcard_keys(p), d): (p, d) for p, d in self._calls}
+        # A subtree read as state holds its config leaves as well: what is
+        # now asked leaf by leaf as 'all' was recorded whole as 'state'.
+        datatypes = (datatype, "state") if datatype == "all" else (datatype,)
         elems = split_path(path)
-        for cut in range(len(elems) - 1, 0, -1):
-            candidate = ("/" + "/".join(elems[:cut]), datatype)
-            if candidate in self._calls:
-                return candidate
+        for cut in range(len(elems), 0, -1):
+            prefix = "/" + "/".join(elems[:cut])
+            for kind in datatypes:
+                found = loose.get((_drop_wildcard_keys(prefix), kind))
+                if found is not None and found[0] != path:
+                    return found
+        for cut in range(len(elems), 0, -1):
+            kept = elems[:cut]
+            variants = [kept] if cut < len(elems) else []
+            variants += [
+                kept[:-1] + [_wildcard_keys(kept[-1])],
+                [_wildcard_keys(e) for e in kept],
+                # The list read without naming its keys at all.
+                kept[:-1] + [kept[-1].split("[", 1)[0]],
+                [_wildcard_keys(e) for e in kept[:-1]] + [kept[-1].split("[", 1)[0]],
+            ]
+            for variant in variants:
+                candidate = ("/" + "/".join(variant), datatype)
+                if candidate[0] != path and candidate in self._calls:
+                    return candidate
         return None
+
+
+def _drop_wildcard_keys(path: str) -> str:
+    """*path* without its ``[key=*]`` predicates, which match what no predicate does."""
+    return re.sub(r"\[[^=\]]+=\*\]", "", path)
+
+
+def _wildcard_keys(elem: str) -> str:
+    """A path element with every key value replaced by ``*``."""
+    return re.sub(r"\[([^=\]]+)=[^\]]*\]", r"[\1=*]", elem)
 
 
 def flatten_report(

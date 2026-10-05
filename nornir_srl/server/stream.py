@@ -18,16 +18,18 @@ import re
 import threading
 import time
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Optional, Set, Tuple
+from typing import Any, Callable, Dict, List, Optional, Sequence, Set, Tuple
 
 from ..connections.helpers import strip_modules
 # One suppressor for the whole process: it swaps pygnmi's handlers out and back
 # under a refcount, and two copies with a count each would restore them while
 # the other still meant them gone.
-from ..connections.routing import _gnmi_path_missing, _suppress_pygnmi_client_logging
+from ..connections.routing import LOOKUP_BY_KEY_LIMIT, _gnmi_path_missing, _suppress_pygnmi_client_logging, pick_entries
 from ..reports import SubscriptionSpec
 from .tree import (
     ListNode,
+    _key_ident,
+    parse_elem,
     key_matches,
     split_path,
     strip_module,
@@ -38,7 +40,8 @@ from .tree import (
     materialize,
     parse_path,
     prune,
-    select_path,
+    select_many,
+    select_materialized,
     sweep,
 )
 
@@ -77,6 +80,10 @@ STALE_ENTRY_TICKS = 3
 #: Floor under the above, for paths sampled so fast that a few ticks is no
 #: margin at all.
 MIN_STALE_TTL = 45.0
+
+#: How many notifications may wait to be applied before the stream counts as
+#: behind, and nothing is evicted: see HostStream._evict_stale.
+MAX_EVICTION_BACKLOG = 500
 
 #: Seconds between eviction sweeps. The sweep walks the whole tree, so it is
 #: kept well clear of the per-notification path.
@@ -346,6 +353,10 @@ class HostStream:
         self._direct_cache: Dict[
             Tuple[str, str], Tuple[float, List[Dict[str, Any]]]
         ] = {}
+        #: Narrow reads nothing streams, when they were read; see query().
+        self._query_cache: Dict[Tuple[str, str], Tuple[float, List[Dict[str, Any]]]] = {}
+        #: Entries asked for by key, when they were read; see lookup().
+        self._lookup_cache: Dict[Tuple[str, str], Tuple[float, Dict[str, Any]]] = {}
         #: Failed Gets, kept for the same TTL as successful ones.
         self._failed_gets: Dict[Tuple[str, str], Tuple[float, Exception]] = {}
         #: Paths this node rejected as not in its schema - the fabric modules
@@ -366,6 +377,7 @@ class HostStream:
         self._closed = threading.Event()
         self._generation = 0
         self._subscription: Any = None
+        self._lag_warned = 0.0
         self._gets = 0
         #: When the running subscription was established, if there is one.
         self._subscribed_at: Optional[float] = None
@@ -936,6 +948,23 @@ class HostStream:
         # deliver a full tick of every path.
         if not self.connected or self._subscribed_at is None:
             return
+        # Nor while notifications wait to be applied: a stream behind its node
+        # refreshes each entry late, and an entry late enough reads as gone -
+        # dropped in the middle of the sample that was about to refresh it,
+        # and put back from whatever of it came after. On a fabric of a
+        # thousand bridge-domains that was VNIs vanishing, and every service
+        # reported as split.
+        backlog = getattr(self._subscription, "backlog", 0)
+        if isinstance(backlog, int) and backlog > MAX_EVICTION_BACKLOG:
+            if time.monotonic() - self._lag_warned > 60:
+                self._lag_warned = time.monotonic()
+                logger.warning(
+                    "%s: %d notification(s) waiting to be applied; nothing is aged "
+                    "out until the stream catches up",
+                    self.name,
+                    backlog,
+                )
+            return
         uptime = time.time() - self._subscribed_at
 
         # An envelope is what the tree merges into, so what survives under one
@@ -1006,7 +1035,7 @@ class HostStream:
                     continue
                 # The tree is shared by every subscription of this node, so the
                 # envelope can hold entries this path never asked for.
-                result.append({key: select_path(materialize(node), path, env)})
+                result.append({key: select_materialized(node, path, env)})
             return result
 
     def _borrowed_snapshot(self, path: str) -> Optional[List[Dict[str, Any]]]:
@@ -1014,7 +1043,7 @@ class HostStream:
 
         Reports overlap so much on ``/interface`` and ``/network-instance`` that a
         path without a subscription of its own is often covered anyway. Borrowing
-        that state still has to go through :func:`select_path`, exactly like a
+        that state still has to go through :func:`select_materialized`, exactly like a
         registered path does, or the caller would be handed every entry the other
         subscriptions put under the root rather than the ones it asked for.
 
@@ -1031,7 +1060,7 @@ class HostStream:
         node = self._tree.get(root)
         if node is None:
             return None
-        selected = select_path(materialize(node), path, root)
+        selected = select_materialized(node, path, root)
         if not selected:
             return None
         return [{root: selected}]
@@ -1053,19 +1082,42 @@ class HostStream:
                 if node is not None
             }
 
+    def snapshot_paths(self, paths: Sequence[str]) -> Dict[str, Any]:
+        """The streamed state, rendered as far as any of *paths* reaches.
+
+        For summaries spanning several reports' worth of paths - the
+        dashboards. Whatever else is streamed under the same roots is left
+        out, which is most of what a large fabric streams.
+        """
+        with self._lock:
+            # Rendered under the lock, like snapshot_roots: the subscription
+            # thread would otherwise be changing the tree midway.
+            return select_many(self._tree, paths)
+
     def interfaces(self) -> List[str]:
         """Names of the interfaces currently present in the streamed state."""
         with self._lock:
             node = get_node(self._tree, "interface")
-            entries = materialize(node) if node is not None else []
-        if not isinstance(entries, list):
-            return []
-        return sorted(str(e.get("name", "")) for e in entries if isinstance(e, dict))
+            # The names alone, not every interface rendered with all its
+            # subinterfaces just to read them off.
+            if not isinstance(node, ListNode):
+                return []
+            return sorted(
+                str(child["name"] if "name" in child else keys.get("name", ""))
+                for keys, child in node.entries.values()
+            )
 
     def interface_state(self, name: str) -> Dict[str, Any]:
+        """The port's own state, its counters among it - not its subinterfaces.
+
+        A LAG can carry thousands of subinterfaces, and rendering them all for
+        every port on every rates refresh is what this is called for least.
+        """
         with self._lock:
             node = get_node(self._tree, f"interface[name={name}]")
-            return materialize(node) if isinstance(node, dict) else {}
+            if not isinstance(node, dict):
+                return {}
+            return {k: materialize(v) for k, v in node.items() if k != "subinterface"}
 
     def direct_get(self, path: str, datatype: str) -> List[Dict[str, Any]]:
         """gNMI Get with a short TTL cache, for paths that are not subscribed.
@@ -1119,6 +1171,146 @@ class HostStream:
         self._promote(path, datatype, resp)
         return resp
 
+    def lookup(self, paths: Sequence[str], datatype: str, table: Optional[str] = None) -> List[Dict[str, Any]]:
+        """Entries asked for by key, one payload per path, shaped like a Get's.
+
+        Nothing is subscribed for them: a key is whatever a route named this
+        time, and a path per key would have the subscription chase the route
+        table. An entry is read off the tree where a streamed path delivers its
+        list, out of a cache kept for :attr:`get_ttl`, or else with one Get for
+        all the paths still missing - of their *table* whole, when they are
+        too many to name. Unlike :meth:`direct_get`'s, the cache is not dropped
+        on every notification - on a busy node that is all the time, and it
+        would never be hit.
+        """
+        now = time.time()
+        with self._lock:
+            answers = self._streamed_entries(paths, datatype)
+            for key in [k for k, (at, _) in self._lookup_cache.items() if now - at >= self.get_ttl]:
+                del self._lookup_cache[key]
+            missing: List[str] = []
+            for path in paths:
+                if path in answers:
+                    continue
+                cached = self._lookup_cache.get((path, datatype))
+                if cached is not None:
+                    answers[path] = cached[1]
+                else:
+                    missing.append(path)
+        if missing:
+            if table is not None and len(missing) > LOOKUP_BY_KEY_LIMIT:
+                fetched = pick_entries(table, self._raw_get_paths([table], datatype), missing)
+            else:
+                resp = self._raw_get_paths(missing, datatype)
+                # SR Linux answers each path with a payload of its own, under
+                # the path itself, and a key it does not have with an empty one.
+                by_envelope = {
+                    _bare(next(iter(item))): item
+                    for item in resp
+                    if isinstance(item, dict) and len(item) == 1
+                }
+                fetched = [by_envelope.get(_bare(path.lstrip("/")), {}) for path in missing]
+            with self._lock:
+                for path, found in zip(missing, fetched):
+                    answers[path] = found
+                    self._lookup_cache[(path, datatype)] = (now, found)
+        return [answers[path] for path in paths]
+
+    def query(self, paths: Sequence[str], datatype: str) -> List[Dict[str, Any]]:
+        """A narrow read nothing subscribes to: routes picked by key, say.
+
+        Answered off the tree where a streamed path holds all it selects, and
+        otherwise with a Get of its own, kept for :attr:`get_ttl`. Subscribing
+        to it instead would restart the node's subscription for every question
+        asked, and keep each answer streaming long after it was read.
+        """
+        result: List[Dict[str, Any]] = []
+        now = time.time()
+        for path in paths:
+            with self._lock:
+                served = self._covered_snapshot(path, datatype)
+                cached = self._query_cache.get((path, datatype))
+            if served is not None:
+                result.extend(served)
+                continue
+            if cached is not None and now - cached[0] < self.get_ttl:
+                result.extend(cached[1])
+                continue
+            resp = self._raw_get_paths([path], datatype)
+            with self._lock:
+                for key in [k for k, (at, _) in self._query_cache.items() if now - at >= self.get_ttl]:
+                    del self._query_cache[key]
+                self._query_cache[(path, datatype)] = (now, resp)
+            result.extend(resp)
+        return result
+
+    def _covered_snapshot(self, path: str, datatype: str) -> Optional[List[Dict[str, Any]]]:
+        """*path* selected from the tree, if a streamed path delivers all of it.
+
+        Must be called with ``_lock`` held.
+        """
+        for state in self._paths.values():
+            spec = state.spec
+            if (
+                spec.datatype != datatype
+                or not state.bootstrapped
+                or not state.streamable
+                or spec.path in self._polled
+                or not (spec.path == path or _covers(spec, SubscriptionSpec(path, datatype, spec.mode)))
+            ):
+                continue
+            result: List[Dict[str, Any]] = []
+            for env in state.envelopes:
+                node = self._tree if env == "" else get_node(self._tree, env)
+                key = env if env else "/"
+                result.append({key: select_materialized(node, path, env) if node is not None else {}})
+            return result
+        return None
+
+    def _streamed_entries(self, paths: Sequence[str], datatype: str) -> Dict[str, Dict[str, Any]]:
+        """The entries among *paths* a streamed path delivers the list of.
+
+        An entry such a path does not hold is gone, which answers as ``{}`` -
+        the empty payload a Get has for it. Whether a list is streamed is
+        decided once per list, and each entry is then one lookup by key: a
+        table of BGP routes looks up its attribute sets by the ten thousand.
+        Must be called with ``_lock`` held.
+        """
+        answers: Dict[str, Dict[str, Any]] = {}
+        lists: Dict[str, Optional[ListNode]] = {}
+        for path in paths:
+            bracket = path.rfind("[")
+            slash = path.rfind("/", 0, bracket)
+            if bracket < 0 or slash < 0 or not path.endswith("]"):
+                continue
+            parent, elem = path[:slash], path[slash + 1 :]
+            name, keys = parse_elem(elem)
+            where = f"{parent}/{name}"
+            if where not in lists:
+                lists[where] = self._streamed_list(where, keys, datatype)
+            listed = lists[where]
+            if listed is None:
+                continue
+            found = listed.entries.get(_key_ident(keys))
+            answers[path] = {path.lstrip("/"): materialize(found[1])} if found is not None else {}
+        return answers
+
+    def _streamed_list(self, where: str, keys: Dict[str, str], datatype: str) -> Optional[ListNode]:
+        """The list at *where*, if a streamed path delivers all of it, else ``None``."""
+        shape = f"{where}[{']['.join(f'{k}=*' for k in keys)}]"
+        for state in self._paths.values():
+            spec = state.spec
+            if (
+                spec.datatype == datatype
+                and state.bootstrapped
+                and state.streamable
+                and spec.path not in self._polled
+                and (spec.path == shape or _covers(spec, SubscriptionSpec(shape, datatype, spec.mode)))
+            ):
+                node = get_node(self._tree, where.lstrip("/"))
+                return node if isinstance(node, ListNode) else ListNode()
+        return None
+
     def _promote(self, path: str, datatype: str, resp: List[Dict[str, Any]]) -> None:
         """Start streaming a pending path once its first data shows up.
 
@@ -1142,15 +1334,19 @@ class HostStream:
             logger.info("%s: %s now has state, subscribing to it", self.name, path)
 
     def _raw_get(self, path: str, datatype: str) -> List[Dict[str, Any]]:
+        return self._raw_get_paths([path], datatype)
+
+    def _raw_get_paths(self, paths: Sequence[str], datatype: str) -> List[Dict[str, Any]]:
         # Serialized on purpose: an in-flight Get holds a gRPC session on the
         # target just like the subscription does, and the node's budget is
         # shared with every other gRPC client.
+        path = paths[0] if len(paths) == 1 else ", ".join(paths)
         with self._get_lock:
             self._gets += 1
             self._get_started = time.time()
             try:
                 with _suppress_pygnmi_client_logging():
-                    resp = self.device.get(paths=[path], datatype=datatype)
+                    resp = self.device.get(paths=list(paths), datatype=datatype)
             except Exception as exc:
                 # A path the device does not have is not a node that stopped
                 # answering: it answered, with a rejection. Reports probe optional
@@ -1164,7 +1360,8 @@ class HostStream:
                         path,
                         exc,
                     )
-                    self._rejected[(path, datatype)] = exc
+                    if len(paths) == 1:
+                        self._rejected[(path, datatype)] = exc
                     self._failing_since = None
                     self._get_error = None
                     raise
@@ -1311,6 +1508,11 @@ class HostStream:
             + (1 if self._get_lock.locked() else 0),
             "gets": self.gets,
             "getting": self.getting,
+            # Notifications received and not yet applied: what says a node
+            # streams more than the server keeps up with. Not the age of what
+            # is applied, by the node's timestamps: SR Linux stamps an update
+            # with when the value last changed, which says nothing about lag.
+            "backlog": getattr(self._subscription, "backlog", 0) if isinstance(getattr(self._subscription, "backlog", 0), int) else 0,
             "failing_since": self.failing_since,
             "paths": paths,
         }

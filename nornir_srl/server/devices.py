@@ -28,7 +28,7 @@ from ..connections.neighbor_discovery import NeighborDiscoveryMixin
 from ..connections.routing import RoutingMixin
 from ..connections.system import SystemMixin
 from ..records import InterfaceStats
-from ..connections.routing import _suppress_pygnmi_client_logging
+from ..connections.routing import LOOKUP_BY_KEY_LIMIT, _suppress_pygnmi_client_logging, pick_entries
 from .stream import HostStream
 
 logger = logging.getLogger(__name__)
@@ -95,6 +95,34 @@ class RecordingDevice(MixinDevice):
             result.extend(self._getter(path, datatype or "config"))
         return result
 
+    def query(self, paths: List[str], datatype: Optional[str] = "state") -> List[Dict[str, Any]]:
+        """Answered, but not recorded: a narrow read is not a path to subscribe to."""
+        if self._getter is None:
+            with _suppress_pygnmi_client_logging():
+                return self._device.get(paths=paths, datatype=datatype)
+        return [payload for path in paths for payload in self._getter(path, datatype or "state")]
+
+    def lookup(
+        self, paths: List[str], datatype: Optional[str] = "state", table: Optional[str] = None
+    ) -> List[Dict[str, Any]]:
+        """Answered, but not recorded: what a getter asks for by key is not
+        a path to subscribe to; see :meth:`HostStream.lookup`. The *table*
+        the keys are in is: streamed, it answers every lookup in it."""
+        datatype = datatype or "state"
+        if table is not None and (table, datatype) not in self.recorded:
+            self.recorded.append((table, datatype))
+        if table is not None and len(paths) > LOOKUP_BY_KEY_LIMIT:
+            if self._getter is None:
+                with _suppress_pygnmi_client_logging():
+                    resp = self._device.get(paths=[table], datatype=datatype)
+            else:
+                resp = self._getter(table, datatype)
+            return pick_entries(table, resp, paths)
+        if self._getter is None:
+            with _suppress_pygnmi_client_logging():
+                return self._device.get(paths=paths, datatype=datatype)
+        return [next(iter(self._getter(path, datatype)), {}) for path in paths]
+
 
 class DirectDevice(MixinDevice):
     """Report getters answered by gNMI Gets alone, never from the streamed state.
@@ -120,6 +148,14 @@ class DirectDevice(MixinDevice):
             result.extend(self.stream.direct_get(path, datatype or "config"))
         return result
 
+    def lookup(
+        self, paths: List[str], datatype: Optional[str] = "state", table: Optional[str] = None
+    ) -> List[Dict[str, Any]]:
+        return self.stream.lookup(paths, datatype or "state", table)
+
+    def query(self, paths: List[str], datatype: Optional[str] = "state") -> List[Dict[str, Any]]:
+        return self.stream.query(paths, datatype or "state")
+
 
 class CachedDevice(MixinDevice):
     """Report getters served from a :class:`~nornir_srl.server.stream.HostStream`."""
@@ -141,6 +177,14 @@ class CachedDevice(MixinDevice):
                 snapshot = self.stream.direct_get(path, datatype or "config")
             result.extend(snapshot)
         return result
+
+    def lookup(
+        self, paths: List[str], datatype: Optional[str] = "state", table: Optional[str] = None
+    ) -> List[Dict[str, Any]]:
+        return self.stream.lookup(paths, datatype or "state", table)
+
+    def query(self, paths: List[str], datatype: Optional[str] = "state") -> List[Dict[str, Any]]:
+        return self.stream.query(paths, datatype or "state")
 
     def get_ifstats(self, interface: str = "*", interval: int = 5) -> Dict[str, Any]:
         """Interface rates derived from the streamed counter samples.

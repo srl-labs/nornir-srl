@@ -215,9 +215,9 @@ def node_facts(
 ) -> NodeFacts:
     """Read one node's contribution out of its streamed state.
 
-    *snapshot* is the ``system``, ``network-instance``, ``interface`` and
-    ``platform`` trees as
-    :meth:`~nornir_srl.server.stream.HostStream.snapshot_roots` returns them.
+    *snapshot* is the node's state as far as the topology report's paths
+    reach, as :meth:`~nornir_srl.server.stream.HostStream.snapshot_paths`
+    returns it.
     A node with nothing streamed yet yields facts that classify as ``unknown``
     rather than as a node without services.
     """

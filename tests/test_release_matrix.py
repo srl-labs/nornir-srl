@@ -173,6 +173,10 @@ def test_report_reproduces_the_table_the_device_gave(path: str, report: str) -> 
     """
     recording = _recording(path)
     captured = recording.reports[report]
+    if any(spec.required for spec in REPORTS_BY_NAME[report].params):
+        # Recorded run without the arguments it now cannot run without - a
+        # peer's routes were every peer's - so there is no table to match.
+        pytest.skip(f"{report} now needs {', '.join(s.name for s in REPORTS_BY_NAME[report].params if s.required)}")
 
     columns, rows = recording.table(report)
 
@@ -245,18 +249,24 @@ def test_received_routes_replay_from_the_bgp_rib_recordings(path: str) -> None:
         for call in captured.calls
     ]
     getter = REPORTS_BY_NAME["bgp_received_routes"].getter
+    # The peers, from what the RIB reports themselves read: the received
+    # routes of every peer are no longer asked for, only of one at a time.
+    sent: Dict[str, Set[str]] = {}
+    for name in recording.reports:
+        if name.startswith("bgp_rib_"):
+            for rib in recording.run(name).get("bgp_rib") or []:
+                for route in rib.routes:
+                    if route.neighbor not in ("", "0.0.0.0", "::"):
+                        sent.setdefault(route.neighbor, set()).add(rib.family)
+    if not sent:
+        pytest.skip(f"{recording.release}/{recording.node} received no BGP routes")
+    peer = sorted(sent)[0]
+    family = "evpn" if "evpn" in sent[peer] else sorted(sent[peer])[0]
     with deterministic_clock(recording.captured_at, recording.ifstats_interval, skip_sleep=True):
-        everything = getter(ReplayDevice(calls, recording.capabilities))["bgp_rib"]
-        peers = {route.neighbor for rib in everything for route in rib.routes}
-        if not peers:
-            pytest.skip(f"{recording.release}/{recording.node} received no BGP routes")
-        peer = sorted(peers)[0]
-        mine = getter(ReplayDevice(calls, recording.capabilities), peer=peer)["bgp_rib"]
-        evpn = getter(ReplayDevice(calls, recording.capabilities), peer=peer, family="evpn")["bgp_rib"]
+        assert getter(ReplayDevice(calls, recording.capabilities))["bgp_rib"] == [], "nothing without a peer"
+        mine = getter(ReplayDevice(calls, recording.capabilities), peer=peer, family=family)["bgp_rib"]
 
-    assert "0.0.0.0" not in peers, "a locally originated route is not received"
     assert mine and {r.neighbor for rib in mine for r in rib.routes} == {peer}
-    assert {rib.family for rib in evpn} <= {"evpn"}
-    assert sum(len(rib.routes) for rib in evpn) <= sum(len(rib.routes) for rib in mine)
+    assert {rib.family for rib in mine} == {family}
     rows = [row for rib in mine for row in BGP_RECEIVED_TABLE.rows(rib)]
     assert rows and all(row.values["peer"] == peer for row in rows)
