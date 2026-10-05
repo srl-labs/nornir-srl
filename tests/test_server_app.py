@@ -1809,3 +1809,59 @@ async def test_a_stream_passes_a_question_it_cannot_answer_on_as_an_error(store)
     events = await _collect(fabric_store, lens, stop_after=1, render=render)
     assert events[0][0] == "error"
     assert "no network-instance matching" in events[0][1]["error"]
+
+
+def _slow_renders(fabric_store, monkeypatch, fail=False):
+    """Count the renders the store does, each slow enough for others to pile up on."""
+    import threading as _threading
+
+    calls = []
+    real = fabric_store._render_table
+    started = _threading.Event()
+
+    def render(*args, **kwargs):
+        calls.append(args[0].name)
+        started.set()
+        time.sleep(0.3)
+        if fail:
+            raise RuntimeError("render failed")
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(fabric_store, "_render_table", render)
+    return calls, started
+
+
+def test_clients_opening_the_same_view_at_once_share_one_render(store, monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor as Pool
+
+    fabric_store, _devices = store
+    calls, started = _slow_renders(fabric_store, monkeypatch)
+    report = get_report("lldp")
+    with Pool(4) as pool:
+        first = pool.submit(fabric_store.table, report)
+        assert started.wait(5)
+        others = [pool.submit(fabric_store.table, report) for _ in range(3)]
+        tables = [first.result(10)] + [f.result(10) for f in others]
+    assert calls == ["lldp"]
+    assert all(t is tables[0] for t in tables)
+    assert fabric_store._rendering == {}
+
+
+def test_a_failed_shared_render_fails_every_waiter_and_is_tried_again(store, monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor as Pool
+
+    fabric_store, _devices = store
+    calls, started = _slow_renders(fabric_store, monkeypatch, fail=True)
+    report = get_report("lldp")
+    with Pool(2) as pool:
+        first = pool.submit(fabric_store.table, report)
+        assert started.wait(5)
+        second = pool.submit(fabric_store.table, report)
+        for future in (first, second):
+            with pytest.raises(RuntimeError, match="render failed"):
+                future.result(10)
+    assert calls == ["lldp"]
+    # Nothing is left waiting on the failure: the next one renders afresh.
+    with pytest.raises(RuntimeError):
+        fabric_store.table(report)
+    assert calls == ["lldp", "lldp"]

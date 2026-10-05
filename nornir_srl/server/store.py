@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
@@ -89,6 +89,9 @@ class FabricStore:
         self._activated: Set[Tuple[str, str]] = set()
         #: Why a node could not serve a report, and when that was decided.
         self._activation_errors: Dict[Tuple[str, str], Tuple[float, str]] = {}
+        #: The tables being rendered right now, by cache key: a client asking
+        #: for one already under way waits for it rather than rendering it too.
+        self._rendering: Dict[Any, "Future[Dict[str, Any]]"] = {}
         #: Centralized table cache per (report_name, inv_filter, report params)
         #: -> (timestamp, table)
         self._table_cache: Dict[
@@ -606,7 +609,37 @@ class FabricStore:
                         now - cached_at,
                     )
                     return cached_table
+            # Several clients opening the same view at once - the first render
+            # of a report is the slow one - get one render between them.
+            pending = self._rendering.get(cache_key)
+            leader = pending is None
+            if leader:
+                pending = self._rendering[cache_key] = Future()
+        if not leader:
+            logger.debug("report '%s': waiting for the render already under way", report.name)
+            return pending.result()
+        try:
+            res_table = self._render_table(report, inv_filter, params, names, cache_key)
+        except BaseException as exc:
+            pending.set_exception(exc)
+            raise
+        else:
+            pending.set_result(res_table)
+            return res_table
+        finally:
+            with self._lock:
+                if self._rendering.get(cache_key) is pending:
+                    del self._rendering[cache_key]
 
+    def _render_table(
+        self,
+        report: ReportSpec,
+        inv_filter: Optional[Dict[str, str]],
+        params: Optional[Dict[str, Any]],
+        names: List[str],
+        cache_key: Any,
+    ) -> Dict[str, Any]:
+        """Render *report* over *names* and cache it under *cache_key*."""
         started = time.time()
         errors: List[Dict[str, str]] = []
         if report.name == CHECKS_REPORT:
