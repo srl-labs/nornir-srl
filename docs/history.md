@@ -9,7 +9,7 @@ fcli -t topo.clab.yml server --history-dir /srv/fcli/history
 fcli -t topo.clab.yml server --no-history          # everything in memory, as before
 ```
 
-The fabric is named by the containerlab topology's `name:`. A fabric loaded from a Nornir config is called `fabric`; give two such fabrics their own `--history-dir`.
+The fabric is named by the containerlab topology's `name:`, or, for a fabric loaded from a Nornir config, by the directory that config lives in (`~/fabrics/dc1/nornir_config.yaml` is `dc1`). `--fabric NAME` (or `FCLI_FABRIC`) names it explicitly, for instance when two inventories live in directories of the same name. The same name keys the snapshots, the acknowledgements and the cabling.
 
 ## What is kept
 

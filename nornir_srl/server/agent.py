@@ -454,7 +454,7 @@ def system_prompt(context: Optional[Dict[str, Any]], topo_name: Optional[str]) -
     name = ctx.get("topo_name") or topo_name
     extra = []
     if name:
-        extra.append(f"topology={name}")
+        extra.append(f"fabric={name}")
     if viewing:
         extra.append(f"user is viewing report '{viewing}'")
     if inv:

@@ -47,7 +47,7 @@
     nodesBlock: el("nodes-block"),
     nodeList: el("node-list"),
     nodeSummary: el("node-summary"),
-    topoBadge: el("topo-badge"),
+    fabricName: el("fabric-name"),
     version: el("version"),
     navBack: el("nav-back"),
     navForward: el("nav-forward"),
@@ -708,14 +708,12 @@
     state.reports = data.reports;
     state.fabric = data.topo_name || "";
     dom.version.textContent = "v" + data.version;
-    if (data.topo_name) {
-      if (dom.topoBadge) {
-        dom.topoBadge.textContent = "clab: " + data.topo_name;
-        dom.topoBadge.title = "Containerlab topology: " + data.topo_name;
-        dom.topoBadge.hidden = false;
-      }
-    } else if (dom.topoBadge) {
-      dom.topoBadge.hidden = true;
+    if (dom.fabricName) {
+      const clab = data.fabric_source === "clab";
+      dom.fabricName.textContent = data.topo_name
+        ? `Fabric: ${data.topo_name}${clab ? " (clab)" : ""}`
+        : "";
+      dom.fabricName.hidden = !data.topo_name;
     }
     if (data.chat && data.chat.enabled && dom.chatOpen) {
       state.chatEnabled = true;
@@ -3847,17 +3845,101 @@
     });
   }
 
+  /** The report that lists an interface of a service, and its name column. */
+  function interfaceReport(name) {
+    if (/^irb/.test(name)) return ["irb", "name"];
+    if (/^vxlan/.test(name)) return ["vxlan", "vxlan-itf"];
+    return ["subif", "Subitf"];
+  }
+
+  /** One interface of one node, in the report that lists it. */
+  function jumpToInterface(name, nodeName) {
+    const [report, column] = interfaceReport(name);
+    jumpToFilteredReport(report, [], [nodeName], { [column]: exactMatchPattern([name]) });
+  }
+
+  /**
+   * An ethernet-segment by its ESI, on every node: a multi-homed segment is
+   * worth seeing from all the nodes that share it. Its name is optional and
+   * may be missing, its ESI never is.
+   */
+  function jumpToEthernetSegment(esi) {
+    jumpToFilteredReport("es", [], [], { esi: exactMatchPattern([esi]) });
+  }
+
+  /** A full 10-byte ESI from the compressed one a label shows: `..` is a run of zero bytes. */
+  function expandEsi(esi) {
+    const parts = esi.split(":");
+    const gap = parts.indexOf("..");
+    if (gap < 0) return esi;
+    const zeros = Array(Math.max(0, 10 - (parts.length - 1))).fill("00");
+    return [...parts.slice(0, gap), ...zeros, ...parts.slice(gap + 1)].join(":");
+  }
+
+  function reportLink(text, title, jump) {
+    const link = document.createElement("a");
+    link.className = "vrf-link";
+    link.href = "#";
+    link.textContent = text;
+    link.title = title;
+    link.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      jump();
+    });
+    return link;
+  }
+
+  /**
+   * A pill label with *name* in it turned into a jump to the report that
+   * lists it; the rest of the label stays text.
+   */
+  function fillLinkedLabel(pill, label, name, title, jump) {
+    const at = name ? label.indexOf(name) : -1;
+    if (at < 0) {
+      pill.append(document.createTextNode(label));
+      return;
+    }
+    pill.append(
+      document.createTextNode(label.slice(0, at)),
+      reportLink(name, title, jump),
+      document.createTextNode(label.slice(at + name.length))
+    );
+  }
+
+  /** A pill label that starts with an interface name, the name linked. */
+  function fillInterfaceLabel(pill, label, nodeName) {
+    const name = (/^\S+/.exec(label) || [""])[0];
+    const [report] = interfaceReport(name);
+    const what = { irb: "IRB interface", vxlan: "VXLAN interface", subif: "sub-interface" }[report];
+    fillLinkedLabel(pill, label, name, `Show ${what} ${name} on ${nodeName}`, () =>
+      jumpToInterface(name, nodeName)
+    );
+  }
+
+  /**
+   * An ethernet-segment label - `[ES: ]ID: <esi>, <name>, mode: ..., oper: ...` -
+   * with its ESI linked to the segment report.
+   */
+  function fillEsLabel(pill, label) {
+    const id = (/\bID:\s*([0-9a-f:.]+)/i.exec(label) || [])[1] || "";
+    const esi = expandEsi(id);
+    fillLinkedLabel(pill, label, id, `Show ethernet-segment ${esi}`, () =>
+      jumpToEthernetSegment(esi)
+    );
+  }
+
   // A virtual-ES label with its next-hop(s) turned into RIB jumps. The rest of
   // the label stays text; only `nh: <ip>` is a control, because that address
   // being active in this IP-VRF is what the segment tracks.
   function fillVirtualEsLabel(esPill, es, niName) {
     const match = /\bnh:\s*([^,]+)/.exec(es);
     if (!match) {
-      esPill.textContent = es;
+      fillEsLabel(esPill, es);
       return;
     }
     const ips = match[1].trim().split(/\s+/).filter(Boolean);
-    esPill.append(document.createTextNode(es.slice(0, match.index) + "nh: "));
+    fillEsLabel(esPill, es.slice(0, match.index) + "nh: ");
     ips.forEach((ip, index) => {
       if (index) esPill.append(document.createTextNode(" "));
       const report = ribReportForAddress(ip);
@@ -4496,7 +4578,7 @@
               const p = document.createElement("span");
               p.className = "pill";
               applyPillState(p, itfText);
-              p.textContent = itfText.trim();
+              fillInterfaceLabel(p, itfText.trim(), nodeName);
               pillGroup.append(p);
 
               const vrfs = vrfText
@@ -4544,7 +4626,7 @@
               const p = document.createElement("span");
               p.className = "pill";
               applyPillState(p, itfText);
-              p.textContent = itfText.trim();
+              fillInterfaceLabel(p, itfText.trim(), nodeName);
               line.append(p);
 
               const es = esText.join("->").trim();
@@ -4558,7 +4640,7 @@
                 const oper = /\boper:\s*(\S+)/.exec(es);
                 const kind = oper ? stateKind(oper[1]) : "";
                 if (kind && kind !== "up") esPill.classList.add(`pill-${kind}`);
-                esPill.textContent = es;
+                fillEsLabel(esPill, es);
                 line.append(arrow, esPill);
               }
               lines.append(line);
@@ -4583,7 +4665,7 @@
             vxlanStr.split(",").forEach((v) => {
               const p = document.createElement("span");
               p.className = "pill pill-vxlan";
-              p.textContent = v.trim();
+              fillInterfaceLabel(p, v.trim(), nodeName);
               pillGroup.append(p);
             });
             vxRowDiv.append(pillGroup);
@@ -4911,7 +4993,14 @@
                   jumpToVrf("bridge_domains", macName, nodeName);
                 });
 
-                p.append(link, document.createTextNode(restText));
+                p.append(link);
+                const irb = /^(\s*\()(irb\S+)/.exec(restText);
+                if (irb) {
+                  p.append(document.createTextNode(irb[1]));
+                  fillInterfaceLabel(p, restText.slice(irb[1].length), nodeName);
+                } else {
+                  p.append(document.createTextNode(restText));
+                }
               } else {
                 p.textContent = itemStr.trim();
               }
@@ -4939,7 +5028,7 @@
               const p = document.createElement("span");
               p.className = "pill";
               applyPillState(p, s);
-              p.textContent = s.trim();
+              fillInterfaceLabel(p, s.trim(), nodeName);
               line.append(p);
               lines.append(line);
             });
@@ -5036,7 +5125,7 @@
 
               const p = document.createElement("span");
               p.className = "pill pill-vxlan";
-              p.textContent = v.trim();
+              fillInterfaceLabel(p, v.trim(), nodeName);
               line.append(p);
               lines.append(line);
             });

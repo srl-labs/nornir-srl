@@ -232,6 +232,7 @@ def create_app(
     restart_debounce: float = 1.0,
     connect_retry_interval: float = 30.0,
     topo_name: Optional[str] = None,
+    fabric_source: Optional[str] = None,
     snapshot_dir: Optional[Path] = None,
     watch_interval: float = 0.0,
     persist_acks: bool = False,
@@ -316,6 +317,9 @@ def create_app(
             {
                 "version": __version__,
                 "topo_name": store.topo_name,
+                # Where the fabric's name came from: the lab, the Nornir config
+                # or the command line, so the badge says what it names.
+                "fabric_source": fabric_source or ("clab" if store.topo_name else None),
                 # The lenses are offered alongside the reports, marked as what
                 # they are: a question with arguments, run rather than streamed.
                 "reports": [r.as_dict() for r in reports_for(SERVER)]
@@ -801,6 +805,7 @@ def serve(
     idle_timeout: float = 900.0,
     log_level: str = "info",
     topo_name: Optional[str] = None,
+    fabric_source: Optional[str] = None,
     snapshot_dir: Optional[Path] = None,
     watch_interval: float = 15.0,
     persist_acks: bool = False,
@@ -820,6 +825,7 @@ def serve(
         workers=workers,
         idle_timeout=idle_timeout,
         topo_name=topo_name,
+        fabric_source=fabric_source,
         snapshot_dir=snapshot_dir,
         watch_interval=watch_interval,
         persist_acks=persist_acks,

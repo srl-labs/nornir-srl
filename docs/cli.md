@@ -11,6 +11,8 @@ Options:
   -i, --inv-filter TEXT  inventory filter, e.g. -i site=lab -i role=leaf
   -b, --box-type TEXT    box type of printed table ('python -m rich.box')
   -t, --topo-file PATH   CLAB topology file. Mutually exclusive with -c
+  --fabric TEXT          name the fabric's state is kept under [env: FCLI_FABRIC;
+                         default: the lab's name, or the Nornir config's directory]
   --cert-file PATH       PEM trust anchor for the gNMI certificate of a node
   --verify/--skip-verify verify that certificate [default: --skip-verify
                          unless --cert-file is given]

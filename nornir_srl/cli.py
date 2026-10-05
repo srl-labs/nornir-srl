@@ -338,6 +338,15 @@ def main(
         exists=True,
         help="CLAB topology file, mutually exclusive with -c",
     ),
+    fabric_name: Optional[str] = typer.Option(
+        None,
+        "--fabric",
+        envvar="FCLI_FABRIC",
+        help=(
+            "Name the fabric's history, snapshots, acks and cabling are kept under. "
+            "Defaults to the topology's name, or the directory of the Nornir config file"
+        ),
+    ),
     cert_file: Optional[Path] = typer.Option(
         None,
         "--cert-file",
@@ -495,7 +504,19 @@ def main(
     ctx.obj["box_type"] = box_type.upper() if box_type else None
     ctx.obj["output"] = output
     ctx.obj["log_level"] = log_level.value
-    ctx.obj["topo_name"] = lab_name if topo_file else None
+    # Whatever the inventory came from, the state kept on disk belongs to one
+    # fabric: named on the command line, after the lab, or after the directory
+    # the Nornir config lives in, so two inventories never share a history.
+    if fabric_name:
+        fabric_source = "option"
+    elif topo_file and lab_name:
+        fabric_name, fabric_source = lab_name, "clab"
+    else:
+        fabric_name = (cfg.resolve().parent.name if cfg else "") or None
+        fabric_source = "nornir" if fabric_name else None
+    logger.debug("fabric '%s' (%s)", fabric_name, fabric_source or "-")
+    ctx.obj["topo_name"] = fabric_name
+    ctx.obj["fabric_source"] = fabric_source
     ctx.obj["node_prefix"] = node_prefix
 
 
@@ -904,6 +925,7 @@ def server(
         idle_timeout=idle_timeout,
         log_level=ctx.obj["log_level"],
         topo_name=ctx.obj.get("topo_name"),
+        fabric_source=ctx.obj.get("fabric_source"),
         snapshot_dir=snapshot_dir,
         watch_interval=watch_interval,
         persist_acks=persist_acks,

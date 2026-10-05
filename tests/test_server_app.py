@@ -1151,6 +1151,15 @@ def test_reports_endpoint_returns_topo_name(fabric):
     with TestClient(app) as test_client:
         payload = test_client.get("/api/reports").json()
         assert payload["topo_name"] == "dc1"
+        assert payload["fabric_source"] == "clab"
+
+
+def test_reports_endpoint_says_where_the_fabric_name_came_from(fabric):
+    nornir, _devices = fabric
+    app = create_app(nornir, resync_interval=0, topo_name="dc7", fabric_source="nornir")
+    with TestClient(app) as test_client:
+        payload = test_client.get("/api/reports").json()
+        assert (payload["topo_name"], payload["fabric_source"]) == ("dc7", "nornir")
 
 
 def test_inventory_endpoint(client):
