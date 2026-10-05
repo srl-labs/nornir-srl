@@ -1309,3 +1309,43 @@ def test_no_parameter_is_called_what_a_page_keeps_its_scope_under():
 
     for spec in list(REPORTS) + list(LENSES):
         assert all(param.name != "node" for param in spec.params), spec.name
+
+
+def test_the_same_minute_on_two_days_is_two_cards_each_dated():
+    """14:02 today and 14:02 yesterday are different minutes, and say so."""
+    import time
+
+    from nornir_srl.changes import Change
+    from nornir_srl.lenses import tree_changes
+
+    today = 1_700_000_000.0 - 1_700_000_000.0 % 60
+    yesterday = today - 86_400
+    changes = [
+        Change(today + 5, "leaf1", "bgp", "default/10.0.0.1", "established", "active", "error"),
+        Change(yesterday + 5, "leaf1", "bgp", "default/10.0.0.1", "established", "active", "error"),
+    ]
+    cards = tree_changes(changes)
+    assert [c.title for c in cards] == [
+        time.strftime("%Y-%m-%d %H:%M", time.localtime(today)),
+        time.strftime("%Y-%m-%d %H:%M", time.localtime(yesterday)),
+    ]
+    assert changes[0].time == time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(today + 5))
+    # Inside a card, its day and minute go without saying.
+    assert cards[0].entries[0].items[0].details[0].value == time.strftime("%H:%M:%S", time.localtime(today + 5))
+
+
+def test_incident_times_are_dated_and_the_last_only_when_another_day():
+    import time
+    from types import SimpleNamespace
+
+    from nornir_srl.lenses import incident_first, incident_when
+
+    first = 1_700_000_000.0
+    stamp = lambda at, fmt="%Y-%m-%d %H:%M:%S": time.strftime(fmt, time.localtime(at))
+
+    same_day = SimpleNamespace(first_seen=first, last_seen=first + 60, since_before=False)
+    assert incident_first(same_day) == stamp(first)
+    assert incident_when(same_day) == f"first {stamp(first)} · last {stamp(first + 60, '%H:%M:%S')}"
+
+    next_day = SimpleNamespace(first_seen=first, last_seen=first + 86_400, since_before=False)
+    assert incident_when(next_day) == f"first {stamp(first)} · last {stamp(first + 86_400)}"
