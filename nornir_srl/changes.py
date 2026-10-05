@@ -136,8 +136,13 @@ class Change:
 
     @property
     def time(self) -> str:
-        """When, as the local time of day it reads as on a timeline."""
-        return time.strftime("%H:%M:%S", time.localtime(self.at))
+        """When, as a local date and time: a timeline spans days, and sorts as text."""
+        return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(self.at))
+
+    @property
+    def minute(self) -> str:
+        """The minute it happened in, dated: 14:02 today is not 14:02 yesterday."""
+        return time.strftime("%Y-%m-%d %H:%M", time.localtime(self.at))
 
     @property
     def summary(self) -> str:
