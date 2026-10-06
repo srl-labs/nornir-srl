@@ -76,7 +76,7 @@ NO_ANSWER = (
     "a minimum, and say what you could not determine."
 )
 
-_SKIP_TABLE = frozenset({"overview", "topology"})
+_SKIP_TABLE = frozenset({"overview", "topology", "activity"})
 
 #: Config subtrees per area, so the model asks for "bgp" instead of inventing a
 #: YANG path. ``{ni}`` is filled with the network-instance being asked about.

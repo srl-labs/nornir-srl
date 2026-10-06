@@ -378,6 +378,10 @@ class HostStream:
         self._generation = 0
         self._subscription: Any = None
         self._lag_warned = 0.0
+        #: Notifications applied, and the leaves they updated or deleted: counted
+        #: up for good, so a caller sampling them gets the rates.
+        self._notifications = 0
+        self._leaves = 0
         self._gets = 0
         #: When the running subscription was established, if there is one.
         self._subscribed_at: Optional[float] = None
@@ -831,6 +835,8 @@ class HostStream:
                 self._replay.append(message)
         prefix = update.get("prefix") or ""
         timestamp = update.get("timestamp") or 0
+        self._notifications += 1
+        self._leaves += len(update.get("update") or []) + len(update.get("delete") or [])
         touched_itfs = set()
         logger.debug(
             "%s: notification on %s with %d update(s) and %d delete(s)",
@@ -1508,6 +1514,11 @@ class HostStream:
             + (1 if self._get_lock.locked() else 0),
             "gets": self.gets,
             "getting": self.getting,
+            # Monotonic, like gets: what the activity page derives rates from.
+            "notifications": self._notifications,
+            "leaves": self._leaves,
+            # Re-reading every path with Gets, while the stream is held back.
+            "resyncing": self._replay is not None,
             # Notifications received and not yet applied: what says a node
             # streams more than the server keeps up with. Not the age of what
             # is applied, by the node's timestamps: SR Linux stamps an update

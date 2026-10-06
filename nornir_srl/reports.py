@@ -1433,6 +1433,16 @@ REPORTS: List[ReportSpec] = [
         ),
     ),
     ReportSpec(
+        name="activity",
+        resource="activity",
+        title="Server Activity",
+        description="What the server streams from each node, how fast, and whether it keeps up.",
+        # Drawn by the browser from /api/status, not by a getter.
+        getter=lambda d: {},
+        category="Dashboard",
+        surfaces=STREAMING,
+    ),
+    ReportSpec(
         name="topology",
         resource="topology",
         title="Topology",

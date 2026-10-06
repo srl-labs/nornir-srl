@@ -12,7 +12,7 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence, Set, Tuple
 
 from nornir.core import Nornir
 
-from ..checks import CHECKS_COLUMNS, CHECKS_REPORT, FabricState, Finding, REQUIRED_REPORTS, run_checks
+from ..checks import CHECKS_COLUMNS, CHECKS_REPORT, FabricState, Finding, REQUIRED_REPORTS, check_results, run_checks
 from .. import configs
 from ..acks import AckStore, finding_key, mark as mark_acknowledged
 from ..changes import INFO, WATCHED_ROUTE_REPORTS, Change
@@ -28,7 +28,7 @@ from ..reports import ReportSpec, SubscriptionSpec, get_report, reading_reports,
 from ..rows import cell, clean_columns, flatten, merge_fields, sub_item_keys
 from .devices import CachedDevice, DirectDevice, RecordingDevice
 from .readings import NOT_RECORDED, Recorder, TapDevice, TapDirectDevice
-from .stream import HostStream
+from .stream import MAX_EVICTION_BACKLOG, HostStream
 from .timeline import Reading, Timeline, Watcher
 from .topology import annotate_aliasing, annotate_health, build_topology, node_facts
 from .tree import key_matches
@@ -802,12 +802,17 @@ class FabricStore:
         """Render *report* over *names* and cache it under *cache_key*."""
         started = time.time()
         errors: List[Dict[str, str]] = []
+        extra: Dict[str, Any] = {}
         if report.name == CHECKS_REPORT:
             # Findings are about the fabric rather than about one node, so they
             # are gathered across it rather than merged per host. A node the
             # checks could not read becomes a finding, not a table-level error.
             all_columns = list(CHECKS_COLUMNS)
-            clean_rows = self._checks_rows(inv_filter)
+            state = self.fabric_state(inv_filter)
+            findings = run_checks(state)
+            clean_rows = [f.as_row() for f in findings]
+            # Each check, passing or not, for the page to draw one card each.
+            extra["checks"] = check_results(state, findings)
         else:
             results = list(
                 self._pool.map(lambda n: self._host_rows(report, n, params), names)
@@ -849,6 +854,7 @@ class FabricStore:
             "generated": started,
             "render_ms": round((time.time() - started) * 1000, 1),
             "oldest_update": _oldest_update(self._streams_for(names)),
+            **extra,
         }
         with self._lock:
             # The cache is keyed by the inventory filter and the report's own
@@ -1429,6 +1435,8 @@ class FabricStore:
             # per gRPC server by default, shared with every other client, so
             # this is the number to watch.
             "max_sessions_per_node": max((s["sessions"] for s in streams), default=0),
+            # Past this many notifications waiting, a node's stream is behind.
+            "backlog_limit": MAX_EVICTION_BACKLOG,
             "resync_interval": self.resync_interval,
         }
 
@@ -1488,11 +1496,9 @@ class FabricStore:
             },
             "bridge_domains": _roll_up(health.bridge_domains),
             "routers": _roll_up(health.routers),
-            "telemetry": {
-                "subscriptions": sum(len(s.status()["paths"]) for s in all_streams),
-                "resync_interval": self.resync_interval,
-                "cached_tables": cached_tables,
-            },
+            "telemetry": _telemetry_summary(
+                [(s.name, s.status()) for s in all_streams], self.resync_interval, cached_tables
+            ),
         }
 
     def _health_summary(
@@ -1611,6 +1617,35 @@ class FabricStore:
 
 class _NoReading(Exception):
     """No health reading yet to colour the topology with."""
+
+
+def _telemetry_summary(
+    statuses: List[Tuple[str, Dict[str, Any]]], resync_interval: int, cached_tables: int
+) -> Dict[str, Any]:
+    """What the dashboard says of the streams: paths, how they are served, and
+    whether every node is being kept up with.
+
+    ``subscriptions`` is the gNMI paths the reports in use read, on every node
+    - not Subscribe RPCs, of which a node has one. Of those, ``streaming`` are
+    streamed, ``pending`` were empty and are served by short-lived Gets until
+    they fill, and ``polled`` were left out of a subscription for room. Paths
+    another one delivers count as streaming. ``backlog`` is the most
+    notifications any one node has waiting to be applied, and which node.
+    """
+    paths = [p for _name, status in statuses for p in status.get("paths", [])]
+    worst = max(statuses, key=lambda item: item[1].get("backlog", 0) or 0, default=None)
+    return {
+        "subscriptions": len(paths),
+        "nodes": len(statuses),
+        "streaming": sum(1 for p in paths if p.get("streaming")),
+        "pending": sum(1 for p in paths if p.get("pending")),
+        "polled": sum(1 for p in paths if p.get("polled")),
+        "backlog": (worst[1].get("backlog", 0) or 0) if worst else 0,
+        "backlog_node": worst[0] if worst and worst[1].get("backlog") else None,
+        "backlog_limit": MAX_EVICTION_BACKLOG,
+        "resync_interval": resync_interval,
+        "cached_tables": cached_tables,
+    }
 
 
 def _report_paths(name: str) -> Tuple[str, ...]:

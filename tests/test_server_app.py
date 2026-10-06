@@ -1955,3 +1955,17 @@ def test_the_keys_endpoint_takes_only_a_key_parameter(client):
     assert test_client.get("/api/keys/lldp?param=x").status_code == 400
     resp = test_client.get("/api/keys/bgp_rib_evpn_2?param=mac_address")
     assert resp.status_code == 200 and resp.json()["param"] == "mac_address"
+
+
+def test_the_telemetry_card_counts_paths_by_how_they_are_served():
+    from nornir_srl.server.store import _telemetry_summary
+
+    statuses = [
+        ("leaf1", {"backlog": 3, "paths": [{"streaming": True}, {"pending": True}]}),
+        ("leaf2", {"backlog": 0, "paths": [{"streaming": True}, {"polled": True}, {"streaming": True}]}),
+    ]
+    summary = _telemetry_summary(statuses, 300, 9)
+    assert (summary["subscriptions"], summary["nodes"], summary["streaming"]) == (5, 2, 3)
+    assert (summary["pending"], summary["polled"]) == (1, 1)
+    assert (summary["backlog"], summary["backlog_node"]) == (3, "leaf1")
+    assert _telemetry_summary([("leaf1", {"backlog": 0, "paths": []})], 300, 0)["backlog_node"] is None

@@ -1371,6 +1371,67 @@ def collect_fabric_state(
     return _collect(target, reports)
 
 
+#: What a check came to, as the Checks page shows it, worst first.
+CHECK_STATUSES = ("failed", "error", "warning", "skipped", "pass")
+
+
+def check_results(state: FabricState, findings: Sequence[Finding]) -> List[Dict[str, Any]]:
+    """Each check, whether it ran, and what it found where - the passing ones too.
+
+    *findings* is what :func:`run_checks` made of *state*. A check is
+    ``skipped`` when none of the reports it reads were collected, ``failed``
+    when it raised, and otherwise as bad as its worst finding, or ``pass``.
+    ``nodes`` holds every node the check had something to read on, with the
+    worst it found there - ``pass`` where it found nothing - so a passing node
+    shows as one rather than as missing. The nodes the checks could not read
+    at all are a check of their own, ``collection``.
+    """
+    by_check: Dict[str, List[Finding]] = {}
+    for finding in findings:
+        by_check.setdefault(finding.check, []).append(finding)
+
+    def summary(name: str, title: str, requires: Tuple[str, ...], ran: bool, checked: Set[str]) -> Dict[str, Any]:
+        found = by_check.get(name, [])
+        failed = any(f.node == "-" and f.subject == "check failed" for f in found)
+        errors = sum(1 for f in found if f.severity == ERROR)
+        warnings = sum(1 for f in found if f.severity == WARNING)
+        nodes: Dict[str, str] = {node: "pass" for node in checked}
+        for f in found:
+            if f.node == "-":
+                continue
+            worst = nodes.get(f.node, "pass")
+            if worst == "pass" or (worst == WARNING and f.severity == ERROR):
+                nodes[f.node] = f.severity
+        status = (
+            "failed" if failed
+            else "skipped" if not ran
+            else ERROR if errors
+            else WARNING if warnings
+            else "pass"
+        )
+        return {
+            "name": name,
+            "title": title,
+            "requires": list(requires),
+            "status": status,
+            "errors": errors,
+            "warnings": warnings,
+            "nodes": dict(sorted(nodes.items())),
+            "findings": [f.as_row() for f in found],
+        }
+
+    results = []
+    for check in CHECKS:
+        collected = {node for report in check.requires for node in (state.reports.get(report) or {})}
+        ran = not check.requires or bool(collected)
+        results.append(summary(check.name, check.title, check.requires, ran, collected if ran else set()))
+    unread = {node for (_report, node) in state.errors}
+    read = {node for payloads in state.reports.values() for node in payloads}
+    results.append(summary("collection", "Nodes the checks could not read", (), True, read | unread))
+    results.sort(key=lambda r: (CHECK_STATUSES.index(r["status"]), -(r["errors"] + r["warnings"]), r["title"]))
+    return results
+
+
 def run_checks(
     state: FabricState, only: Optional[Sequence[str]] = None
 ) -> List[Finding]:

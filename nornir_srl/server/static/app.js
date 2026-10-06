@@ -81,6 +81,12 @@
     errors: el("errors"),
     tableWrap: el("table-wrap"),
     overviewDashboard: el("overview-dashboard"),
+    activityView: el("activity-view"),
+    activitySummary: el("activity-summary"),
+    activityChart: el("activity-chart"),
+    activityWindow: el("activity-window"),
+    activityTable: el("activity-table"),
+    activityTooltip: el("activity-tooltip"),
     topologyView: el("topology-view"),
     topoCanvas: el("topo-canvas"),
     topoLegend: el("topo-legend"),
@@ -97,6 +103,7 @@
     topoZoomFit: el("topo-zoom-fit"),
     topoExportDrawio: el("topo-export-drawio"),
     servicesTreeView: el("services-tree-view"),
+    checksBoard: el("checks-board"),
     pathGraphView: el("path-graph-view"),
     configDiffView: el("config-diff-view"),
     viewModeBtn: el("view-mode-btn"),
@@ -165,6 +172,9 @@
     kpiRoutersDown: el("kpi-routers-down"),
     kpiRoutersInstances: el("kpi-routers-instances"),
     kpiSubCount: el("kpi-sub-count"),
+    kpiCardTelemetry: el("kpi-card-telemetry"),
+    kpiPathsSub: el("kpi-paths-sub"),
+    kpiBacklog: el("kpi-backlog"),
     kpiCacheCount: el("kpi-cache-count"),
     kpiResyncInt: el("kpi-resync-int"),
   };
@@ -235,6 +245,7 @@
 
   let overviewTimer = null;
   let topologyTimer = null;
+  let activityTimer = null;
   let navSeq = 0;
 
   // The dashboards poll every PANEL_POLL_MS once the server has read the
@@ -298,7 +309,7 @@
     value !== "" && value !== null && value !== undefined && !isNaN(Number(value));
 
   /** Reports the server computes for a panel of their own, not as a table. */
-  const isPanelReport = (name) => name === "overview" || name === "topology";
+  const isPanelReport = (name) => name === "overview" || name === "topology" || name === "activity";
 
   /** The column a comparison puts its verdict in; matches nornir_srl.diff. */
   const DIFF_STATUS = "\u00b1";
@@ -1262,9 +1273,7 @@
         }
       }
 
-      dom.kpiSubCount.textContent = data.telemetry.subscriptions;
-      dom.kpiCacheCount.textContent = `${data.telemetry.cached_tables} cached tables`;
-      dom.kpiResyncInt.textContent = `${data.telemetry.resync_interval}s resync`;
+      renderTelemetryKpi(data.telemetry);
 
       setLive("live", "live");
       dom.rowCount.textContent = "Executive Dashboard";
@@ -1284,6 +1293,524 @@
     const reports = progress.nodes ? progress.total / progress.nodes : 1;
     const nodes = Math.floor(progress.ready / (reports || 1));
     return `${nodes} of ${progress.nodes} node${progress.nodes === 1 ? "" : "s"}`;
+  }
+
+  /**
+   * The Telemetry Engine card: the gNMI paths the reports in use read, how
+   * they are served, and whether every node's stream is being kept up with.
+   */
+  function renderTelemetryKpi(telemetry) {
+    const t = telemetry || {};
+    dom.kpiSubCount.textContent = t.subscriptions ?? 0;
+    if (dom.kpiPathsSub) {
+      const parts = [`gNMI paths on ${t.nodes ?? 0} node${t.nodes === 1 ? "" : "s"}`];
+      if (t.streaming !== undefined) parts.push(`${t.streaming} streaming`);
+      if (t.pending) parts.push(`${t.pending} pending`);
+      if (t.polled) parts.push(`${t.polled} polled`);
+      dom.kpiPathsSub.textContent = parts.join(" · ");
+    }
+    const behind = (t.backlog || 0) > (t.backlog_limit || Infinity);
+    if (dom.kpiBacklog) {
+      const node = t.backlog_node ? ` (${t.backlog_node})` : "";
+      dom.kpiBacklog.textContent = behind ? `${t.backlog} behind${node}` : `backlog ${t.backlog || 0}${node}`;
+      dom.kpiBacklog.classList.toggle("muted", !behind);
+      dom.kpiBacklog.classList.toggle("state-warn", behind);
+    }
+    if (dom.kpiCardTelemetry) {
+      dom.kpiCardTelemetry.classList.remove("kpi-ok", "kpi-warn", "kpi-err");
+      if (behind) dom.kpiCardTelemetry.classList.add("kpi-warn");
+    }
+    dom.kpiCacheCount.textContent = `${t.cached_tables ?? 0} cached tables`;
+    dom.kpiResyncInt.textContent = `${t.resync_interval ?? 0}s resync`;
+  }
+
+  /* -------------------------------------------------------------- checks */
+
+  // What a check came to: its colour, icon and the word for it - never the
+  // colour alone.
+  const CHECK_STATUS = {
+    failed: { tone: "err", icon: "!", label: "check failed" },
+    error: { tone: "err", icon: "✖", label: "errors" },
+    warning: { tone: "warn", icon: "▲", label: "warnings" },
+    skipped: { tone: "muted", icon: "–", label: "skipped" },
+    pass: { tone: "ok", icon: "✔", label: "passed" },
+  };
+  const CHECK_FINDINGS_SHOWN = 40;
+
+  function renderChecksBoard(checks) {
+    const board = dom.checksBoard;
+    board.replaceChildren();
+    if (!checks.length) {
+      const p = document.createElement("p");
+      p.className = "empty";
+      p.textContent = "The checks are reading the fabric…";
+      board.append(p);
+      return;
+    }
+    board.append(checksSummary(checks));
+    const grid = document.createElement("div");
+    grid.className = "checks-grid";
+    for (const check of checks) grid.append(checkCard(check));
+    board.append(grid);
+  }
+
+  /** How many checks came to what, as a bar and as words. */
+  function checksSummary(checks) {
+    const wrap = document.createElement("div");
+    wrap.className = "checks-summary";
+    const counts = ["error", "failed", "warning", "pass", "skipped"].map((status) => [status, checks.filter((c) => c.status === status).length]);
+    const bar = document.createElement("div");
+    bar.className = "checks-bar";
+    bar.setAttribute("role", "img");
+    bar.setAttribute("aria-label", counts.filter(([, n]) => n).map(([s, n]) => `${n} ${CHECK_STATUS[s].label}`).join(", "));
+    const words = document.createElement("div");
+    words.className = "checks-counts";
+    for (const [status, n] of counts) {
+      if (!n) continue;
+      const info = CHECK_STATUS[status];
+      const part = document.createElement("span");
+      part.className = `tone-${info.tone}`;
+      part.style.flexGrow = String(n);
+      part.title = `${n} ${info.label}`;
+      bar.append(part);
+      const word = document.createElement("span");
+      word.className = `check-pill tone-${info.tone}`;
+      word.textContent = `${info.icon} ${n} ${info.label}`;
+      words.append(word);
+    }
+    wrap.append(bar, words);
+    return wrap;
+  }
+
+  function checkCard(check) {
+    const info = CHECK_STATUS[check.status] || CHECK_STATUS.skipped;
+    const card = document.createElement("article");
+    card.className = `check-card is-${info.tone}`;
+
+    const head = document.createElement("div");
+    head.className = "check-head";
+    const pill = document.createElement("span");
+    pill.className = `check-pill tone-${info.tone}`;
+    pill.textContent =
+      check.status === "error" || check.status === "warning"
+        ? `${info.icon} ${[check.errors && `${check.errors} error${check.errors === 1 ? "" : "s"}`, check.warnings && `${check.warnings} warning${check.warnings === 1 ? "" : "s"}`].filter(Boolean).join(" · ")}`
+        : `${info.icon} ${check.status === "skipped" ? "skipped: nothing to read" : info.label}`;
+    const title = document.createElement("h4");
+    title.className = "check-title";
+    title.textContent = check.title;
+    head.append(title, pill);
+    card.append(head);
+
+    if (check.requires && check.requires.length) {
+      const reads = document.createElement("div");
+      reads.className = "muted check-reads";
+      reads.textContent = `reads ${check.requires.join(", ")}`;
+      card.append(reads);
+    }
+
+    // One cell per node read, in the colour of the worst found there.
+    const nodes = Object.entries(check.nodes || {});
+    if (nodes.length) {
+      const strip = document.createElement("div");
+      strip.className = "check-nodes";
+      for (const [node, worst] of nodes) {
+        const cell = document.createElement("span");
+        const tone = worst === "error" ? "err" : worst === "warning" ? "warn" : "ok";
+        cell.className = `check-node tone-${tone}`;
+        cell.title = `${shortNode(node)}: ${worst === "pass" ? "nothing found" : worst}`;
+        strip.append(cell);
+      }
+      const flagged = nodes.filter(([, worst]) => worst !== "pass").length;
+      const caption = document.createElement("span");
+      caption.className = "muted check-nodes-caption";
+      caption.textContent = `${nodes.length} node${nodes.length === 1 ? "" : "s"}${flagged ? ` · ${flagged} with findings` : ""}`;
+      const row = document.createElement("div");
+      row.className = "check-nodes-row";
+      row.append(strip, caption);
+      card.append(row);
+    }
+
+    const findings = check.findings || [];
+    if (findings.length) {
+      const details = document.createElement("details");
+      details.className = "check-findings";
+      details.open = findings.length <= 6;
+      const summary = document.createElement("summary");
+      summary.textContent = `${findings.length} finding${findings.length === 1 ? "" : "s"}`;
+      details.append(summary);
+      const list = document.createElement("ul");
+      for (const row of findings.slice(0, CHECK_FINDINGS_SHOWN)) {
+        const item = document.createElement("li");
+        const sev = document.createElement("span");
+        const tone = row.Severity === "error" ? "err" : "warn";
+        sev.className = `check-sev tone-${tone}`;
+        sev.textContent = row.Severity === "error" ? "✖" : "▲";
+        sev.title = row.Severity;
+        const where = document.createElement("span");
+        where.className = "check-where";
+        where.textContent = [row.Node && row.Node !== "-" ? shortNode(row.Node) : "", row.Subject].filter(Boolean).join(" · ");
+        const what = document.createElement("span");
+        what.className = "muted check-detail";
+        what.textContent = row.Detail || "";
+        item.append(sev, where, what);
+        list.append(item);
+      }
+      details.append(list);
+      if (findings.length > CHECK_FINDINGS_SHOWN) {
+        const more = document.createElement("p");
+        more.className = "muted check-more";
+        more.textContent = `and ${findings.length - CHECK_FINDINGS_SHOWN} more`;
+        details.append(more);
+      }
+      card.append(details);
+      const open = document.createElement("button");
+      open.type = "button";
+      open.className = "btn btn-ghost check-open";
+      open.textContent = "Show in table";
+      open.title = "This check's findings in the Table View, where they can be sorted and filtered";
+      open.addEventListener("click", () => {
+        state.viewMode = "table";
+        dom.viewModeBtn.textContent = viewModeLabel();
+        jumpToFilteredReport("checks", [], [], { Check: `^${escapeRegex(check.name)}$` });
+      });
+      card.append(open);
+    }
+    return card;
+  }
+
+  /* ------------------------------------------------------- server activity */
+
+  // What each node streams to the server, how fast, and whether the server
+  // keeps up - from the counters /api/status carries, sampled every
+  // ACTIVITY_POLL_MS and kept for ACTIVITY_POINTS samples.
+  const ACTIVITY_POLL_MS = 2000;
+  const ACTIVITY_POINTS = 90;
+  const activity = { busy: false, prev: new Map(), history: new Map(), fabric: [] };
+
+  async function loadActivity() {
+    if (activity.busy || !state.report || state.report.name !== "activity" || state.paused) return;
+    activity.busy = true;
+    try {
+      const res = await fetch("/api/status");
+      if (!res.ok) throw new Error(String(res.status));
+      ingestActivity(await res.json(), Date.now());
+      renderActivity();
+      setLive("live", "live");
+      dom.rowCount.textContent = "Server Activity";
+      dom.streamInfo.textContent = `sampled every ${ACTIVITY_POLL_MS / 1000}s`;
+      dom.updated.textContent = "updated " + new Date().toLocaleTimeString();
+    } catch (_err) {
+      setLive("error", "error");
+    } finally {
+      activity.busy = false;
+    }
+  }
+
+  /** Rates per node since the previous sample, appended to each one's history. */
+  function ingestActivity(status, now) {
+    activity.status = status;
+    let total = 0;
+    let complete = true;
+    for (const node of status.nodes || []) {
+      const prev = activity.prev.get(node.node);
+      const rate = (key) => {
+        if (!prev) return null;
+        const dt = (now - prev.t) / 1000;
+        const delta = (node[key] || 0) - (prev[key] || 0);
+        // A reconnect starts the counters over: no rate rather than a negative one.
+        return dt > 0 && delta >= 0 ? delta / dt : null;
+      };
+      // Gets come in bursts - start-up, a resync, a pending path now and then
+      // - so they are counted per sample rather than read as a rate.
+      const gets = prev && (node.gets || 0) >= (prev.gets || 0) ? (node.gets || 0) - (prev.gets || 0) : null;
+      const sample = { t: now, leaves: rate("leaves"), notifications: rate("notifications"), gets };
+      activity.prev.set(node.node, { t: now, leaves: node.leaves, notifications: node.notifications, gets: node.gets });
+      if (sample.leaves === null) complete = false;
+      else total += sample.leaves;
+      const history = activity.history.get(node.node) || [];
+      history.push(sample);
+      if (history.length > ACTIVITY_POINTS) history.shift();
+      activity.history.set(node.node, history);
+    }
+    if (complete && (status.nodes || []).length) {
+      activity.fabric.push({ t: now, value: total });
+      if (activity.fabric.length > ACTIVITY_POINTS) activity.fabric.shift();
+    }
+  }
+
+  /**
+   * Gets per minute, over the last minute of samples of *history* - or what
+   * there is of one, scaled up to a minute. ``null`` before two samples.
+   */
+  function getsPerMinute(history) {
+    const recent = history.filter((p) => p.gets !== null && p.gets !== undefined).slice(-Math.round(60000 / ACTIVITY_POLL_MS));
+    if (!recent.length) return null;
+    const total = recent.reduce((acc, p) => acc + p.gets, 0);
+    return (total * 60000) / (recent.length * ACTIVITY_POLL_MS);
+  }
+
+  const formatRate = (value) =>
+    value === null || value === undefined
+      ? "—"
+      : value >= 1000
+        ? `${(value / 1000).toFixed(value >= 10000 ? 0 : 1)}k`
+        : value >= 10
+          ? Math.round(value).toLocaleString()
+          : value.toFixed(1);
+
+  function renderActivity() {
+    const status = activity.status || { nodes: [] };
+    const nodes = status.nodes || [];
+    const latest = (name) => (activity.history.get(name) || []).slice(-1)[0] || {};
+    const sum = (key) => nodes.reduce((acc, n) => acc + (latest(n.node)[key] || 0), 0);
+    const limit = (activity.status && activity.status.backlog_limit) || 500;
+    const worst = nodes.reduce((a, n) => ((n.backlog || 0) > ((a && a.backlog) || 0) ? n : a), null);
+    const paths = nodes.flatMap((n) => n.paths || []);
+    const peak = activity.fabric.reduce((m, p) => Math.max(m, p.value), 0);
+
+    dom.activitySummary.replaceChildren(
+      activityTile("Nodes", `${nodes.filter((n) => n.connected).length}/${nodes.length}`, "connected", nodes.some((n) => !n.connected) ? "kpi-warn" : "kpi-ok"),
+      activityTile("Leaves/s", formatRate(activity.fabric.length ? activity.fabric.slice(-1)[0].value : null), `peak ${formatRate(peak)} in the window`),
+      activityTile("Notifications/s", formatRate(sum("notifications")), "applied, all nodes"),
+      activityTile(
+        "Gets/min",
+        formatRate(
+          nodes.some((n) => getsPerMinute(activity.history.get(n.node) || []) !== null)
+            ? nodes.reduce((acc, n) => acc + (getsPerMinute(activity.history.get(n.node) || []) || 0), 0)
+            : null
+        ),
+        `${nodes.filter((n) => n.getting).length} in flight · ${nodes.reduce((acc, n) => acc + (n.gets || 0), 0).toLocaleString()} since start`
+      ),
+      activityTile(
+        "Worst backlog",
+        String((worst && worst.backlog) || 0),
+        worst && worst.backlog ? shortNode(worst.node) : `of ${limit} before falling behind`,
+        worst && worst.backlog > limit ? "kpi-warn" : "kpi-ok"
+      ),
+      activityTile("gNMI paths", String(paths.length), `${paths.filter((p) => p.streaming).length} streaming`)
+    );
+
+    const span = activity.fabric.length > 1 ? (activity.fabric.slice(-1)[0].t - activity.fabric[0].t) / 1000 : 0;
+    dom.activityWindow.textContent = span ? `last ${Math.round(span)}s` : "collecting…";
+    dom.activityChart.replaceChildren(
+      seriesChart(activity.fabric, {
+        width: Math.max(dom.activityChart.clientWidth || 600, 280),
+        height: 180,
+        axes: true,
+        unit: "leaves/s",
+      })
+    );
+
+    const body = dom.activityTable.tBodies[0];
+    body.replaceChildren(...nodes.slice().sort((a, b) => a.node.localeCompare(b.node, undefined, { numeric: true })).map((node) => activityRow(node, limit)));
+  }
+
+  /** "clab-tunnelscale-leaf1" as "leaf1": the lab prefix every node shares says nothing. */
+  function shortNode(name) {
+    return String(name).replace(/^clab-[^-]+-/, "");
+  }
+
+  function activityTile(title, value, sub, tone) {
+    const card = document.createElement("div");
+    card.className = `kpi-card activity-tile ${tone || ""}`;
+    const head = document.createElement("div");
+    head.className = "kpi-header";
+    const name = document.createElement("span");
+    name.className = "kpi-title";
+    name.textContent = title;
+    head.append(name);
+    const big = document.createElement("div");
+    big.className = "kpi-value";
+    big.textContent = value;
+    const small = document.createElement("div");
+    small.className = "kpi-sub muted";
+    small.textContent = sub;
+    card.append(head, big, small);
+    return card;
+  }
+
+  function activityRow(node, limit) {
+    const history = activity.history.get(node.node) || [];
+    const now = history.slice(-1)[0] || {};
+    const row = document.createElement("tr");
+
+    const health = !node.connected ? ["err", "not connected"] : node.resyncing ? ["warn", "resyncing"] : node.failing_since ? ["warn", "failing"] : ["ok", "streaming"];
+    const name = document.createElement("td");
+    name.className = "activity-node";
+    const dot = document.createElement("span");
+    dot.className = `status-dot is-${health[0]}`;
+    dot.setAttribute("aria-hidden", "true");
+    const label = document.createElement("span");
+    label.textContent = shortNode(node.node);
+    const sub = document.createElement("span");
+    sub.className = "muted activity-state";
+    sub.textContent = health[1];
+    name.title = node.error ? `${node.node}: ${node.error}` : node.node;
+    name.append(dot, label, sub);
+
+    const leaves = document.createElement("td");
+    leaves.className = "activity-spark";
+    leaves.append(
+      seriesChart(history.map((p) => ({ t: p.t, value: p.leaves })), { width: 140, height: 28, unit: "leaves/s" })
+    );
+    const value = document.createElement("span");
+    value.className = "activity-value";
+    value.textContent = formatRate(now.leaves);
+    leaves.append(value);
+
+    const cell = (text, title) => {
+      const td = document.createElement("td");
+      td.className = "num";
+      td.textContent = text;
+      if (title) td.title = title;
+      return td;
+    };
+
+    const backlog = document.createElement("td");
+    const behind = (node.backlog || 0) > limit;
+    const meter = document.createElement("span");
+    meter.className = `activity-meter${behind ? " is-behind" : ""}`;
+    const fill = document.createElement("span");
+    fill.style.width = `${Math.min(100, ((node.backlog || 0) / limit) * 100)}%`;
+    meter.append(fill);
+    const count = document.createElement("span");
+    count.className = behind ? "state-warn" : "muted";
+    count.textContent = behind ? `${node.backlog} behind` : String(node.backlog || 0);
+    backlog.title = `${node.backlog || 0} notifications waiting; past ${limit} the server is not keeping up`;
+    backlog.append(meter, count);
+
+    const paths = document.createElement("td");
+    const list = node.paths || [];
+    const counts = [
+      ["streaming", list.filter((p) => p.streaming).length, "viz-1"],
+      ["pending", list.filter((p) => p.pending).length, "viz-2"],
+      ["polled", list.filter((p) => p.polled).length, "viz-3"],
+    ];
+    const bar = document.createElement("span");
+    bar.className = "activity-stack";
+    for (const [kind, n, color] of counts) {
+      if (!n) continue;
+      const part = document.createElement("span");
+      part.className = color;
+      part.style.flexGrow = String(n);
+      part.title = `${n} ${kind}`;
+      bar.append(part);
+    }
+    const legend = document.createElement("span");
+    legend.className = "muted activity-counts";
+    legend.textContent = counts.map(([, n]) => n).join(" · ");
+    paths.title = counts.map(([kind, n]) => `${n} ${kind}`).join(", ") + ` of ${list.length} paths`;
+    paths.append(bar, legend);
+
+    const age = node.last_update ? Math.max(0, Date.now() / 1000 - node.last_update) : null;
+    row.append(
+      name,
+      leaves,
+      cell(formatRate(now.notifications)),
+      cell(
+        `${formatRate(getsPerMinute(history))}${node.getting ? " ●" : ""}`,
+        `${(node.gets || 0).toLocaleString()} Gets since the node connected${node.getting ? "; one in flight now" : ""}`
+      ),
+      backlog,
+      paths,
+      cell(age === null ? "—" : age < 60 ? `${Math.round(age)}s ago` : `${Math.round(age / 60)}m ago`)
+    );
+    return row;
+  }
+
+  /** The smallest round number at least *value*, for the top of an axis. */
+  function niceCeiling(value) {
+    if (value <= 0) return 1;
+    const step = 10 ** Math.floor(Math.log10(value));
+    return [1, 2, 2.5, 5, 10].map((m) => m * step).find((m) => m >= value);
+  }
+
+  /**
+   * One series over time as an SVG line on a light area, with a crosshair and
+   * a tooltip under the pointer. *axes* draws a recessive grid with values and
+   * the time span; without it, a sparkline.
+   */
+  function seriesChart(points, { width, height, axes, unit }) {
+    const svg = svgEl("svg", { class: axes ? "series-chart" : "sparkline", width, height, viewBox: `0 0 ${width} ${height}`, role: "img" });
+    const pad = axes ? { l: 44, r: 10, t: 8, b: 20 } : { l: 1, r: 1, t: 3, b: 3 };
+    const known = points.filter((p) => p.value !== null && p.value !== undefined);
+    svg.setAttribute("aria-label", known.length ? `${unit}: now ${formatRate(known.slice(-1)[0].value)}` : `${unit}: collecting`);
+    const max = niceCeiling(Math.max(1, ...known.map((p) => p.value)));
+    const w = width - pad.l - pad.r;
+    const h = height - pad.t - pad.b;
+    const x = (i) => pad.l + (points.length > 1 ? (i / (ACTIVITY_POINTS - 1)) * w + (w * (ACTIVITY_POINTS - points.length)) / (ACTIVITY_POINTS - 1) : w);
+    const y = (v) => pad.t + h - (v / max) * h;
+
+    if (axes) {
+      for (const frac of [0, 0.5, 1]) {
+        const gy = pad.t + h - frac * h;
+        svg.append(svgEl("line", { x1: pad.l, x2: width - pad.r, y1: gy, y2: gy, class: "chart-grid" }));
+        const tick = svgEl("text", { x: pad.l - 6, y: gy + 4, class: "chart-tick", "text-anchor": "end" });
+        tick.textContent = formatRate(max * frac);
+        svg.append(tick);
+      }
+      const left = svgEl("text", { x: pad.l, y: height - 4, class: "chart-tick" });
+      left.textContent = `-${Math.round((ACTIVITY_POINTS * ACTIVITY_POLL_MS) / 60000)}m`;
+      const right = svgEl("text", { x: width - pad.r, y: height - 4, class: "chart-tick", "text-anchor": "end" });
+      right.textContent = "now";
+      svg.append(left, right);
+    }
+
+    const coords = points.map((p, i) => (p.value === null || p.value === undefined ? null : [x(i), y(p.value)]));
+    const runs = [];
+    let run = [];
+    for (const c of coords) {
+      if (c) run.push(c);
+      else if (run.length) {
+        runs.push(run);
+        run = [];
+      }
+    }
+    if (run.length) runs.push(run);
+    for (const r of runs) {
+      if (r.length < 2) continue;
+      const line = r.map(([px, py], i) => `${i ? "L" : "M"}${px.toFixed(1)},${py.toFixed(1)}`).join("");
+      svg.append(svgEl("path", { d: `${line}L${r[r.length - 1][0].toFixed(1)},${pad.t + h}L${r[0][0].toFixed(1)},${pad.t + h}Z`, class: "chart-area" }));
+      svg.append(svgEl("path", { d: line, class: "chart-line" }));
+    }
+
+    // Crosshair and tooltip: the sample nearest the pointer.
+    const cross = svgEl("line", { y1: pad.t, y2: pad.t + h, class: "chart-cross", visibility: "hidden" });
+    const marker = svgEl("circle", { r: axes ? 4 : 3, class: "chart-marker", visibility: "hidden" });
+    const hit = svgEl("rect", { x: 0, y: 0, width, height, fill: "transparent" });
+    svg.append(cross, marker, hit);
+    const hide = () => {
+      cross.setAttribute("visibility", "hidden");
+      marker.setAttribute("visibility", "hidden");
+      dom.activityTooltip.hidden = true;
+    };
+    hit.addEventListener("mousemove", (event) => {
+      const box = svg.getBoundingClientRect();
+      const px = ((event.clientX - box.left) / box.width) * width;
+      let best = -1;
+      let bestDist = Infinity;
+      coords.forEach((c, i) => {
+        if (c && Math.abs(c[0] - px) < bestDist) {
+          best = i;
+          bestDist = Math.abs(c[0] - px);
+        }
+      });
+      if (best < 0) return hide();
+      const [cx, cy] = coords[best];
+      cross.setAttribute("x1", cx);
+      cross.setAttribute("x2", cx);
+      cross.setAttribute("visibility", "visible");
+      marker.setAttribute("cx", cx);
+      marker.setAttribute("cy", cy);
+      marker.setAttribute("visibility", "visible");
+      const tip = dom.activityTooltip;
+      tip.textContent = `${new Date(points[best].t).toLocaleTimeString()} · ${formatRate(points[best].value)} ${unit}`;
+      tip.hidden = false;
+      tip.style.left = `${event.clientX + 12}px`;
+      tip.style.top = `${event.clientY + 12}px`;
+    });
+    hit.addEventListener("mouseleave", hide);
+    return svg;
   }
 
   /** The Fabric Health card: incidents by severity, the worst, and what changed. */
@@ -3080,6 +3607,10 @@
       clearInterval(topologyTimer);
       topologyTimer = null;
     }
+    if (activityTimer) {
+      clearInterval(activityTimer);
+      activityTimer = null;
+    }
 
     loadReportPreferences();
     // Opened from the list, a report is about the whole inventory again.
@@ -3099,12 +3630,14 @@
       dom.tableWrap.hidden = true;
       dom.servicesTreeView.hidden = true;
       dom.pathGraphView.hidden = true;
+      dom.checksBoard.hidden = true;
       dom.viewModeBtn.hidden = true;
       dom.columnsBtn.hidden = true;
       dom.exportBtn.hidden = true;
       dom.compareBtn.hidden = true;
       dom.overviewDashboard.hidden = report.name !== "overview";
       dom.topologyView.hidden = report.name !== "topology";
+      dom.activityView.hidden = report.name !== "activity";
       if (state.source) {
         state.source.close();
         state.source = null;
@@ -3112,6 +3645,9 @@
       if (report.name === "overview") {
         loadOverview();
         overviewTimer = setInterval(loadOverview.tick, PANEL_LOADING_POLL_MS);
+      } else if (report.name === "activity") {
+        loadActivity();
+        activityTimer = setInterval(loadActivity, ACTIVITY_POLL_MS);
       } else {
         state.topoKey = "";
         state.topoSelection = null;
@@ -3121,6 +3657,7 @@
     } else {
       dom.overviewDashboard.hidden = true;
       dom.topologyView.hidden = true;
+      dom.activityView.hidden = true;
       dom.columnsBtn.hidden = false;
       dom.exportBtn.hidden = false;
       // A lens answers a question asked now; there is nothing to keep and
@@ -3153,7 +3690,7 @@
 
   function hasTreeView(report) {
     return Boolean(
-      report && (isLens(report) || ["bridge_domains", "services", "routers"].includes(report.name))
+      report && (isLens(report) || ["bridge_domains", "services", "routers", "checks"].includes(report.name))
     );
   }
 
@@ -3169,6 +3706,7 @@
   }
 
   function viewModes(report) {
+    if (report && report.name === "checks") return ["board", "table"];
     if (hasGraphView(report)) return ["graph", "tree", "table"];
     if (hasDiffView(report)) return ["diff", "tree", "table"];
     return ["tree", "table"];
@@ -3184,6 +3722,7 @@
     if (next === "table") return "📊 Table View";
     if (next === "graph") return "🗺 Path View";
     if (next === "diff") return "🔀 Diff View";
+    if (next === "board") return "▦ Board View";
     return isLens(state.report) ? "🌲 Tree View" : "🌲 Services View";
   }
 
@@ -3438,6 +3977,7 @@
     state.columns = table.columns;
     state.rows = table.rows;
     state.tree = table.tree || null;
+    state.checks = table.checks || null;
     state.records = table.records || null;
     if (state.report && state.report.name === "incidents") renderAckAll();
     state.graph = table.graph || null;
@@ -6443,6 +6983,17 @@
     }
     dom.pathGraphView.hidden = true;
 
+    if (!state.diff && state.report && state.report.name === "checks" && state.viewMode === "board") {
+      dom.tableWrap.hidden = true;
+      dom.servicesTreeView.hidden = true;
+      dom.checksBoard.hidden = false;
+      renderChecksBoard(state.checks || []);
+      const failing = (state.checks || []).filter((c) => c.status === "error" || c.status === "warning" || c.status === "failed").length;
+      dom.rowCount.textContent = `${(state.checks || []).length} checks, ${failing} with findings, ${state.rows.length} finding(s)`;
+      return;
+    }
+    dom.checksBoard.hidden = true;
+
     if (!state.diff && isLens(state.report) && state.viewMode === "tree") {
       dom.tableWrap.hidden = true;
       dom.servicesTreeView.hidden = false;
@@ -6837,6 +7388,7 @@
   };
 
   if (dom.kpiCardHealth) dom.kpiCardHealth.addEventListener("click", () => openReport("incidents"));
+  if (dom.kpiCardTelemetry) dom.kpiCardTelemetry.addEventListener("click", () => openReport("activity"));
 
   if (dom.baselineBtn) {
     dom.baselineBtn.addEventListener("click", () => {

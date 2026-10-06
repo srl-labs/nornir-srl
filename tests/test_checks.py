@@ -952,3 +952,33 @@ def test_bgp_peer_mismatch_compares_no_as_a_dynamic_neighbour_only_learned():
         _session("10.0.0.1", 65100, 65001, state="active"),
     )
     assert run("bgp_peer_mismatch", state) == []
+
+
+def test_check_results_list_every_check_passing_failing_or_skipped():
+    from nornir_srl.checks import CHECKS, Finding, check_results
+    from nornir_srl.fabric import FabricState
+
+    state = FabricState()
+    first, second = CHECKS[0], CHECKS[1]
+    for report in first.requires:
+        state.reports[report] = {"leaf1": [], "leaf2": []}
+    for report in second.requires:
+        state.reports[report] = {"leaf1": [], "leaf2": []}
+    state.errors[("lldp", "spine1")] = "unreachable"
+    findings = [
+        Finding(first.name, "error", "leaf1", "peer 10.0.0.1", "down"),
+        Finding(first.name, "warning", "leaf2", "peer 10.0.0.2", "flapping"),
+        Finding("collection", "warning", "spine1", "lldp", "not checked: unreachable"),
+    ]
+    results = {r["name"]: r for r in check_results(state, findings)}
+    assert set(results) == {c.name for c in CHECKS} | {"collection"}
+    one = results[first.name]
+    assert (one["status"], one["errors"], one["warnings"]) == ("error", 1, 1)
+    assert one["nodes"] == {"leaf1": "error", "leaf2": "warning"}
+    assert results[second.name]["status"] == "pass"
+    assert results[second.name]["nodes"] == {"leaf1": "pass", "leaf2": "pass"}
+    unread = [c for c in CHECKS if c.requires and not set(c.requires) & set(state.reports)]
+    assert unread and all(results[c.name]["status"] == "skipped" for c in unread)
+    assert results["collection"]["status"] == "warning"
+    ordered = check_results(state, findings)
+    assert ordered[0]["status"] == "error", "worst first"

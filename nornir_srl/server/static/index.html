@@ -323,18 +323,67 @@
                 <span class="muted" id="kpi-routers-instances"></span>
               </div>
             </div>
-            <div class="kpi-card">
+            <div
+              class="kpi-card"
+              id="kpi-card-telemetry"
+              style="cursor: pointer;"
+              title="Click for each node's activity. gNMI paths: what the reports in use read, on every node - each node has one Subscribe RPC carrying its paths. Streaming: delivered by the subscription. Pending: empty when first read, served by short-lived Gets until they fill. Polled: left out of a subscription for room. Backlog: the most notifications one node has waiting to be applied - past the limit the server is not keeping up, and stops ageing entries out."
+            >
               <div class="kpi-header">
                 <span class="kpi-title">Telemetry Engine</span>
                 <span class="kpi-icon">⚡</span>
               </div>
               <div class="kpi-value" id="kpi-sub-count">0</div>
               <div class="kpi-sub">
+                <span id="kpi-paths-sub" class="muted">gNMI paths</span>
+              </div>
+              <div class="kpi-sub">
+                <span id="kpi-backlog" class="muted">backlog 0</span> ·
                 <span id="kpi-cache-count" class="muted">0 cached tables</span> ·
                 <span id="kpi-resync-int" class="muted">300s resync</span>
               </div>
             </div>
           </div>
+        </div>
+
+        <!-- Server Activity: what each node streams to the server, how fast,
+             and whether the server keeps up. Drawn from /api/status. -->
+        <div id="activity-view" class="dashboard-wrap activity-wrap" hidden>
+          <div id="activity-summary" class="kpi-grid activity-summary"></div>
+          <section class="activity-panel">
+            <div class="activity-panel-head">
+              <h3 class="activity-title">Leaves applied per second, all nodes</h3>
+              <span id="activity-window" class="muted"></span>
+            </div>
+            <div id="activity-chart" class="activity-chart"></div>
+          </section>
+          <section class="activity-panel">
+            <div class="activity-panel-head">
+              <h3 class="activity-title">Per node</h3>
+              <div class="activity-legend" aria-label="How each node's gNMI paths are served">
+                <span><i class="swatch viz-1"></i>streaming</span>
+                <span><i class="swatch viz-2"></i>pending</span>
+                <span><i class="swatch viz-3"></i>polled</span>
+              </div>
+            </div>
+            <div class="activity-table-wrap">
+              <table id="activity-table" class="activity-table">
+                <thead>
+                  <tr>
+                    <th>Node</th>
+                    <th title="Leaves the node's notifications updated or deleted, per second">Leaves/s</th>
+                    <th class="num" title="Notifications applied per second">Notif/s</th>
+                    <th class="num" title="gNMI Gets issued in the last minute; ● while one is in flight">Gets/min</th>
+                    <th title="Notifications waiting to be applied; past the limit the server is not keeping up">Backlog</th>
+                    <th title="The gNMI paths the reports in use read on this node, by how they are served">Paths</th>
+                    <th class="num" title="Since the node last sent anything">Last update</th>
+                  </tr>
+                </thead>
+                <tbody></tbody>
+              </table>
+            </div>
+          </section>
+          <div id="activity-tooltip" class="activity-tooltip" role="tooltip" hidden></div>
         </div>
 
         <div id="topology-view" class="topo-wrap" hidden>
@@ -428,6 +477,8 @@
         </div>
 
         <div id="services-tree-view" class="services-tree-wrap" hidden></div>
+        <!-- Checks: one card per check, passing ones too, with where it found what. -->
+        <div id="checks-board" class="checks-board" hidden></div>
 
         <div id="path-graph-view" class="path-graph-wrap" hidden></div>
 
