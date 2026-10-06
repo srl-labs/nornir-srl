@@ -17,8 +17,9 @@ import logging
 import re
 import threading
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Optional, Sequence, Set, Tuple
+from typing import Any, Callable, Dict, Iterator, List, Optional, Sequence, Set, Tuple
 
 from ..connections.helpers import strip_modules
 # One suppressor for the whole process: it swaps pygnmi's handlers out and back
@@ -44,6 +45,7 @@ from .tree import (
     select_materialized,
     sweep,
 )
+from .versions import PathVersions, ReadDependencies, shape
 
 logger = logging.getLogger(__name__)
 
@@ -349,6 +351,9 @@ class HostStream:
         self._lock = threading.RLock()
         self._get_lock = threading.Lock()
         self._tree: Dict[str, Any] = {}
+        self._versions = PathVersions()
+        self._reading = threading.local()
+        self._direct_versions: Dict[Tuple[str, str], int] = {}
         self._paths: Dict[str, PathState] = {}
         self._direct_cache: Dict[
             Tuple[str, str], Tuple[float, List[Dict[str, Any]]]
@@ -359,6 +364,7 @@ class HostStream:
         self._lookup_cache: Dict[Tuple[str, str], Tuple[float, Dict[str, Any]]] = {}
         #: Failed Gets, kept for the same TTL as successful ones.
         self._failed_gets: Dict[Tuple[str, str], Tuple[float, Exception]] = {}
+        self._failed_versions: Dict[Tuple[str, str], int] = {}
         #: Paths this node rejected as not in its schema - the fabric modules
         #: of a fixed-form chassis. Unlike a failure, that does not change
         #: while the connection lasts, so they are not asked for again; a
@@ -514,8 +520,9 @@ class HostStream:
         # Serve the first render from this response instead of repeating the Get
         # while the path is still pending.
         with self._lock:
+            self._absorb(spec, resp, tree)
             self._direct_cache[(spec.path, spec.datatype)] = (time.time(), resp)
-        self._absorb(spec, resp, tree)
+            self._direct_versions[(spec.path, spec.datatype)] = self._versions.version(shape(spec.path))
         return True
 
     def _absorb(
@@ -555,6 +562,8 @@ class HostStream:
                 env_key = next(iter(item))
                 env_path = "" if env_key in ("/", "") else env_key
                 insert(tree, env_path, item[env_key], key_hints=hints, pin=spec.mode == "on_change")
+                if tree is self._tree:
+                    self._versions.touch(spec.path)
                 if env_path not in envelopes:
                     envelopes.append(env_path)
             state.streamable = streamable
@@ -616,6 +625,7 @@ class HostStream:
                     return
             with self._lock:
                 self._tree = fresh
+                self._versions.touch("")
                 arrived, self._replay = self._replay or [], None
                 # In order and under the lock, so nothing newer slips in between:
                 # replaying from before the first Get converges on the latest state.
@@ -642,6 +652,8 @@ class HostStream:
         ``Subscribe`` RPC, instead of one per report.
         """
         while not self._closed.is_set():
+            with self._lock:
+                self._expire_gets()
             if not self._dirty.wait(timeout=1.0):
                 if self._retire_idle_paths():
                     self._restart()
@@ -668,6 +680,7 @@ class HostStream:
             ]
             for path in idle:
                 del self._paths[path]
+                self._versions.touch(path)
         if idle:
             logger.info("%s: retired %d idle path(s)", self.name, len(idle))
             logger.debug("%s: retired %s", self.name, ", ".join(idle))
@@ -688,6 +701,8 @@ class HostStream:
             if heartbeat and specs:
                 specs.append(HEARTBEAT)
             self._heartbeat = heartbeat and bool(specs)
+            for path in self._polled.symmetric_difference(polled):
+                self._versions.touch(path)
             self._polled = set(polled)
             self._on_change = [(s.path, parse_path(s.path)) for s in specs if s.mode == "on_change"]
         if polled:
@@ -846,8 +861,6 @@ class HostStream:
             len(update.get("delete") or []),
         )
         with self._lock:
-            self._direct_cache.clear()
-            self._failed_gets.clear()
             envelopes = self._envelopes()
             arrived = time.monotonic()
             for item in update.get("update", []) or []:
@@ -856,6 +869,7 @@ class HostStream:
                 val = item.get("val") if isinstance(item, dict) else None
                 bare = _bare(path)
                 insert(self._tree, path, val, pin=self._pinned(bare))
+                self._versions.touch(path)
                 for env in envelopes:
                     if _under(bare, env):
                         self._envelope_seen[env] = arrived
@@ -866,6 +880,7 @@ class HostStream:
                 item_path = _extract_item_path(item)
                 path = join_path(prefix, item_path)
                 delete(self._tree, path, [p for p, _elems in self._on_change], pin=self._pinned(_bare(path)))
+                self._versions.touch(path)
                 gone = _deleted_interface(path)
                 if gone:
                     self.rates.forget(gone)
@@ -911,7 +926,12 @@ class HostStream:
         sent to nobody, and an ON_CHANGE path has no later tick to notice by.
         """
         with self._lock:
-            dropped = sum(sweep(self._tree, path, self._subscribed_from) for path, _elems in self._on_change)
+            dropped = 0
+            for path, _elems in self._on_change:
+                count = sweep(self._tree, path, self._subscribed_from)
+                if count:
+                    self._versions.touch(path)
+                dropped += count
             self.synced = True
         if dropped:
             logger.debug("%s: dropped %d entr%s the initial sync did not re-send", self.name, dropped, "y" if dropped == 1 else "ies")
@@ -1004,6 +1024,7 @@ class HostStream:
             stale = _stale_lists(node, cutoff) if logger.isEnabledFor(logging.DEBUG) else {}
             dropped = prune(node, cutoff)
             if dropped:
+                self._versions.touch(env)
                 logger.debug(
                     "%s: dropped %d stale entr%s under %s (unrefreshed for %.0fs): %s",
                     self.name,
@@ -1021,9 +1042,37 @@ class HostStream:
     # reads
     # ------------------------------------------------------------------ #
 
+    @contextmanager
+    def track_reads(self) -> Iterator[ReadDependencies]:
+        """Collect this worker's reads without blocking telemetry or other renders."""
+        previous = getattr(self._reading, "current", None)
+        reads = ReadDependencies()
+        self._reading.current = reads
+        try:
+            yield reads
+        finally:
+            self._reading.current = previous
+
+    def _read(self, path: str, expires: float = float("inf")) -> None:
+        """Record a dependency while holding the tree lock, before reading it."""
+        reads = getattr(self._reading, "current", None)
+        if reads is not None:
+            parts = shape(path)
+            # Keep the earliest version if a getter reads the same branch twice:
+            # an update in the middle of a render must invalidate that render.
+            reads.versions.setdefault(parts, self._versions.version(parts))
+            reads.expires = min(reads.expires, expires)
+
+    def reads_current(self, reads: ReadDependencies) -> bool:
+        with self._lock:
+            return time.time() < reads.expires and all(
+                self._versions.version(parts) == version for parts, version in reads.versions.items()
+            )
+
     def snapshot(self, path: str) -> Optional[List[Dict[str, Any]]]:
         """Return the streamed state for *path* shaped like a gNMI Get response."""
         with self._lock:
+            self._read(path)
             state = self._paths.get(path)
             if path in self._polled:
                 # Not in the subscription, so the tree is not kept current for
@@ -1080,6 +1129,8 @@ class HostStream:
         are left out.
         """
         with self._lock:
+            for root in roots:
+                self._read(root)
             # Materializing walks the live tree, so it cannot be moved out of
             # the lock - the subscription thread would be mutating it midway.
             return {
@@ -1096,6 +1147,8 @@ class HostStream:
         out, which is most of what a large fabric streams.
         """
         with self._lock:
+            for path in paths:
+                self._read(path)
             # Rendered under the lock, like snapshot_roots: the subscription
             # thread would otherwise be changing the tree midway.
             return select_many(self._tree, paths)
@@ -1103,6 +1156,7 @@ class HostStream:
     def interfaces(self) -> List[str]:
         """Names of the interfaces currently present in the streamed state."""
         with self._lock:
+            self._read("/interface")
             node = get_node(self._tree, "interface")
             # The names alone, not every interface rendered with all its
             # subinterfaces just to read them off.
@@ -1120,6 +1174,7 @@ class HostStream:
         every port on every rates refresh is what this is called for least.
         """
         with self._lock:
+            self._read(f"/interface[name={name}]")
             node = get_node(self._tree, f"interface[name={name}]")
             if not isinstance(node, dict):
                 return {}
@@ -1136,12 +1191,15 @@ class HostStream:
         cache_key = (path, datatype)
         now = time.time()
         with self._lock:
+            self._read(path)
+            version = self._versions.version(shape(path))
             state = self._paths.get(path)
             # A path polled in place of streaming is as fresh as its sample
             # interval asks for, not as the Get cache would otherwise keep it.
             ttl = state.spec.sample_interval if path in self._polled and state else self.get_ttl
             cached = self._direct_cache.get(cache_key)
-            if cached and now - cached[0] < ttl:
+            if cached and now - cached[0] < ttl and self._direct_versions.get(cache_key) == version:
+                self._read(path, cached[0] + ttl)
                 logger.debug(
                     "%s: serving %s from the %.0fs Get cache (%.1fs old)",
                     self.name,
@@ -1154,7 +1212,7 @@ class HostStream:
             if rejected is not None:
                 raise rejected
             failed = self._failed_gets.get(cache_key)
-            if failed and now - failed[0] < self.get_ttl:
+            if failed and now - failed[0] < self.get_ttl and self._failed_versions.get(cache_key) == version:
                 logger.debug(
                     "%s: %s failed %.1fs ago, not asking again yet",
                     self.name,
@@ -1170,12 +1228,35 @@ class HostStream:
                     self._rejected[cache_key] = exc
                 else:
                     self._failed_gets[cache_key] = (now, exc)
+                    self._failed_versions[cache_key] = version
             raise
         with self._lock:
             self._failed_gets.pop(cache_key, None)
+            self._failed_versions.pop(cache_key, None)
             self._direct_cache[cache_key] = (now, resp)
+            self._direct_versions[cache_key] = version
+            self._read(path, now + ttl)
         self._promote(path, datatype, resp)
         return resp
+
+    def _expire_gets(self) -> None:
+        """Release unused fallback responses; telemetry no longer clears them.
+
+        Called by the reconciler under the tree lock, not for each streamed
+        leaf or Get. Polled paths keep their own sampling interval.
+        """
+        now = time.time()
+        for key, (at, _response) in list(self._direct_cache.items()):
+            path, _datatype = key
+            state = self._paths.get(path)
+            ttl = state.spec.sample_interval if path in self._polled and state else self.get_ttl
+            if now - at >= ttl:
+                del self._direct_cache[key]
+                self._direct_versions.pop(key, None)
+        for key, (at, _error) in list(self._failed_gets.items()):
+            if now - at >= self.get_ttl:
+                del self._failed_gets[key]
+                self._failed_versions.pop(key, None)
 
     def lookup(self, paths: Sequence[str], datatype: str, table: Optional[str] = None) -> List[Dict[str, Any]]:
         """Entries asked for by key, one payload per path, shaped like a Get's.
@@ -1185,12 +1266,13 @@ class HostStream:
         table. An entry is read off the tree where a streamed path delivers its
         list, out of a cache kept for :attr:`get_ttl`, or else with one Get for
         all the paths still missing - of their *table* whole, when they are
-        too many to name. Unlike :meth:`direct_get`'s, the cache is not dropped
-        on every notification - on a busy node that is all the time, and it
-        would never be hit.
+        too many to name. Entries fetched with a Get are kept for their TTL;
+        streamed entries are always read straight from the tree.
         """
         now = time.time()
         with self._lock:
+            for path in ([table] if table is not None else paths):
+                self._read(path)
             answers = self._streamed_entries(paths, datatype)
             for key in [k for k, (at, _) in self._lookup_cache.items() if now - at >= self.get_ttl]:
                 del self._lookup_cache[key]
@@ -1200,8 +1282,10 @@ class HostStream:
                     continue
                 cached = self._lookup_cache.get((path, datatype))
                 if cached is not None:
+                    self._read(table or path, cached[0] + self.get_ttl)
                     answers[path] = cached[1]
                 else:
+                    self._read(table or path, now + self.get_ttl)
                     missing.append(path)
         if missing:
             if table is not None and len(missing) > LOOKUP_BY_KEY_LIMIT:
@@ -1234,8 +1318,12 @@ class HostStream:
         now = time.time()
         for path in paths:
             with self._lock:
+                self._read(path)
                 served = self._covered_snapshot(path, datatype)
                 cached = self._query_cache.get((path, datatype))
+                if served is None:
+                    at = cached[0] if cached is not None and now - cached[0] < self.get_ttl else now
+                    self._read(path, at + self.get_ttl)
             if served is not None:
                 result.extend(served)
                 continue

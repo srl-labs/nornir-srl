@@ -32,8 +32,18 @@ from .stream import MAX_EVICTION_BACKLOG, HostStream
 from .timeline import Reading, Timeline, Watcher
 from .topology import annotate_aliasing, annotate_health, build_topology, node_facts
 from .tree import key_matches
+from .table import Table
+from .versions import ReadDependencies
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class _CachedTable:
+    at: float
+    table: Dict[str, Any]
+    reads: Dict[str, Tuple[HostStream, ReadDependencies]] = field(default_factory=dict)
+    expires: float = float("inf")
 
 
 def _baseline_name(name: Optional[str]) -> str:
@@ -93,18 +103,9 @@ class FabricStore:
         #: The tables being rendered right now, by cache key: a client asking
         #: for one already under way waits for it rather than rendering it too.
         self._rendering: Dict[Any, "Future[Dict[str, Any]]"] = {}
-        #: Centralized table cache per (report_name, inv_filter, report params)
-        #: -> (timestamp, table)
-        self._table_cache: Dict[
-            Tuple[
-                str,
-                Optional[Tuple[Tuple[str, str], ...]],
-                Optional[Tuple[Tuple[str, Any], ...]],
-            ],
-            Tuple[float, Dict[str, Any]],
-        ] = {}
-        #: Timestamp of the most recent fabric state update or topology change.
-        self._last_state_change: float = time.time()
+        #: Each table keeps the stream identities, path revisions and Get
+        #: expirations it was read from, scoped to its selected nodes.
+        self._table_cache: Dict[Any, _CachedTable] = {}
         self._lock = threading.RLock()
         self._stop = threading.Event()
         self._shutdown_lock = threading.Lock()
@@ -142,15 +143,6 @@ class FabricStore:
     # ------------------------------------------------------------------ #
     # lifecycle
     # ------------------------------------------------------------------ #
-
-    def _on_host_update(self) -> None:
-        """Callback invoked when a HostStream receives a telemetry update.
-
-        Without the store's lock: every notification of every node lands here,
-        and queueing the subscription threads behind a slow render is what lets
-        their updates back up. Rebinding a float is atomic all the same.
-        """
-        self._last_state_change = time.time()
 
     def start(self) -> None:
         """Open a gNMI connection to every node in the inventory."""
@@ -251,7 +243,6 @@ class FabricStore:
             logger.debug("%s: connection failed", name, exc_info=exc)
             with self._lock:
                 self._connect_errors[name] = str(exc)
-                self._last_state_change = time.time()
             return
         with self._lock:
             if self._stop.is_set():
@@ -267,9 +258,7 @@ class FabricStore:
                     default_sample_interval=self.sample_interval or 15,
                     restart_debounce=self.restart_debounce,
                     idle_timeout=self.idle_timeout,
-                    on_update=self._on_host_update,
                 )
-                self._last_state_change = time.time()
                 logger.debug(
                     "%s: connected, streaming at a %ds sample interval",
                     name,
@@ -343,7 +332,6 @@ class FabricStore:
                 del self._activation_errors[key]
             self._activated = {k for k in self._activated if k[0] != name}
             self._table_cache.clear()
-            self._last_state_change = time.time()
         if stream is not None:
             logger.info("%s: gNMI calls stopped working, reconnecting", name)
             stream.stop()
@@ -757,24 +745,29 @@ class FabricStore:
         param_key = tuple(sorted((params or {}).items())) or None
         host_key = tuple(sorted(hosts)) if hosts else None
         cache_key = (report.name, inv_key, param_key, host_key)
-        now = time.time()
-        with self._lock:
-            cached = self._table_cache.get(cache_key)
-            if cached is not None:
-                cached_at, cached_table = cached
-                if (cached_at >= self._last_state_change or (now - cached_at < 0.5)) and not cached_table.get("errors"):
-                    logger.debug(
-                        "report '%s': serving the table cached %.2fs ago",
-                        report.name,
-                        now - cached_at,
-                    )
-                    return cached_table
-            # Several clients opening the same view at once - the first render
-            # of a report is the slow one - get one render between them.
-            pending = self._rendering.get(cache_key)
-            leader = pending is None
-            if leader:
-                pending = self._rendering[cache_key] = Future()
+        while True:
+            now = time.time()
+            with self._lock:
+                cached = self._table_cache.get(cache_key)
+                streams = {n: self._streams.get(n) for n in names}
+            # Never hold the store lock while checking a node's tree lock.
+            if cached is not None and not cached.table.get("errors"):
+                fresh = now < cached.expires and all(
+                    streams.get(name) is stream and stream.reads_current(reads)
+                    for name, (stream, reads) in cached.reads.items()
+                )
+                if fresh or now - cached.at < 0.5:
+                    logger.debug("report '%s': serving the table cached %.2fs ago", report.name, now - cached.at)
+                    return cached.table
+            with self._lock:
+                # A render may have finished while we checked the streams.
+                if self._table_cache.get(cache_key) is not cached:
+                    continue
+                pending = self._rendering.get(cache_key)
+                leader = pending is None
+                if leader:
+                    pending = self._rendering[cache_key] = Future()
+                break
         if not leader:
             logger.debug("report '%s': waiting for the render already under way", report.name)
             return pending.result()
@@ -803,7 +796,11 @@ class FabricStore:
         started = time.time()
         errors: List[Dict[str, str]] = []
         extra: Dict[str, Any] = {}
+        dependencies: Dict[str, Tuple[HostStream, ReadDependencies]] = {}
+        expires = float("inf")
         if report.name == CHECKS_REPORT:
+            # Findings also depend on time windows and acknowledgements.
+            expires = started + 0.5
             # Findings are about the fabric rather than about one node, so they
             # are gathered across it rather than merged per host. A node the
             # checks could not read becomes a finding, not a table-level error.
@@ -814,16 +811,27 @@ class FabricStore:
             # Each check, passing or not, for the page to draw one card each.
             extra["checks"] = check_results(state, findings)
         else:
-            results = list(
-                self._pool.map(lambda n: self._host_rows(report, n, params), names)
-            )
+            def render_host(name: str) -> Any:
+                with self._lock:
+                    stream = self._streams.get(name)
+                if stream is None:
+                    return self._host_rows(report, name, params), None
+                with stream.track_reads() as reads:
+                    result = self._host_rows(report, name, params)
+                return result, (stream, reads)
+
+            results = list(self._pool.map(render_host, names))
 
             columns: List[str] = []
             rows: List[Dict[str, Any]] = []
             # A node with no routes at all cannot tell that 'Rib' groups rows
             # rather than holding a value, so the fabric decides it together.
             containers: Set[str] = set()
-            for name, cols, host_rows, error, host_containers in results:
+            for (name, cols, host_rows, error, host_containers), read in results:
+                if read is not None:
+                    dependencies[name] = read
+                    if not read[1].versions:
+                        expires = started + 0.5
                 if error:
                     errors.append({"node": name, "error": error})
                     continue
@@ -844,7 +852,7 @@ class FabricStore:
                 if stamp_underlay_sites(clean_rows):
                     if "Site" not in all_columns:
                         all_columns.append("Site")
-        res_table = {
+        res_table = Table({
             "report": report.name,
             "title": report.title,
             "columns": all_columns,
@@ -855,7 +863,7 @@ class FabricStore:
             "render_ms": round((time.time() - started) * 1000, 1),
             "oldest_update": _oldest_update(self._streams_for(names)),
             **extra,
-        }
+        })
         with self._lock:
             # The cache is keyed by the inventory filter and the report's own
             # parameters as well as its name, and an API client picks both, so
@@ -864,9 +872,9 @@ class FabricStore:
                 cache_key not in self._table_cache
                 and len(self._table_cache) >= _MAX_CACHED_TABLES
             ):
-                oldest = min(self._table_cache, key=lambda k: self._table_cache[k][0])
+                oldest = min(self._table_cache, key=lambda k: self._table_cache[k].at)
                 del self._table_cache[oldest]
-            self._table_cache[cache_key] = (started, res_table)
+            self._table_cache[cache_key] = _CachedTable(started, res_table, dependencies, expires)
         logger.debug(
             "report '%s': rendered %d row(s) over %d column(s) from %d node(s) "
             "in %.1fms, %d node(s) in error%s",
@@ -1385,7 +1393,7 @@ class FabricStore:
             for (report, node), error in sorted(state.errors.items())
         ]
         names = self._targets(inv_filter)
-        return {
+        return Table({
             "report": lens.name,
             "title": lens.title,
             "columns": ["Node", *lens.column_names],
@@ -1398,7 +1406,7 @@ class FabricStore:
             "generated": started,
             "render_ms": round((time.time() - started) * 1000, 1),
             "oldest_update": _oldest_update(self._streams_for(names)),
-        }
+        })
 
     def network_instances(
         self, inv_filter: Optional[Dict[str, str]] = None

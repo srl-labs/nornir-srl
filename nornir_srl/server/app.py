@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import functools
-import hashlib
 import json
 import logging
 import threading
@@ -29,6 +28,7 @@ from ..reports import SERVER, ReportSpec, coerce_params, get_report, reports_for
 from .agent import NO_PROVIDER, ChatService
 from .snapshots import SnapshotStore, _slug, comparable
 from .store import FabricStore
+from .table import serialize_table, table_digest
 
 logger = logging.getLogger(__name__)
 
@@ -87,16 +87,6 @@ def parse_nodes(value: Optional[str]) -> Optional[List[str]]:
     return names or None
 
 
-def table_digest(table: Dict[str, Any]) -> str:
-    """Fingerprint the parts of a rendered table the browser actually shows."""
-    material = json.dumps(
-        {"c": table.get("columns"), "r": table.get("rows"), "e": table.get("errors")},
-        default=str,
-        sort_keys=True,
-    )
-    return hashlib.sha1(material.encode()).hexdigest()
-
-
 async def table_events(
     store: FabricStore,
     name: str,
@@ -120,10 +110,14 @@ async def table_events(
     loop = asyncio.get_running_loop()
     last_digest = ""
     last_sent = 0.0
+
+    def encoded_render():
+        return serialize_table(render())
+
     try:
         while not await is_disconnected() and not store.stopping:
             try:
-                task = asyncio.ensure_future(anyio.to_thread.run_sync(render))
+                task = asyncio.ensure_future(anyio.to_thread.run_sync(encoded_render))
                 started = loop.time()
                 while not last_digest:
                     done, _pending = await asyncio.wait({task}, timeout=PROGRESS_INTERVAL)
@@ -138,7 +132,7 @@ async def table_events(
                         except Exception:  # noqa: BLE001 - the elapsed time still says it
                             pass
                     yield f"event: progress\ndata: {json.dumps(status)}\n\n".encode()
-                table = await task
+                encoded = await task
             except (asyncio.CancelledError, GeneratorExit):
                 break
             except ValueError as exc:
@@ -158,13 +152,12 @@ async def table_events(
                 continue
             if store.stopping:
                 return
-            digest = table_digest(table)
+            digest = encoded.digest
             now = loop.time()
             if digest != last_digest:
                 last_digest = digest
                 last_sent = now
-                body = json.dumps(table, default=str)
-                yield f"event: table\ndata: {body}\n\n".encode()
+                yield encoded.event
             elif now - last_sent > SSE_HEARTBEAT:
                 last_sent = now
                 yield b": keep-alive\n\n"
@@ -591,10 +584,10 @@ def create_app(
         except ValueError as exc:
             return JSONResponse({"error": str(exc)}, status_code=400)
         try:
-            table = await anyio.to_thread.run_sync(render)
+            body = await anyio.to_thread.run_sync(lambda: serialize_table(render()).body)
         except ValueError as exc:
             return JSONResponse({"error": str(exc)}, status_code=400)
-        return JSONResponse(table)
+        return Response(body, media_type="application/json")
 
     async def report_stream(request: Request) -> Response:
         try:

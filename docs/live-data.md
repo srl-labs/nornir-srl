@@ -40,6 +40,10 @@ Whatever arrives while a node is being re-read is recorded and applied again, in
 
 In between sweeps, list entries that a SAMPLE subscription ceases to send are aged out after a few sample intervals. This aging is measured relative to the last update timestamp received by that subtree rather than wall-clock time, preventing a node with a lagging telemetry stream from spuriously clearing out data.
 
+Rendered reports retain the revisions of the paths they read on their selected nodes. Heartbeats, unrelated counters, and updates on other nodes leave those tables cached. Relevant updates, deletes, resynchronization, and connection replacement invalidate them; fallback reads also carry their original Get-cache expiry, so rendering a table does not extend its data's lifetime. Revisions group entries by schema path to keep bookkeeping bounded even with large route tables: changing one route can invalidate other queries into the same route list.
+
+Clients sharing a cached table also share its JSON encoding and SSE fingerprint. Encoding runs in a worker thread, and its bytes are released with the cached table. Cards, graphs, and check summaries count as visible changes; render timings alone do not trigger an SSE update.
+
 ### 5. Narrow path subscriptions
 Subscriptions stream everything under their path (configuration and state alike). `fcli` subscribes strictly to the specific branches read by the getter. For example, subscribing to `/network-instance[name=*]` entirely would stream all route tables and the entire BGP RIB—on a spine router, this represents massive payload volume capable of delaying the telemetry stream. Instead, `fcli` selectively subscribes only to types, interfaces, overlays, and BGP instances.
 
