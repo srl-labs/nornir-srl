@@ -585,6 +585,8 @@ class Watcher:
         #: Readings tried, kept or failed: what tells a first reading still
         #: under way from one that failed, for whoever waits on it.
         self.attempts = 0
+        #: When the reading under way started, or ``None`` between readings.
+        self.reading_since: Optional[float] = None
         #: Whether the first reading after the warm-up has been taken.
         self._settled = False
         #: Findings the timeline has reported raised and not yet cleared.
@@ -634,6 +636,7 @@ class Watcher:
                     return
         while not self._stop.is_set():
             started = time.perf_counter()
+            self.reading_since = self.clock()
             try:
                 self.tick()
             except Exception as exc:  # noqa: BLE001 - one bad reading is not the end of it
@@ -641,6 +644,7 @@ class Watcher:
                 logger.debug("fabric reading failed", exc_info=exc)
             finally:
                 self.attempts += 1
+                self.reading_since = None
             logger.debug("fabric reading took %.2fs", time.perf_counter() - started)
             if self._stop.wait(self.interval):
                 return

@@ -83,3 +83,46 @@ def test_without_a_watcher_reading_the_checks_read_the_fabric(store, monkeypatch
     monkeypatch.setattr(type(store.watcher), "running", property(lambda _self: True))
     with pytest.raises(AssertionError, match="next to the watcher"):
         store.health()
+
+
+def _down(state):
+    """*state* with spine1 answering no report, and leaf1 missing just one."""
+    for report in ("lldp", "ni", "vxlan"):
+        state.reports.get(report, {}).pop("spine1", None)
+        state.errors[(report, "spine1")] = "not reachable: no route to spine1"
+    state.errors[("lldp", "leaf1")] = "timed out"
+    return state
+
+
+def test_incidents_leave_an_unreachable_node_to_its_card(store):
+    from nornir_srl.lenses import LENSES_BY_NAME
+
+    reading = _reading(time.time())
+    _down(reading.state)
+    store.timeline.latest = reading
+    errors = store.lens_table(LENSES_BY_NAME["incidents"])["errors"]
+    # One report missing on a node that answered the others is still said.
+    assert errors == [{"node": "leaf1", "error": "lldp not collected: timed out"}]
+
+
+def test_other_lenses_say_an_unreachable_node_once(store, monkeypatch):
+    from nornir_srl.lenses import LENSES_BY_NAME
+
+    state = _down(_reading(time.time()).state)
+    monkeypatch.setattr(store, "fabric_state", lambda *_args, **_kwargs: state)
+    errors = store.lens_table(LENSES_BY_NAME["service"], params={"name": "mac-vrf-100"})["errors"]
+    assert [e for e in errors if e["node"] == "spine1"] == [
+        {"node": "spine1", "error": "no report collected: not reachable: no route to spine1"}
+    ]
+    assert {"node": "leaf1", "error": "lldp not collected: timed out"} in errors
+
+
+def test_the_health_card_says_how_old_its_reading_is_and_whether_one_runs(store):
+    store.timeline.latest = _reading(time.time() - 40)
+    summary = store._health_summary(None, ["leaf1", "spine1"], 0)
+    assert 39 <= summary["age"] <= 45
+    assert summary["reading_since"] is None
+    assert summary["watch_interval"] == 15
+
+    store.watcher.reading_since = time.time() - 2
+    assert store._health_summary(None, ["leaf1", "spine1"], 0)["reading_since"] == store.watcher.reading_since

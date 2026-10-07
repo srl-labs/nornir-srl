@@ -1044,6 +1044,16 @@ def test_a_report_says_what_identifies_its_rows(client):
     assert reports["bgp_peers"]["key_columns"] == ["Node", "NI", "peer"]
 
 
+def test_a_peers_routes_are_served_but_not_listed_on_their_own(client):
+    """Reached from the BGP peers table, not from the navigation."""
+    test_client, _devices = client
+    reports = {r["name"]: r for r in test_client.get("/api/reports").json()["reports"]}
+    assert not reports["bgp_received_routes"]["listed"]
+    assert not reports["bgp_advertised_routes"]["listed"]
+    # Lenses say nothing, which the browser reads as listed.
+    assert all(r.get("listed", True) for name, r in reports.items() if name not in ("bgp_received_routes", "bgp_advertised_routes"))
+
+
 # --------------------------------------------------------------------------- #
 # helpers
 # --------------------------------------------------------------------------- #

@@ -16,7 +16,7 @@ from ..checks import CHECKS_COLUMNS, CHECKS_REPORT, FabricState, Finding, REQUIR
 from .. import configs
 from ..acks import AckStore, finding_key, mark as mark_acknowledged
 from ..changes import INFO, WATCHED_ROUTE_REPORTS, Change
-from ..incidents import Incident, correlate, locate
+from ..incidents import Incident, correlate, locate, unreachable_nodes
 from ..connections.down_reason import STANDBY_STATE, is_intent
 from ..connections.srlinux import CONNECTION_NAME
 from ..fabric import containerlab_nodes
@@ -1613,10 +1613,17 @@ class FabricStore:
         rows = lens.rows(records)
         if lens.group_by_node:
             rows.sort(key=lambda r: str(r.get("Node", "")))
+        # A node no report answered for is one line, not one per report - and
+        # none in the incidents, where its node_unreachable card says it.
+        unreachable = unreachable_nodes(state)
         errors = [
             {"node": node, "error": f"{report} not collected: {error}"}
             for (report, node), error in sorted(state.errors.items())
+            if node not in unreachable
         ]
+        if lens.name != "incidents":
+            reasons = {node: error for (_report, node), error in sorted(state.errors.items()) if node in unreachable}
+            errors += [{"node": node, "error": f"no report collected: {reason}"} for node, reason in sorted(reasons.items())]
         names = self._targets(inv_filter)
         return Table({
             "report": lens.name,
@@ -1755,6 +1762,8 @@ class FabricStore:
         open_ = [i for i in incidents if not i.acknowledged]
         return {
             "at": reading.at,
+            # By the server's clock: a browser's may be off by more than that.
+            "age": max(0.0, time.time() - reading.at),
             "incidents": len(open_),
             "errors": sum(1 for i in open_ if i.severity == "error"),
             "warnings": sum(1 for i in open_ if i.severity == "warning"),
@@ -1765,6 +1774,9 @@ class FabricStore:
             "failures_15m": sum(1 for c in recent if c.severity == "error"),
             "baseline_at": baseline.at if baseline else None,
             "watching": self.watch_interval > 0,
+            "watch_interval": self.watch_interval,
+            # The next reading under way, for the card to show it is checking.
+            "reading_since": self.watcher.reading_since,
         }
 
     def topology(self, inv_filter: Optional[Dict[str, str]] = None) -> Dict[str, Any]:

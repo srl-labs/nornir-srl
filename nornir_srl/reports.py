@@ -310,6 +310,9 @@ class ReportSpec:
     #: as cheaply as the node allows: what a surface offers its ``rib-key``
     #: parameters from. Called as ``keys(device)``.
     keys: Optional[Callable[[Any], List[Dict[str, Any]]]] = None
+    #: False for a report a surface reaches from another one rather than
+    #: offers on its own: a peer's received routes, from the BGP peers table.
+    listed: bool = True
 
     @property
     def tool_name(self) -> str:
@@ -334,6 +337,7 @@ class ReportSpec:
             "sample_interval": self.sample_interval,
             "params": [p.as_dict() for p in self.params],
             "needs_query": self.needs_query,
+            "listed": self.listed,
             # The browser offers a comparison either way, and says which kind
             # it can be: without keys, a change reads as an add and a remove.
             "key_columns": list(self.key_columns),
@@ -1628,6 +1632,8 @@ REPORTS: List[ReportSpec] = [
             table=table,
             category="BGP",
             surfaces=STREAMING,
+            # Opened from a peer's Rx and Tx counts in the BGP peers report.
+            listed=False,
             params=(
                 # Both required: the routes of every peer, or of every
                 # family, are the whole RIB, which on a large fabric hangs

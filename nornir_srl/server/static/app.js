@@ -57,6 +57,7 @@
     liveLabel: el("live-label"),
     queryProgress: el("query-progress"),
     queryProgressLabel: el("query-progress-label"),
+    queryProgressBar: document.querySelector("#query-progress .query-progress-bar"),
     stopLoading: el("stop-loading"),
     main: document.querySelector(".main"),
     globalSearch: el("global-search"),
@@ -123,6 +124,7 @@
     kpiHealthSub: el("kpi-health-sub"),
     kpiHealthWorst: el("kpi-health-worst"),
     kpiHealthChanges: el("kpi-health-changes"),
+    kpiHealthProgress: el("kpi-health-progress"),
     headRow: el("head-row"),
     filterRow: el("filter-row"),
     gridCols: el("grid-cols"),
@@ -1102,6 +1104,8 @@
     const needle = dom.reportSearch.value.trim().toLowerCase();
     const groups = new Map();
     for (const report of state.reports) {
+      // Reached from another report - a peer's routes from BGP peers.
+      if (report.listed === false) continue;
       const haystack = `${report.title} ${report.name} ${report.description} ${report.category}`;
       if (needle && !haystack.toLowerCase().includes(needle)) continue;
       if (!groups.has(report.category)) groups.set(report.category, []);
@@ -1283,7 +1287,7 @@
         ? `KPI overview metrics · reading the fabric: ${readingProgress(data.loading)}`
         : "KPI overview metrics";
       dom.updated.textContent = "updated " + new Date().toLocaleTimeString();
-      return Boolean(data.loading || data.health_loading);
+      return Boolean(data.loading || data.health_loading || (data.health && data.health.reading_since));
     } catch (_err) {
       setLive("error", "error");
       return false;
@@ -1816,14 +1820,46 @@
   }
 
   /** The Fabric Health card: incidents by severity, the worst, and what changed. */
+  /**
+   * The bar along the checks card: filled by the first reading's report
+   * reads, a moving strip while a later reading is under way, else hidden.
+   */
+  function renderHealthProgress(health, loading) {
+    const bar = dom.kpiHealthProgress;
+    if (!bar) return;
+    const share = !health && loading && loading.total ? loading.ready / loading.total : null;
+    const busy = (!health && loading && !loading.total) || Boolean(health && health.reading_since);
+    bar.hidden = share === null && !busy;
+    bar.classList.toggle("is-indeterminate", share === null && busy);
+    if (share !== null) {
+      const percent = Math.round(share * 100);
+      bar.style.setProperty("--progress", `${percent}%`);
+      bar.setAttribute("aria-valuenow", String(percent));
+      bar.setAttribute("aria-valuemin", "0");
+      bar.setAttribute("aria-valuemax", "100");
+    } else {
+      bar.removeAttribute("aria-valuenow");
+    }
+  }
+
+  /** "12 s ago", "3 min ago": how old the reading on the card is. */
+  function ageText(seconds) {
+    if (seconds < 60) return `${Math.round(seconds)} s ago`;
+    if (seconds < 3600) return `${Math.round(seconds / 60)} min ago`;
+    return `${Math.round(seconds / 3600)} h ago`;
+  }
+
   function renderHealthKpi(health, loading) {
     if (!dom.kpiCardHealth) return;
+    renderHealthProgress(health, loading);
     dom.kpiCardHealth.classList.remove("kpi-ok", "kpi-warn", "kpi-err");
     dom.kpiCardHealth.classList.toggle("kpi-loading", Boolean(!health && loading));
     if (!health) {
       dom.kpiHealthValue.textContent = "—";
       dom.kpiHealthSub.textContent = loading
-        ? `checks running: ${loading.ready} of ${loading.total} report reads in`
+        ? loading.total
+          ? `checks running: ${loading.ready} of ${loading.total} report reads in (${Math.round((100 * loading.ready) / loading.total)}%)`
+          : "checks running: connecting to the nodes…"
         : "checks not available";
       dom.kpiHealthWorst.textContent = "";
       dom.kpiHealthChanges.textContent = "";
@@ -1845,7 +1881,13 @@
         ? ` · baseline ${new Date(health.baseline_at * 1000).toLocaleTimeString()}`
         : " · baseline pending";
       const failures = health.failures_15m ? ` (${health.failures_15m} failures)` : "";
-      dom.kpiHealthChanges.textContent = `${health.changes_15m} change(s) in 15 min${failures}${baseline}`;
+      const checked = health.reading_since
+        ? "checking now"
+        : typeof health.age === "number"
+          ? `checked ${ageText(health.age)}`
+          : "";
+      dom.kpiHealthChanges.textContent =
+        `${checked ? checked + " · " : ""}${health.changes_15m} change(s) in 15 min${failures}${baseline}`;
     }
   }
 
@@ -3873,6 +3915,7 @@
     queryTimer = null;
     state.query = null;
     dom.queryProgress.hidden = true;
+    if (dom.queryProgressBar) dom.queryProgressBar.classList.remove("is-determinate");
     dom.stopLoading.hidden = true;
     dom.main.classList.remove("is-querying");
     dom.empty.textContent = "No data.";
@@ -3886,9 +3929,21 @@
     const title = document.createElement("strong");
     title.textContent = state.report ? state.report.title : "report";
     parts.push("Querying ", title, ` · ${seconds.toFixed(seconds < 10 ? 1 : 0)} s`);
+    const bar = dom.queryProgressBar;
     if (status.total) {
       const unit = status.total === status.nodes ? "nodes" : "node reports";
-      parts.push(` · ${status.ready} of ${status.total} ${unit} answered`);
+      const percent = Math.round((100 * status.ready) / status.total);
+      const count = document.createElement("span");
+      count.className = "query-progress-count";
+      count.textContent = ` · ${status.ready} of ${status.total} ${unit} answered (${percent}%)`;
+      parts.push(count);
+      if (bar) {
+        // Filled by what has answered, rather than only saying something moves.
+        bar.classList.add("is-determinate");
+        bar.style.setProperty("--progress", `${percent}%`);
+      }
+    } else if (bar) {
+      bar.classList.remove("is-determinate");
     }
     if (seconds > 15) parts.push(" · large tables take a while on the first read");
     dom.queryProgressLabel.replaceChildren(...parts);

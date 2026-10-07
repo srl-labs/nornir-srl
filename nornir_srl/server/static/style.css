@@ -745,6 +745,18 @@ body {
   to { left: 100%; }
 }
 
+/* Once the server says how many nodes have answered, the bar fills by it. */
+.query-progress-bar.is-determinate span {
+  left: 0;
+  width: var(--progress, 0%);
+  animation: none;
+  transition: width var(--transition-base);
+}
+
+.query-progress-count {
+  font-variant-numeric: tabular-nums;
+}
+
 .spinner {
   width: 12px;
   height: 12px;
@@ -1534,6 +1546,39 @@ th.filtered::after {
 
 @keyframes kpi-loading {
   50% { opacity: 0.7; }
+}
+
+/* Along the card's bottom edge: how far the checks are. */
+.kpi-progress {
+  position: absolute;
+  inset: auto 0 0 0;
+  height: 3px;
+  overflow: hidden;
+  background: rgba(var(--accent-rgb), 0.15);
+}
+
+.kpi-progress span {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: var(--progress, 0%);
+  background: var(--accent);
+  transition: width var(--transition-base);
+}
+
+/* A reading under way whose share done is not known: a moving strip. */
+.kpi-progress.is-indeterminate span {
+  width: 30%;
+  animation: query-slide 1.2s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .kpi-progress.is-indeterminate span {
+    animation: none;
+    width: 100%;
+    opacity: 0.5;
+  }
 }
 
 @media (prefers-reduced-motion: reduce) {
