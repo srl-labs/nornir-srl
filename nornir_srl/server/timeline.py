@@ -582,6 +582,9 @@ class Watcher:
         self.clock = clock
         self.persist_every = max(1, persist_every)
         self.readings = 0
+        #: Readings tried, kept or failed: what tells a first reading still
+        #: under way from one that failed, for whoever waits on it.
+        self.attempts = 0
         #: Whether the first reading after the warm-up has been taken.
         self._settled = False
         #: Findings the timeline has reported raised and not yet cleared.
@@ -599,6 +602,10 @@ class Watcher:
         self.timeline.prune(self.clock())
         self._thread = threading.Thread(target=self._run, name="fcli-watch", daemon=True)
         self._thread.start()
+
+    @property
+    def running(self) -> bool:
+        return self._thread is not None and self._thread.is_alive() and not self._stop.is_set()
 
     def stop(self) -> None:
         self._stop.set()
@@ -632,6 +639,8 @@ class Watcher:
             except Exception as exc:  # noqa: BLE001 - one bad reading is not the end of it
                 logger.warning("fabric reading failed: %s", exc)
                 logger.debug("fabric reading failed", exc_info=exc)
+            finally:
+                self.attempts += 1
             logger.debug("fabric reading took %.2fs", time.perf_counter() - started)
             if self._stop.wait(self.interval):
                 return

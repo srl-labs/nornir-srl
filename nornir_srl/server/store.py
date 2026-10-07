@@ -157,6 +157,8 @@ class FabricStore:
         #: inv_filter key -> (when, reading), for health asked with no fresh
         #: watcher reading to answer from.
         self._health_cache: Dict[Any, Tuple[float, Reading]] = {}
+        #: Per inventory filter: the watcher's reading and that reading narrowed.
+        self._narrowed_cache: Dict[Any, Tuple[Reading, Reading]] = {}
         #: The (node, service) tables last fetched for the topology's
         #: aliasing: (when, which, report -> node -> tables).
         self._alias_ribs: Optional[Tuple[float, Tuple[Tuple[str, str], ...], Dict[str, Dict[str, List[Any]]]]] = None
@@ -1255,17 +1257,16 @@ class FabricStore:
     def health(self, inv_filter: Optional[Dict[str, str]] = None) -> Reading:
         """The findings and incidents of the (filtered) fabric, as recently as they are known.
 
-        The watcher's latest reading answers when it is fresh and nothing is
-        filtered out of it; otherwise the checks are run here, and the answer
-        is kept a few seconds so that a page polling for it does not run every
-        check on every poll.
+        With the watcher running, its latest reading answers, however old: the
+        same reading the overview shows, with no gNMI of its own. An inventory
+        filter narrows that reading to its nodes and runs the checks over what
+        is left. Only without a watcher, or when its first reading failed, are
+        the reports read here, and the answer kept a few seconds so that a
+        page polling for it does not run every check on every poll.
         """
-        latest = self.timeline.latest
-        fresh = self.watch_interval > 0 and latest is not None and (
-            time.time() - latest.at < 3 * self.watch_interval
-        )
-        if fresh and not inv_filter:
-            return latest
+        latest = self._watched_reading()
+        if latest is not None:
+            return self._narrowed(latest, inv_filter) if inv_filter else latest
         key = tuple(sorted(inv_filter.items())) if inv_filter else None
         now = time.time()
         with self._lock:
@@ -1281,6 +1282,62 @@ class FabricStore:
             self._health_cache[key] = (now, reading)
         return reading
 
+    def _watched_reading(self) -> Optional[Reading]:
+        """The watcher's latest reading, waiting for its first one if it is under way.
+
+        ``None`` without a watcher, or once its first reading failed: a second
+        reading started next to the watcher's would only compete with it for
+        the same nodes.
+        """
+        if self.watch_interval <= 0:
+            return None
+        while self.timeline.latest is None:
+            if self._stop.is_set() or not self.watcher.running or self.watcher.attempts:
+                break
+            time.sleep(0.1)
+        return self.timeline.latest
+
+    def _narrowed(self, reading: Reading, inv_filter: Dict[str, str]) -> Reading:
+        """*reading* as the filtered nodes alone see it: their payloads, rechecked.
+
+        Checks compare nodes with each other, so the findings are made again
+        over what is left rather than picked out of the whole fabric's. Kept
+        per filter until the watcher's next reading.
+        """
+        key = tuple(sorted(inv_filter.items()))
+        with self._lock:
+            cached = self._narrowed_cache.get(key)
+        if cached is not None and cached[0] is reading:
+            return cached[1]
+        names = self._targets(inv_filter)
+        wanted = set(names)
+        state = replace(
+            reading.state,
+            reports={
+                report: {node: payload for node, payload in payloads.items() if node in wanted}
+                for report, payloads in reading.state.reports.items()
+            },
+            hostnames={node: host for node, host in reading.state.hostnames.items() if node in wanted},
+            errors={key: error for key, error in reading.state.errors.items() if key[1] in wanted},
+            containerlab=reading.state.containerlab & wanted,
+            changes=self.timeline.recent(nodes=names),
+            history=self.timeline.scoped(names),
+            acknowledged=self.acks.keys(),
+        )
+        findings = run_checks(state)
+        narrowed = replace(
+            reading,
+            state=state,
+            findings=findings,
+            incidents=correlate(findings, state),
+            connected={node: up for node, up in reading.connected.items() if node in wanted},
+        )
+        with self._lock:
+            if len(self._narrowed_cache) >= 16:
+                self._narrowed_cache.clear()
+            self._narrowed_cache[key] = (reading, narrowed)
+        return narrowed
+
     def health_within(self, inv_filter: Optional[Dict[str, str]], wait: float) -> Optional[Reading]:
         """:meth:`health`, waiting at most *wait* seconds for it.
 
@@ -1290,10 +1347,14 @@ class FabricStore:
         watcher, when it is the one keeping them.
         """
         deadline = time.time() + max(wait, 0.0)
-        if self.watch_interval > 0 and not inv_filter:
+        if self.watch_interval > 0:
             while self.timeline.latest is None and time.time() < deadline and not self._stop.is_set():
                 time.sleep(0.05)
-            return self.timeline.latest
+            latest = self.timeline.latest
+            if latest is not None and inv_filter:
+                return self._narrowed(latest, inv_filter)
+            if latest is not None or not inv_filter:
+                return latest
         key = tuple(sorted(inv_filter.items())) if inv_filter else None
         with self._lock:
             cached = self._health_cache.get(key)
