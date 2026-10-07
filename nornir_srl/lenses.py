@@ -1759,7 +1759,8 @@ def tree_service(services: List[Service]) -> List[Card]:
         # service, by the route-target they share, and whether those agree on
         # it - fact by fact and instance by instance, so a gateway's WAN side
         # is not a disagreement with the leaves.
-        facts = {s.node: service_facts(", ".join(map(str, s.vnis)), s.instances) for s in mine}
+        # No VNI read is an unknown one, as in the check, not a disagreement.
+        facts = {s.node: service_facts(", ".join(map(str, s.vnis)) or None, s.instances) for s in mine}
         sites = dict.fromkeys(s.site for s in mine)
         split: List[str] = []
         disputed: List[str] = []

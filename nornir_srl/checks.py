@@ -435,14 +435,16 @@ def check_mtu_outlier(state: FabricState) -> List[Finding]:
 # --------------------------------------------------------------------------- #
 
 
-def service_facts(vni: str, instances: Sequence[Any]) -> Dict[str, Any]:
+def service_facts(vni: Optional[str], instances: Sequence[Any]) -> Dict[str, Any]:
     """What one node thinks a service looks like, by the name of each fact.
 
     The route-targets are one fact per bgp-vpn instance: a gateway carries a
     second instance for its WAN side, with route-targets the leaves never
-    see, and that is not the two of them disagreeing.
+    see, and that is not the two of them disagreeing. A *vni* of ``None`` is
+    one that could not be read, which leaves the VNI out rather than holding
+    an unknown against every other node's.
     """
-    facts: Dict[str, Any] = {"VNI": vni}
+    facts: Dict[str, Any] = {} if vni is None else {"VNI": vni}
     for inst in instances:
         which = f" of bgp-instance {inst.id}" if inst.id != 1 else ""
         facts[f"import route-target{which}"] = _rt_set(inst.import_rts)
@@ -580,11 +582,17 @@ def check_evpn_service_mismatch(state: FabricState) -> List[Finding]:
     # and which nodes carry it as a gateway, with a WAN-side instance too.
     services: Dict[str, Dict[str, Dict[str, Any]]] = {}
     gateways: Dict[str, Set[str]] = {}
+    # vxlan-interfaces a service names that the node's VXLAN state does not
+    # have. Their VNI is unknown, not different: held against every other
+    # node, one gap in a node's state is an error per service per node.
+    unknown: Dict[str, List[str]] = {}
     for node, instance in state.items("ni"):
         if _text(instance.type) not in ("mac-vrf", "ip-vrf"):
             continue
+        missing = [overlay for overlay in instance.overlays if (node, overlay) not in vnis]
+        unknown.setdefault(node, []).extend(missing)
         services.setdefault(instance.name, {})[node] = service_facts(
-            ", ".join(str(vnis.get((node, overlay), "?")) for overlay in instance.overlays),
+            None if missing else ", ".join(str(vnis[(node, overlay)]) for overlay in instance.overlays),
             instance.instances,
         )
         if len(instance.instances) > 1:
@@ -608,6 +616,22 @@ def check_evpn_service_mismatch(state: FabricState) -> List[Finding]:
                 )
 
     findings: List[Finding] = []
+    # A node whose VXLAN state could not be read at all is a collection
+    # finding already; one read without these interfaces is said once here.
+    read = state.reports.get("vxlan") or {}
+    for node, missing in sorted(unknown.items()):
+        if not missing or node not in read:
+            continue
+        shown = ", ".join(missing[:5]) + (f" and {len(missing) - 5} more" if len(missing) > 5 else "")
+        findings.append(
+            Finding(
+                check="evpn_service_mismatch",
+                severity=WARNING,
+                node=node,
+                subject="VNI",
+                detail=f"no VXLAN state for {len(missing)} vxlan-interface(s) its services use ({shown}); their VNI was not compared",
+            )
+        )
     for name, by_node in sorted(services.items()):
         wan = gateways.get(name, set())
         for domain in underlay_domains(list(by_node), system, hosts, wan):

@@ -429,6 +429,38 @@ def test_evpn_service_mismatch_finds_a_vni_that_differs():
     assert all("VNI" in f["Detail"] for f in findings)
 
 
+def test_evpn_service_mismatch_does_not_hold_an_unread_vni_against_every_node():
+    """A node read without its vxlan-interfaces has an unknown VNI, not a different one."""
+    state = fabric(
+        ni={**_ni("leaf1"), **_ni("leaf2"), **_ni("leaf3")},
+        vxlan={"leaf1": [], **_vxlan("leaf2"), **_vxlan("leaf3")},
+    )
+    findings = run("evpn_service_mismatch", state)
+    # One warning about the gap, on the node that has it - not an error per
+    # service on every node carrying it.
+    assert [(f["Node"], f["Severity"], f["Subject"]) for f in findings] == [("leaf1", "warning", "VNI")]
+    assert "vxlan1.100" in findings[0]["Detail"]
+
+
+def test_evpn_service_mismatch_leaves_an_unreadable_vxlan_report_to_collection():
+    state = fabric(
+        ni={**_ni("leaf1"), **_ni("leaf2")},
+        vxlan=_vxlan("leaf2"),
+    )
+    state.errors[("vxlan", "leaf1")] = "timed out"
+    assert run("evpn_service_mismatch", state) == []
+
+
+def test_evpn_service_mismatch_still_compares_route_targets_without_a_vni():
+    state = fabric(
+        ni={**_ni("leaf1", out_rt="65000:999"), **_ni("leaf2")},
+        vxlan={"leaf1": [], **_vxlan("leaf2")},
+    )
+    findings = run("evpn_service_mismatch", state)
+    assert any(f["Severity"] == "error" and "export route-target" in f["Detail"] for f in findings)
+    assert not any(f["Detail"].startswith("VNI") for f in findings)
+
+
 def test_evpn_service_mismatch_finds_route_targets_that_differ():
     state = fabric(
         ni={**_ni("leaf1"), **_ni("leaf2", out_rt="65000:999")},
