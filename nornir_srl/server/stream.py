@@ -656,6 +656,22 @@ class HostStream:
                     logger.debug("%s: resync aborted at %s", self.name, spec.path)
                     return
             with self._lock:
+                # A path bootstrapped while the Gets ran went into the tree
+                # being replaced. Carry its state over, or the swap drops it
+                # until its subscription happens to re-send it, which for an
+                # ON_CHANGE path is never: a report opened during a resync
+                # came up with part of a RIB, or a node's VXLAN state gone.
+                read = {spec.path for spec in specs}
+                for state in list(self._paths.values()):
+                    if state.spec.path in read or not (state.streamable and state.bootstrapped):
+                        continue
+                    carried = []
+                    for env in state.envelopes:
+                        node = self._tree if env == "" else get_node(self._tree, env)
+                        if node is not None:
+                            carried.append({env or "/": select_materialized(node, state.spec.path, env)})
+                    if carried:
+                        self._absorb(state.spec, carried, self._tree_for(state.spec, specs, fresh))
                 self._tree = fresh
                 self._versions.touch("")
                 arrived, self._replay = self._replay or [], None

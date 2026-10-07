@@ -1520,3 +1520,40 @@ def test_a_reading_kept_before_a_getter_narrowed_its_paths_still_reads_back():
     (record,) = ReplayDevice(old).get_vxlan()["vxlan"]
     assert (record.name, record.ni, record.vni) == ("vxlan0.10", "mac-vrf-1", 10010)
     assert [d.vtep for d in record.destinations] == ["10.0.0.2"]
+
+
+def test_a_path_bootstrapped_during_a_resync_survives_the_swap():
+    """The resync swaps in a tree read from the paths it started with; one
+    added while it read went into the old tree and must be carried over."""
+    from nornir_srl.server.stream import DiscoveryRead
+    from nornir_srl.server.versions import shape
+
+    device = FakeDevice({RIB_PATH: RIB_RESPONSE, LLDP_PATH: LLDP_RESPONSE})
+    stream = HostStream("leaf1", device, restart_debounce=TEST_DEBOUNCE)
+    try:
+        stream.ensure_paths([SubscriptionSpec(LLDP_PATH, "state", mode="on_change")])
+        entered, release = threading.Event(), threading.Event()
+        original = device.get
+
+        def slow_get(*args, **kwargs):
+            if LLDP_PATH in (kwargs.get("paths") or args[0]):
+                entered.set()
+                assert release.wait(5)
+            return original(*args, **kwargs)
+
+        device.get = slow_get
+        resync = threading.Thread(target=stream.resync)
+        resync.start()
+        assert entered.wait(5)
+        # A report opened now: its path is bootstrapped from its discovery read.
+        seed = DiscoveryRead(RIB_RESPONSE, time.time(), stream._versions.version(shape(RIB_PATH)))
+        stream.ensure_paths([SubscriptionSpec(RIB_PATH, "state", mode="on_change")], {(RIB_PATH, "state"): seed})
+        before = stream.snapshot(RIB_PATH)
+        assert before and any(before[0].values())
+        release.set()
+        resync.join(5)
+        assert not resync.is_alive()
+        assert stream.snapshot(RIB_PATH) == before
+    finally:
+        release.set()
+        stream.stop()
