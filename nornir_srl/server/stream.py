@@ -322,6 +322,60 @@ def _stale_lists(node: Any, cutoff: float, path: str = "") -> Dict[str, int]:
     return found
 
 
+#: The node's Subscribe RPCs: one for the paths of a full BGP RIB view, one
+#: for everything else. gNMI cannot add a path to a running subscription, so
+#: opening any report replaces the RPC carrying it - and the replaced RPC's
+#: initial sync re-sends every path on it. Kept apart, opening an interface
+#: report no longer re-streams tens of thousands of routes, nor opening a
+#: RIB view every interface counter.
+MAIN = "main"
+BULK = "bulk"
+CHANNELS = (MAIN, BULK)
+
+
+def channel_of(path: str) -> str:
+    """The subscription *path* is carried on: BGP RIB paths have their own."""
+    return BULK if "/bgp-rib/" in path else MAIN
+
+
+@dataclass(eq=False)
+class _Channel:
+    """One Subscribe RPC of a node and the state of its run."""
+
+    name: str
+    generation: int = 0
+    thread: Optional[threading.Thread] = None
+    subscription: Any = None
+    #: The paths of the running request, the heartbeat included.
+    specs: List[SubscriptionSpec] = field(default_factory=list)
+    connected: bool = False
+    #: Whether the running subscription has sent its initial sync.
+    synced: bool = False
+    #: When it was established, on the wall clock and the clock list entries
+    #: are aged by.
+    subscribed_at: Optional[float] = None
+    subscribed_from: float = 0.0
+    heartbeat: bool = False
+    on_change: List[Tuple[str, List[Tuple[str, Dict[str, str]]]]] = field(default_factory=list)
+    covered: Dict[str, str] = field(default_factory=dict)
+    polled: Set[str] = field(default_factory=set)
+
+
+#: How long a BGP attribute set read by key is kept. A set's index names its
+#: contents: when a route's attributes change it moves to another index, and
+#: the old one goes away rather than changing. So a set found under an index
+#: stays right for as long as that index exists, and renders are not made to
+#: wait on reading thousands of them again every :attr:`HostStream.get_ttl`.
+#: The TTL only bounds what an index freed and then given out again could
+#: leave behind, and the memory of sets no route uses any more.
+ATTR_SET_TTL = 600.0
+
+
+def _found(payload: Any) -> bool:
+    """Whether a Get's answer for one key holds the entry, not an empty envelope."""
+    return isinstance(payload, dict) and any(bool(v) for v in payload.values())
+
+
 class HostStream:
     """Streaming state for a single SR Linux node.
 
@@ -369,8 +423,9 @@ class HostStream:
         ] = {}
         #: Narrow reads nothing streams, when they were read; see query().
         self._query_cache: Dict[Tuple[str, str], Tuple[float, List[Dict[str, Any]]]] = {}
-        #: Entries asked for by key, when they were read; see lookup().
-        self._lookup_cache: Dict[Tuple[str, str], Tuple[float, Dict[str, Any]]] = {}
+        #: Entries asked for by key: when they were read, what they were, and
+        #: for how long they are kept; see lookup().
+        self._lookup_cache: Dict[Tuple[str, str], Tuple[float, Dict[str, Any], float]] = {}
         #: Failed Gets, kept for the same TTL as successful ones.
         self._failed_gets: Dict[Tuple[str, str], Tuple[float, Exception]] = {}
         self._failed_versions: Dict[Tuple[str, str], int] = {}
@@ -387,19 +442,17 @@ class HostStream:
         self._polled: Set[str] = set()
         self.rates = RateTracker()
 
-        self._thread: Optional[threading.Thread] = None
+        self._channels: Dict[str, _Channel] = {name: _Channel(name) for name in CHANNELS}
+        #: The channels whose paths changed since the reconciler last ran.
+        self._dirty_channels: Set[str] = set()
         self._stop = threading.Event()
         self._closed = threading.Event()
-        self._generation = 0
-        self._subscription: Any = None
         self._lag_warned = 0.0
         #: Notifications applied, and the leaves they updated or deleted: counted
         #: up for good, so a caller sampling them gets the rates.
         self._notifications = 0
         self._leaves = 0
         self._gets = 0
-        #: When the running subscription was established, if there is one.
-        self._subscribed_at: Optional[float] = None
         #: Start of the current run of consecutively failing Gets, if any.
         self._failing_since: Optional[float] = None
         #: When the Get currently in flight started, if there is one.
@@ -413,17 +466,10 @@ class HostStream:
         #: is not read as the node forgetting its state.
         self._envelope_seen: Dict[str, float] = {}
         self.last_update: Optional[float] = None
-        self.connected = False
-        #: Whether the running subscription has sent its initial sync.
-        self.synced = False
-        #: When it started, on the clock list entries are aged by.
-        self._subscribed_from = 0.0
         #: What arrived while a resync was reading the node, to apply again to
         #: the tree it reads once that is swapped in; ``None`` outside one.
         self._replay: Optional[List[Dict[str, Any]]] = None
-        #: Whether the running subscription carries :data:`HEARTBEAT`.
-        self._heartbeat = False
-        #: The ON_CHANGE paths of the running subscription, parsed.
+        #: The ON_CHANGE paths of the running subscriptions, parsed.
         self._on_change: List[Tuple[str, List[Tuple[str, Dict[str, str]]]]] = []
         self.error: Optional[str] = None
 
@@ -485,7 +531,7 @@ class HostStream:
         for spec in sorted(added, key=lambda s: len(parse_path(s.path))):
             seed = (discovered or {}).get((spec.path, spec.datatype))
             self._bootstrap(spec, self._tree_for(spec, known, self._tree), seed)
-        self._dirty.set()
+        self._mark_dirty(*(spec.path for spec in added))
 
     @staticmethod
     def _tree_for(spec: SubscriptionSpec, specs: List[SubscriptionSpec], tree: Dict[str, Any]) -> Dict[str, Any]:
@@ -614,7 +660,7 @@ class HostStream:
                 # whether it is brand new, was empty until now, or is coming
                 # back after the node was unreachable.
                 if not state.bootstrapped:
-                    self._dirty.set()
+                    self._mark_dirty(spec.path)
                 state.envelopes = envelopes
                 state.bootstrapped = True
             else:
@@ -692,35 +738,46 @@ class HostStream:
         )
 
     def _reconcile(self) -> None:
-        """Apply pending path-set changes, one restart per burst.
+        """Apply pending path-set changes, one restart per burst and channel.
 
-        Opening a report adds its paths and flags the set dirty. Waiting for the
-        flag to stay clear for ``restart_debounce`` before re-subscribing turns
-        the burst of activations that a page load produces into a single new
-        ``Subscribe`` RPC, instead of one per report.
+        Opening a report adds its paths and flags their channel dirty. Waiting
+        for the flag to stay clear for ``restart_debounce`` before
+        re-subscribing turns the burst of activations that a page load
+        produces into a single new ``Subscribe`` RPC, instead of one per
+        report - and only on the channel whose paths changed.
         """
         while not self._closed.is_set():
             with self._lock:
                 self._expire_gets()
             if not self._dirty.wait(timeout=1.0):
-                if self._retire_idle_paths():
-                    self._restart()
+                retired = self._retire_idle_paths()
+                for channel in retired:
+                    self._restart(channel)
                 continue
             while self._dirty.is_set():
                 self._dirty.clear()
                 if self._closed.wait(self.restart_debounce):
                     return
-            self._restart()
+            with self._lock:
+                channels, self._dirty_channels = self._dirty_channels or set(CHANNELS), set()
+            for channel in sorted(channels):
+                self._restart(channel)
 
-    def _retire_idle_paths(self) -> bool:
+    def _mark_dirty(self, *paths: str) -> None:
+        """Flag the channels of *paths* for the reconciler to re-subscribe."""
+        with self._lock:
+            self._dirty_channels.update(channel_of(path) for path in paths)
+        self._dirty.set()
+
+    def _retire_idle_paths(self) -> Set[str]:
         """Drop paths no report has read for ``idle_timeout``.
 
         The streamed values stay behind in the tree, but they are unreachable
         without a :class:`PathState` and get overwritten by a fresh bootstrap if
-        the path is ever asked for again. Returns whether anything was dropped.
+        the path is ever asked for again. Returns the channels that lost one.
         """
         if self.idle_timeout <= 0:
-            return False
+            return set()
         cutoff = time.time() - self.idle_timeout
         with self._lock:
             idle = [
@@ -732,27 +789,37 @@ class HostStream:
         if idle:
             logger.info("%s: retired %d idle path(s)", self.name, len(idle))
             logger.debug("%s: retired %s", self.name, ", ".join(idle))
-        return bool(idle)
+        return {channel_of(path) for path in idle}
 
-    def _restart(self) -> None:
-        """(Re)start the subscription thread with the current path set."""
+    def _restart(self, channel: Optional[str] = None) -> None:
+        """(Re)start *channel*'s subscription with its current paths; both without one."""
+        if channel is None:
+            for name in CHANNELS:
+                self._restart(name)
+            return
         if self._closed.is_set():
             return
+        ch = self._channels[channel]
         with self._lock:
-            self._generation += 1
-            generation = self._generation
+            ch.generation += 1
+            generation = ch.generation
             wanted = [
-                s.spec for s in self._paths.values() if s.streamable and s.bootstrapped
+                s.spec for s in self._paths.values()
+                if s.streamable and s.bootstrapped and channel_of(s.spec.path) == channel
             ]
             heartbeat = any(s.mode == "on_change" for s in wanted)
-            specs, self._covered, polled = plan_subscription(wanted, self.max_paths - heartbeat)
+            specs, ch.covered, polled = plan_subscription(wanted, self.max_paths - heartbeat)
             if heartbeat and specs:
                 specs.append(HEARTBEAT)
-            self._heartbeat = heartbeat and bool(specs)
-            for path in self._polled.symmetric_difference(polled):
+            ch.heartbeat = heartbeat and bool(specs)
+            for path in ch.polled.symmetric_difference(polled):
                 self._versions.touch(path)
-            self._polled = set(polled)
-            self._on_change = [(s.path, parse_path(s.path)) for s in specs if s.mode == "on_change"]
+            ch.polled = set(polled)
+            ch.on_change = [(s.path, parse_path(s.path)) for s in specs if s.mode == "on_change"]
+            ch.specs = specs
+            self._covered = {k: v for c in self._channels.values() for k, v in c.covered.items()}
+            self._polled = {p for c in self._channels.values() for p in c.polled}
+            self._on_change = [item for c in self._channels.values() for item in c.on_change]
         if polled:
             logger.info(
                 "%s: %d path(s) do not fit the %d a subscription may carry, polling them: %s",
@@ -762,56 +829,63 @@ class HostStream:
                 ", ".join(polled),
             )
         logger.debug(
-            "%s: restarting subscription (generation %d) with %d path(s): %s",
+            "%s: restarting the %s subscription (generation %d) with %d path(s): %s",
             self.name,
+            channel,
             generation,
             len(specs),
             ", ".join(s.path for s in specs) or "none",
         )
-        self._close_subscription()
-        if self._thread and self._thread.is_alive():
-            self._thread.join(timeout=3)
+        self._close_subscription(ch)
+        if ch.thread and ch.thread.is_alive():
+            ch.thread.join(timeout=3)
         if not specs or self._closed.is_set():
             # Nothing left to stream, so there is no Subscribe RPC to be
             # connected by; saying otherwise would leave a stale 'connected'
             # behind for as long as the node has no streamable path.
-            self.connected = False
+            ch.connected = False
+            ch.synced = False
+            ch.subscribed_at = None
             return
         self._stop.clear()
-        self._thread = threading.Thread(
+        ch.thread = threading.Thread(
             target=self._run,
-            args=(generation, specs),
-            name=f"gnmi-sub-{self.name}",
+            args=(ch, generation, specs),
+            name=f"gnmi-sub-{self.name}" + ("" if channel == MAIN else f"-{channel}"),
             daemon=True,
         )
-        self._thread.start()
+        ch.thread.start()
 
-    def _close_subscription(self) -> None:
-        subscription, self._subscription = self._subscription, None
-        if subscription is None:
-            return
-        try:
-            subscription.close()
-        except Exception as exc:  # noqa: BLE001 - best effort teardown
-            logger.debug("%s: closing subscription failed: %s", self.name, exc)
+    def _close_subscription(self, ch: Optional["_Channel"] = None) -> None:
+        for one in ([ch] if ch is not None else list(self._channels.values())):
+            subscription, one.subscription = one.subscription, None
+            if subscription is None:
+                continue
+            try:
+                subscription.close()
+            except Exception as exc:  # noqa: BLE001 - best effort teardown
+                logger.debug("%s: closing subscription failed: %s", self.name, exc)
 
-    def _run(self, generation: int, specs: List[SubscriptionSpec]) -> None:
+    def _run(self, ch: "_Channel", generation: int, specs: List[SubscriptionSpec]) -> None:
         request = {
             "subscription": [s.as_gnmi() for s in specs],
             "mode": "stream",
             "encoding": "json_ietf",
         }
-        while self._alive(generation):
+        while self._alive(ch, generation):
             try:
                 subscription = self.device.gnmi_subscribe(request)
-                self._subscription = subscription
-                self.connected = True
+                ch.subscription = subscription
+                ch.connected = True
                 self.error = None
-                self.synced = False
-                self._subscribed_at = time.time()
-                self._subscribed_from = time.monotonic()
-                logger.info("%s: subscribed to %d path(s)", self.name, len(specs))
-                while self._alive(generation):
+                ch.synced = False
+                ch.subscribed_at = time.time()
+                ch.subscribed_from = time.monotonic()
+                logger.info(
+                    "%s: subscribed to %d path(s)%s", self.name, len(specs),
+                    "" if ch.name == MAIN else f" ({ch.name})",
+                )
+                while self._alive(ch, generation):
                     try:
                         message = subscription.get_update(timeout=1.0)
                     except TimeoutError:
@@ -819,10 +893,10 @@ class HostStream:
                             raise subscription.error
                         continue
                     if message:
-                        self._apply(message)
+                        self._apply(message, channel=ch)
             except Exception as exc:  # noqa: BLE001 - retried with backoff
-                self.connected = False
-                if self._alive(generation):
+                ch.connected = False
+                if self._alive(ch, generation):
                     self.error = str(exc)
                     logger.warning("%s: subscription failed: %s", self.name, exc)
                     limit = _MAX_PATHS_ERROR.search(str(exc))
@@ -830,18 +904,20 @@ class HostStream:
                         # The same request would be refused again: plan a new
                         # one within what the node says it takes.
                         self.max_paths = int(limit.group(1))
+                        with self._lock:
+                            self._dirty_channels.add(ch.name)
                         self._dirty.set()
                 # Otherwise this is the RPC we cancelled ourselves to re-subscribe
                 # with a changed path set, which says nothing about the node.
             finally:
-                self._close_subscription()
-            if not self._alive(generation):
+                self._close_subscription(ch)
+            if not self._alive(ch, generation):
                 break
             self._stop.wait(self.reconnect_delay)
-        self.connected = False
+        ch.connected = False
 
-    def _alive(self, generation: int) -> bool:
-        """Whether the subscription of *generation* should still be running.
+    def _alive(self, ch: "_Channel", generation: int) -> bool:
+        """Whether *ch*'s subscription of *generation* should still be running.
 
         ``_stop`` is cleared again by every restart, so a subscription that
         raced with :meth:`stop` also has to check ``_closed`` - otherwise it
@@ -850,24 +926,70 @@ class HostStream:
         return (
             not self._stop.is_set()
             and not self._closed.is_set()
-            and generation == self._generation
+            and generation == ch.generation
         )
 
-    def stop(self, timeout: float = 5.0) -> None:
-        """Tear the subscription down and wait for its threads to notice.
+    # The node's subscription state, over its channels: what was one RPC's.
 
-        Both threads block on waits of their own - up to a second on the next
+    def _active(self) -> List["_Channel"]:
+        return [ch for ch in self._channels.values() if ch.specs]
+
+    @property
+    def connected(self) -> bool:
+        """Whether every channel with paths to stream has its RPC up."""
+        active = self._active()
+        return bool(active) and all(ch.connected for ch in active)
+
+    @connected.setter
+    def connected(self, value: bool) -> None:
+        for ch in self._channels.values():
+            ch.connected = value
+
+    @property
+    def synced(self) -> bool:
+        """Whether every running subscription has sent its initial sync."""
+        active = self._active()
+        return bool(active) and all(ch.synced for ch in active)
+
+    @property
+    def _subscribed_at(self) -> Optional[float]:
+        """When the most recent of the running subscriptions came up."""
+        times = [ch.subscribed_at for ch in self._active() if ch.subscribed_at is not None]
+        return max(times) if times else None
+
+    @_subscribed_at.setter
+    def _subscribed_at(self, value: Optional[float]) -> None:
+        for ch in self._active():
+            ch.subscribed_at = value
+
+    @property
+    def _heartbeat(self) -> bool:
+        return any(ch.heartbeat for ch in self._active())
+
+    def _backlog(self) -> int:
+        """Notifications received and not applied yet, over every subscription."""
+        total = 0
+        for ch in self._channels.values():
+            backlog = getattr(ch.subscription, "backlog", 0)
+            total += backlog if isinstance(backlog, int) else 0
+        return total
+
+    def stop(self, timeout: float = 5.0) -> None:
+        """Tear the subscriptions down and wait for their threads to notice.
+
+        Each thread blocks on waits of its own - up to a second on the next
         update, up to ``restart_debounce`` plus a thread join on a pending
         restart - so returning before they have run out would leave the node's
-        ``Subscribe`` RPC open past the shutdown that was supposed to close it.
+        ``Subscribe`` RPCs open past the shutdown that was supposed to close them.
         """
         self._closed.set()
         self._stop.set()
         self._dirty.set()
         with self._lock:
-            self._generation += 1
+            for ch in self._channels.values():
+                ch.generation += 1
         self._close_subscription()
-        for thread in (self._thread, self._reconciler):
+        for thread in [ch.thread for ch in self._channels.values()] + [self._reconciler]:
             if thread is None or not thread.is_alive():
                 continue
             thread.join(timeout=timeout)
@@ -880,7 +1002,7 @@ class HostStream:
     # update handling
     # ------------------------------------------------------------------ #
 
-    def _apply(self, message: Dict[str, Any], notify: bool = True) -> None:
+    def _apply(self, message: Dict[str, Any], notify: bool = True, channel: Optional[_Channel] = None) -> None:
         """Merge one notification into the tree.
 
         *notify* runs :attr:`on_update` afterwards, which the store answers by
@@ -888,7 +1010,7 @@ class HostStream:
         held: the store takes the two the other way round.
         """
         if message.get("sync_response"):
-            self._synced()
+            self._synced(channel)
             return
         update = message.get("update")
         if not update:
@@ -927,6 +1049,7 @@ class HostStream:
             for item in update.get("delete", []) or []:
                 item_path = _extract_item_path(item)
                 path = join_path(prefix, item_path)
+                logger.debug("%s: delete of %s", self.name, path)
                 delete(self._tree, path, [p for p, _elems in self._on_change], pin=self._pinned(_bare(path)))
                 self._versions.touch(path)
                 gone = _deleted_interface(path)
@@ -967,20 +1090,23 @@ class HostStream:
                 return True
         return False
 
-    def _synced(self) -> None:
+    def _synced(self, channel: Optional[_Channel] = None) -> None:
         """The initial sync is in: what it did not re-send of an ON_CHANGE path is gone.
 
         Deletes made while the previous subscription was being replaced were
         sent to nobody, and an ON_CHANGE path has no later tick to notice by.
+        Only *channel*'s own paths are swept, against its own start: the other
+        subscription did not restart. Without one, every channel's.
         """
         with self._lock:
             dropped = 0
-            for path, _elems in self._on_change:
-                count = sweep(self._tree, path, self._subscribed_from)
-                if count:
-                    self._versions.touch(path)
-                dropped += count
-            self.synced = True
+            for ch in [channel] if channel is not None else self._active():
+                for path, _elems in ch.on_change:
+                    count = sweep(self._tree, path, ch.subscribed_from)
+                    if count:
+                        self._versions.touch(path)
+                    dropped += count
+                ch.synced = True
         if dropped:
             logger.debug("%s: dropped %d entr%s the initial sync did not re-send", self.name, dropped, "y" if dropped == 1 else "ies")
 
@@ -1028,8 +1154,8 @@ class HostStream:
         # and put back from whatever of it came after. On a fabric of a
         # thousand bridge-domains that was VNIs vanishing, and every service
         # reported as split.
-        backlog = getattr(self._subscription, "backlog", 0)
-        if isinstance(backlog, int) and backlog > MAX_EVICTION_BACKLOG:
+        backlog = self._backlog()
+        if backlog > MAX_EVICTION_BACKLOG:
             if time.monotonic() - self._lag_warned > 60:
                 self._lag_warned = time.monotonic()
                 logger.warning(
@@ -1112,10 +1238,16 @@ class HostStream:
             reads.expires = min(reads.expires, expires)
 
     def reads_current(self, reads: ReadDependencies) -> bool:
+        """Whether nothing *reads* depended on has changed or expired since."""
         with self._lock:
-            return time.time() < reads.expires and all(
-                self._versions.version(parts) == version for parts, version in reads.versions.items()
-            )
+            if time.time() >= reads.expires:
+                logger.debug("%s: a render's reads expired %.1fs ago", self.name, time.time() - reads.expires)
+                return False
+            for parts, version in reads.versions.items():
+                if self._versions.version(parts) != version:
+                    logger.debug("%s: a render's read of /%s changed", self.name, "/".join(parts))
+                    return False
+            return True
 
     def snapshot(self, path: str) -> Optional[List[Dict[str, Any]]]:
         """Return the streamed state for *path* shaped like a gNMI Get response."""
@@ -1318,13 +1450,18 @@ class HostStream:
         streamed entries are always read straight from the tree. BGP attribute
         sets still referenced by routes are verified with a Get if absent from
         the tree: route and attribute updates can arrive independently.
+
+        A BGP attribute set found by a Get is kept for :data:`ATTR_SET_TTL`,
+        and a render that used it is not made stale by its age: what it says
+        cannot change under its index. Only the routes' own updates - naming
+        another index - re-render, and fetch just the indexes not seen yet.
         """
         now = time.time()
         with self._lock:
             for path in ([table] if table is not None else paths):
                 self._read(path)
             answers = self._streamed_entries(paths, datatype)
-            for key in [k for k, (at, _) in self._lookup_cache.items() if now - at >= self.get_ttl]:
+            for key in [k for k, (at, _, ttl) in self._lookup_cache.items() if now - at >= ttl]:
                 del self._lookup_cache[key]
             missing: List[str] = []
             for path in paths:
@@ -1336,10 +1473,17 @@ class HostStream:
                     continue
                 cached = self._lookup_cache.get((path, datatype))
                 if cached is not None:
-                    self._read(table or path, cached[0] + self.get_ttl)
-                    answers[path] = cached[1]
+                    at, found, ttl = cached
+                    # An attribute set found stays right under its index; an
+                    # absent one is asked again after the TTL.
+                    self._read(table or path) if ttl == ATTR_SET_TTL else self._read(table or path, at + ttl)
+                    answers[path] = found
                 else:
-                    self._read(table or path, now + self.get_ttl)
+                    # An attribute set's expiry depends on whether it is found.
+                    if table == ATTR_SETS_TABLE:
+                        self._read(table)
+                    else:
+                        self._read(table or path, now + self.get_ttl)
                     missing.append(path)
         if missing:
             if table is not None and len(missing) > LOOKUP_BY_KEY_LIMIT:
@@ -1357,7 +1501,11 @@ class HostStream:
             with self._lock:
                 for path, found in zip(missing, fetched):
                     answers[path] = found
-                    self._lookup_cache[(path, datatype)] = (now, found)
+                    ttl = ATTR_SET_TTL if table == ATTR_SETS_TABLE and _found(found) else self.get_ttl
+                    self._lookup_cache[(path, datatype)] = (now, found, ttl)
+                    if table == ATTR_SETS_TABLE and ttl != ATTR_SET_TTL:
+                        # Not there yet: the render asks again after the TTL.
+                        self._read(table, now + self.get_ttl)
         return [answers[path] for path in paths]
 
     def query(self, paths: Sequence[str], datatype: str) -> List[Dict[str, Any]]:
@@ -1661,9 +1809,9 @@ class HostStream:
             "connected": self.connected,
             "error": self.error,
             "last_update": self.last_update,
-            # gRPC sessions this node currently spends on us: the Subscribe RPC
-            # plus at most one in-flight Get.
-            "sessions": (1 if self.connected else 0)
+            # gRPC sessions this node currently spends on us: a Subscribe RPC
+            # per channel that has paths, plus at most one in-flight Get.
+            "sessions": sum(1 for ch in self._channels.values() if ch.connected)
             + (1 if self._get_lock.locked() else 0),
             "gets": self.gets,
             "getting": self.getting,
@@ -1676,7 +1824,7 @@ class HostStream:
             # streams more than the server keeps up with. Not the age of what
             # is applied, by the node's timestamps: SR Linux stamps an update
             # with when the value last changed, which says nothing about lag.
-            "backlog": getattr(self._subscription, "backlog", 0) if isinstance(getattr(self._subscription, "backlog", 0), int) else 0,
+            "backlog": self._backlog(),
             "failing_since": self.failing_since,
             "paths": paths,
         }

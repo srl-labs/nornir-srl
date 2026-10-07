@@ -158,8 +158,9 @@ def test_evpn_attributes_missing_from_the_stream_are_retried_and_expire(store, m
     if available:
         assert recovered["rows"] == first["rows"]
 
-    # Positive and negative answers share the original Get's TTL. Unrelated
-    # telemetry does not trigger more Gets; an empty answer cannot live forever.
+    # Unrelated telemetry does not trigger more Gets. An empty answer cannot
+    # live forever: it is asked again after the Get's TTL. A set that was
+    # found is not - it cannot change under its index - for ATTR_SET_TTL.
     device.responses[path] = [{path.lstrip("/"): attrs}]
     now += stream.get_ttl - 1
     apply(stream, "/system/information/current-datetime", "later")
@@ -168,7 +169,7 @@ def test_evpn_attributes_missing_from_the_stream_are_retried_and_expire(store, m
     now += 2
     refreshed = render()
     assert refreshed["rows"] == first["rows"]
-    assert device.gets.count((path, "state")) == 2
+    assert device.gets.count((path, "state")) == (1 if available else 2)
 
     # Streamed state takes precedence as soon as it catches up, even while a
     # fallback answer is cached, and goes back to needing no device reads.
@@ -176,7 +177,7 @@ def test_evpn_attributes_missing_from_the_stream_are_retried_and_expire(store, m
     apply(stream, path, changed)
     age_tables(fabric)
     assert render()["rows"][0]["RT"] == "9002:9002"
-    assert device.gets.count((path, "state")) == 2
+    assert device.gets.count((path, "state")) == (1 if available else 2)
 
 
 def test_fallback_cache_survives_unrelated_updates_but_not_ancestor_delete():
@@ -256,11 +257,11 @@ def test_concurrent_clients_share_one_encoding(monkeypatch):
     calls = []
     started, release = threading.Event(), threading.Event()
 
-    def encode(table):
+    def encode(table, *args):
         calls.append(threading.get_ident())
         started.set()
         assert release.wait(5)
-        return original(table)
+        return original(table, *args)
 
     monkeypatch.setattr(module, "_encode", encode)
     table = Table(columns=["Node"], rows=[{"Node": "leaf1"}], errors=[])
@@ -290,11 +291,11 @@ async def test_encoding_does_not_block_the_event_loop(store, monkeypatch):
     started, release = threading.Event(), threading.Event()
     worker_threads = []
 
-    def encode(table):
+    def encode(table, *args):
         worker_threads.append(threading.get_ident())
         started.set()
         assert release.wait(2), "the event loop could not release the encoding worker"
-        return original(table)
+        return original(table, *args)
 
     monkeypatch.setattr(module, "_encode", encode)
 
@@ -312,4 +313,82 @@ async def test_encoding_does_not_block_the_event_loop(store, monkeypatch):
         assert worker_threads[0] != threading.get_ident()
     finally:
         release.set()
+        await stream.aclose()
+
+
+def test_a_rerender_runs_only_the_nodes_that_changed(store, monkeypatch):
+    """One node's update re-renders that node; the others keep their rows."""
+    fabric, _devices = store
+    report = get_report("lldp")
+    real = fabric._host_rows
+    rendered = []
+
+    def rows(spec, name, params):
+        rendered.append(name)
+        return real(spec, name, params)
+
+    monkeypatch.setattr(fabric, "_host_rows", rows)
+    first = fabric.table(report)
+    assert sorted(rendered) == ["leaf1", "spine1"]
+    rendered.clear()
+
+    age_tables(fabric)
+    apply(fabric._streams["leaf1"], "/system/lldp/interface[name=ethernet-1/1]/neighbor[id=1]/system-name", "new-peer")
+    second = fabric.table(report)
+    assert second is not first
+    assert rendered == ["leaf1"]
+    assert any(row["Nbr-System"] == "new-peer" for row in second["rows"])
+    # spine1's part is the very one the first table had, encoding and all.
+    before = {part.key: part for part in first.parts}
+    after = {part.key: part for part in second.parts}
+    assert after["spine1"] is before["spine1"]
+    assert after["leaf1"] is not before["leaf1"]
+    # The table reads the same as one rendered from scratch.
+    fabric._host_renders.clear()
+    fabric._table_cache.clear()
+    assert fabric.table(report)["rows"] == second["rows"]
+
+
+def test_a_patch_carries_only_the_parts_that_changed(store):
+    fabric, _devices = store
+    report = get_report("lldp")
+    first = serialize_table(fabric.table(report))
+    age_tables(fabric)
+    apply(fabric._streams["leaf1"], "/system/lldp/interface[name=ethernet-1/1]/neighbor[id=1]/system-name", "new-peer")
+    second = serialize_table(fabric.table(report))
+    patch = second.patch_from(first)
+    assert patch.startswith(b"event: patch\ndata: ")
+    body = json.loads(patch.split(b"data: ", 1)[1])
+    assert list(body["parts"]) == ["leaf1"]
+    assert body["order"] == [key for key, _, _ in second.parts]
+    assert "rows" not in body["head"]
+    # The full table is what the parts make up, in order.
+    full = json.loads(second.body)
+    assert [row for key in body["order"] for row in (body["parts"].get(key) or [r for r in json.loads(first.body)["rows"] if r["Node"] == key])] == full["rows"]
+    # Columns that change are not a patch.
+    reshaped = serialize_table(Table({**fabric.table(report), "columns": ["Node"]}, parts=fabric.table(report).parts))
+    assert reshaped.patch_from(second) is None
+
+
+@pytest.mark.anyio
+async def test_the_stream_sends_a_full_table_then_patches(store):
+    fabric, _devices = store
+    report = get_report("lldp")
+
+    async def connected():
+        return False
+
+    stream = table_events(fabric, "lldp", lambda: fabric.table(report), 0.01, connected)
+    try:
+        first = await anext(stream)
+        assert first.startswith(b"event: table")
+        assert {key for key, _ in json.loads(first.split(b"data: ", 1)[1])["row_parts"]} == {"leaf1", "spine1"}
+        age_tables(fabric)
+        apply(fabric._streams["spine1"], "/system/lldp/interface[name=ethernet-1/1]/neighbor[id=1]/system-name", "moved")
+        second = await asyncio.wait_for(anext(stream), 5)
+        assert second.startswith(b"event: patch")
+        body = json.loads(second.split(b"data: ", 1)[1])
+        assert list(body["parts"]) == ["spine1"]
+        assert any(row["Nbr-System"] == "moved" for row in body["parts"]["spine1"])
+    finally:
         await stream.aclose()

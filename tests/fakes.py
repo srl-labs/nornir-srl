@@ -92,7 +92,15 @@ class FakeDevice:
         if self.down:
             raise RuntimeError("GRPC ERROR: failed to connect to all addresses")
         self.subscribe_requests.append(subscribe)
-        subscriber = FakeSubscriber(self.updates)
+        paths = [s.get("path", "") for s in subscribe.get("subscription", [])]
+        if any("/bgp-rib/" in path for path in paths):
+            # The server's RIB subscription is an RPC of its own: its own
+            # stream, closed on its own. Like the shared one, it sends no
+            # initial sync unless a test pushes one.
+            subscriber = FakeSubscriber(queue.Queue())
+            self.rib_subscriber = subscriber
+        else:
+            subscriber = FakeSubscriber(self.updates)
         self.subscribers.append(subscriber)
         return subscriber
 
@@ -113,7 +121,12 @@ class FakeDevice:
         }
         if deletes:
             notification["delete"] = [{"path": path} for path in deletes]
-        self.updates.put({"update": notification})
+        rib = getattr(self, "rib_subscriber", None)
+        touched = [prefix] + [path for path, _ in updates or []] + list(deletes or [])
+        if any("bgp-rib" in path for path in touched) and rib is not None and not rib.closed:
+            rib._updates.put({"update": notification})
+        else:
+            self.updates.put({"update": notification})
 
 
 def wait_for(predicate, timeout: float = 3.0, interval: float = 0.02) -> bool:

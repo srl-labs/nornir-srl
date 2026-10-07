@@ -206,6 +206,7 @@
     windowSize: WINDOW_STEP,
     paused: false,
     loadStopped: false,
+    rowParts: null, // part key (node) -> its rows, for patches to apply to
     source: null,
     previous: new Map(), // row identity -> previous row values
     identityColumn: null,
@@ -4009,9 +4010,7 @@
         /* a malformed progress event only costs the counts */
       }
     });
-    source.addEventListener("table", (event) => {
-      if (state.source !== source) return;
-      const table = JSON.parse(event.data);
+    const showTable = (table) => {
       if (table.loading) {
         if (!state.query) startQuery();
         state.query.answered = true;
@@ -4024,6 +4023,23 @@
         setLive("live", "live");
       }
       ingest(table);
+    };
+    source.addEventListener("table", (event) => {
+      if (state.source !== source) return;
+      const table = JSON.parse(event.data);
+      rememberParts(table);
+      showTable(table);
+    });
+    // A change to a few nodes of a large table: their rows alone.
+    source.addEventListener("patch", (event) => {
+      if (state.source !== source) return;
+      const table = applyPatch(JSON.parse(event.data));
+      if (table) {
+        showTable(table);
+      } else {
+        // A part this page never had: start over from a full table.
+        connect();
+      }
     });
     source.addEventListener("error", (event) => {
       if (state.source !== source) return;
@@ -4061,6 +4077,36 @@
     if (state.source !== source) return; // moved on meanwhile
     showErrors([{ node: "server", error: reason }]);
     dom.rowCount.textContent = "not loaded";
+  }
+
+  /** Keep a full table's rows by part (node), for later patches to apply to. */
+  function rememberParts(table) {
+    state.rowParts = null;
+    if (!Array.isArray(table.row_parts)) return;
+    const parts = new Map();
+    let at = 0;
+    for (const [key, count] of table.row_parts) {
+      parts.set(key, table.rows.slice(at, at + count));
+      at += count;
+    }
+    state.rowParts = parts;
+  }
+
+  /**
+   * The table a patch makes of the one on screen: the parts it carries, the
+   * rest as they were, in the order it gives. ``null`` when it names a part
+   * this page does not have.
+   */
+  function applyPatch(patch) {
+    if (!state.rowParts) return null;
+    const parts = new Map();
+    for (const key of patch.order) {
+      const rows = Object.prototype.hasOwnProperty.call(patch.parts, key) ? patch.parts[key] : state.rowParts.get(key);
+      if (rows === undefined) return null;
+      parts.set(key, rows);
+    }
+    state.rowParts = parts;
+    return { ...patch.head, rows: [...parts.values()].flat() };
   }
 
   function ingest(table) {

@@ -495,7 +495,7 @@ def test_rendering_a_report_keeps_its_paths_subscribed(store):
     stream = fabric_store._streams["leaf1"]
     stream.idle_timeout = 60.0
     fabric_store.table(get_report("lldp"))
-    assert stream._retire_idle_paths() is False
+    assert not stream._retire_idle_paths()
     assert stream.status()["paths"][0]["path"] == LLDP_PATH
 
 

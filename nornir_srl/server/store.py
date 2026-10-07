@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import threading
 import time
+from collections import OrderedDict
 from concurrent.futures import CancelledError, Future, ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -32,7 +33,7 @@ from .stream import MAX_EVICTION_BACKLOG, DiscoveryRead, HostStream
 from .timeline import Reading, Timeline, Watcher
 from .topology import annotate_aliasing, annotate_health, build_topology, node_facts
 from .tree import key_matches
-from .table import Table
+from .table import RowPart, Table
 from .versions import ReadDependencies
 
 logger = logging.getLogger(__name__)
@@ -50,6 +51,43 @@ class _Activation:
     future: Future
     cancelled: threading.Event
     readers: Set[Optional[ReportLoad]]
+
+
+@dataclass(eq=False)
+class _HostRender:
+    """One node's share of a report table, kept while what it read is unchanged.
+
+    The rows are kept cleaned, per set of table columns, as the part a table
+    is assembled from; the raw ones are dropped once cleaned. A table whose
+    columns differ - another inventory filter - renders the node anew.
+    """
+
+    stream: Optional[HostStream]
+    reads: Optional[ReadDependencies]
+    columns: List[str]
+    containers: Set[str]
+    error: Optional[str]
+    rows: Optional[List[Dict[str, Any]]]
+    cleaned: Dict[Tuple[str, ...], RowPart] = field(default_factory=dict)
+    lock: threading.Lock = field(default_factory=threading.Lock)
+
+    def current(self, stream: Optional[HostStream]) -> bool:
+        return (
+            stream is not None
+            and self.stream is stream
+            and self.error is None
+            and self.reads is not None
+            and bool(self.reads.versions)
+            and stream.reads_current(self.reads)
+        )
+
+
+#: Reports whose rows get the underlay site stamped on them across nodes:
+#: a node's rows there depend on the other nodes', so they are not kept.
+_SITE_STAMPED = ("bridge_domains", "routers", "services")
+
+#: How many nodes' renders are kept, across reports and their parameters.
+_MAX_HOST_RENDERS = 4096
 
 
 @dataclass
@@ -141,6 +179,9 @@ class FabricStore:
         #: Each table keeps the stream identities, path revisions and Get
         #: expirations it was read from, scoped to its selected nodes.
         self._table_cache: Dict[Any, _CachedTable] = {}
+        #: Each node's last render of a report, by (report, params, node):
+        #: what a table re-render reuses for the nodes that did not change.
+        self._host_renders: "OrderedDict[Any, _HostRender]" = OrderedDict()
         self._lock = threading.RLock()
         self._stop = threading.Event()
         self._shutdown_lock = threading.Lock()
@@ -959,6 +1000,8 @@ class FabricStore:
         extra: Dict[str, Any] = {"loading": loading} if loading is not None else {}
         dependencies: Dict[str, Tuple[HostStream, ReadDependencies]] = {}
         expires = float("inf")
+        #: The rows by node, for the table to be encoded and patched by.
+        row_parts: Optional[List[RowPart]] = None
         if report.name == CHECKS_REPORT:
             # Findings also depend on time windows and acknowledgements.
             expires = started + 0.5
@@ -972,47 +1015,96 @@ class FabricStore:
             # Each check, passing or not, for the page to draw one card each.
             extra["checks"] = check_results(state, findings)
         else:
-            def render_host(name: str) -> Any:
+            param_key = tuple(sorted((params or {}).items())) or None
+            reusable = report.name not in _SITE_STAMPED
+
+            def render_host(name: str, reuse: bool = True) -> Tuple[str, _HostRender]:
+                # A node whose paths did not change since its last render keeps
+                # its rows: re-rendering a fabric after one node changed then
+                # runs one node's getter, not every node's.
                 with self._lock:
                     stream = self._streams.get(name)
+                    kept = self._host_renders.get((report.name, param_key, name)) if reusable and reuse else None
+                if kept is not None and kept.current(stream):
+                    return name, kept
                 if stream is None:
-                    return self._host_rows(report, name, params), None
+                    _, cols, rows, error, found = self._host_rows(report, name, params)
+                    return name, _HostRender(None, None, cols, found, error, rows)
                 with stream.track_reads() as reads:
-                    result = self._host_rows(report, name, params)
-                return result, (stream, reads)
+                    _, cols, rows, error, found = self._host_rows(report, name, params)
+                return name, _HostRender(stream, reads, cols, found, error, rows)
 
-            results = list(self._pool.map(render_host, names))
-
-            columns: List[str] = []
-            rows: List[Dict[str, Any]] = []
-            # A node with no routes at all cannot tell that 'Rib' groups rows
-            # rather than holding a value, so the fabric decides it together.
-            containers: Set[str] = set()
-            for (name, cols, host_rows, error, host_containers), read in results:
-                if read is not None:
-                    dependencies[name] = read
-                    if not read[1].versions:
-                        expires = started + 0.5
-                if error:
-                    errors.append({"node": name, "error": error})
-                    continue
-                merge_fields(columns, cols)
-                containers |= host_containers
-                rows.extend(host_rows)
-
-            columns = [c for c in columns if c not in containers]
+            renders = list(self._pool.map(render_host, names))
+            for _attempt in range(3):
+                columns: List[str] = []
+                # A node with no routes at all cannot tell that 'Rib' groups rows
+                # rather than holding a value, so the fabric decides it together.
+                containers: Set[str] = set()
+                for _name, render in renders:
+                    if render.error is None:
+                        merge_fields(columns, render.columns)
+                        containers |= render.containers
+                columns = [c for c in columns if c not in containers]
+                key = tuple(columns)
+                # A kept node cleaned for other columns no longer has its raw
+                # rows: render it again for these.
+                stale = [
+                    i for i, (_name, render) in enumerate(renders)
+                    if render.error is None and render.rows is None and key not in render.cleaned
+                ]
+                if not stale:
+                    break
+                for i, item in zip(stale, self._pool.map(lambda i: render_host(renders[i][0], reuse=False), stale)):
+                    renders[i] = item
             all_columns = ["Node"] + clean_columns(columns)
-            clean_rows = [
-                {
-                    c: _cell(row.get(raw))
-                    for c, raw in zip(all_columns, ["Node"] + columns)
-                }
-                for row in rows
-            ]
-            if report.name in ("bridge_domains", "routers", "services"):
+            raw_columns = ["Node"] + columns
+
+            def part_of(name: str, render: _HostRender) -> RowPart:
+                with render.lock:
+                    part = render.cleaned.get(key)
+                    if part is None and render.rows is not None:
+                        part = RowPart(name, [
+                            {c: _cell(row.get(raw)) for c, raw in zip(all_columns, raw_columns)}
+                            for row in render.rows
+                        ])
+                        render.cleaned[key] = part
+                        # The raw rows are only kept until cleaned; two column
+                        # sets at most, for a view and a filtered view of it.
+                        render.rows = None
+                        while len(render.cleaned) > 2:
+                            render.cleaned.pop(next(iter(render.cleaned)))
+                if part is None:
+                    # Cleaned for other columns by a render that ran alongside.
+                    _, fresh = render_host(name, reuse=False)
+                    return part_of(name, fresh)
+                return part
+
+            parts: List[RowPart] = []
+            for name, render in renders:
+                if render.reads is not None:
+                    dependencies[name] = (render.stream, render.reads)
+                    if not render.reads.versions:
+                        expires = started + 0.5
+                if render.error:
+                    errors.append({"node": name, "error": render.error})
+                    continue
+                parts.append(part_of(name, render))
+            clean_rows = [row for part in parts for row in part.rows]
+            row_parts = parts
+            if not reusable:
+                # The site stamped on a row depends on every node's.
+                row_parts = None
                 if stamp_underlay_sites(clean_rows):
                     if "Site" not in all_columns:
                         all_columns.append("Site")
+            with self._lock:
+                for name, render in renders:
+                    if reusable and render.error is None and render.stream is not None and render.reads and render.reads.versions:
+                        cache_key_host = (report.name, param_key, name)
+                        self._host_renders[cache_key_host] = render
+                        self._host_renders.move_to_end(cache_key_host)
+                while len(self._host_renders) > _MAX_HOST_RENDERS:
+                    self._host_renders.popitem(last=False)
         res_table = Table({
             "report": report.name,
             "title": report.title,
@@ -1024,7 +1116,7 @@ class FabricStore:
             "render_ms": round((time.time() - started) * 1000, 1),
             "oldest_update": _oldest_update(self._streams_for(names)),
             **extra,
-        })
+        }, parts=row_parts)
         with self._lock:
             # Keep only the latest partial table for this query; accumulating
             # every growing copy would multiply a large fabric RIB in memory.

@@ -211,7 +211,7 @@ def test_paths_a_report_still_reads_are_not_retired(lldp_stream):
     stream, _device = lldp_stream
     stream.idle_timeout = 60.0
     assert stream.snapshot(LLDP_PATH) is not None
-    assert stream._retire_idle_paths() is False
+    assert not stream._retire_idle_paths()
     assert stream.status()["paths"][0]["path"] == LLDP_PATH
 
 
@@ -1520,6 +1520,53 @@ def test_a_reading_kept_before_a_getter_narrowed_its_paths_still_reads_back():
     (record,) = ReplayDevice(old).get_vxlan()["vxlan"]
     assert (record.name, record.ni, record.vni) == ("vxlan0.10", "mac-vrf-1", 10010)
     assert [d.vtep for d in record.destinations] == ["10.0.0.2"]
+
+
+def test_rib_paths_have_a_subscription_other_reports_do_not_restart():
+    """Opening a report replaces the RPC carrying its paths, and that RPC's
+    initial sync re-sends all of them: a full RIB must not ride on it."""
+    device = FakeDevice({RIB_PATH: RIB_RESPONSE, LLDP_PATH: LLDP_RESPONSE, IFSTATS_PATH: IFSTATS_RESPONSE})
+    stream = HostStream("leaf1", device, restart_debounce=TEST_DEBOUNCE)
+    try:
+        def paths(request):
+            return {s["path"] for s in request["subscription"]}
+
+        stream.ensure_paths([SubscriptionSpec(RIB_PATH, "state", mode="on_change")])
+        assert wait_for(lambda: len(device.subscribe_requests) == 1)
+        bulk = device.subscribers[0]
+        assert any("bgp-rib" in p for p in paths(device.subscribe_requests[0]))
+
+        stream.ensure_paths([SubscriptionSpec(LLDP_PATH, "state", mode="on_change")])
+        assert wait_for(lambda: len(device.subscribe_requests) == 2)
+        stream.ensure_paths([SubscriptionSpec(IFSTATS_PATH, "state")])
+        assert wait_for(lambda: len(device.subscribe_requests) == 3)
+        for request in device.subscribe_requests[1:]:
+            assert not any("bgp-rib" in p for p in paths(request))
+        # The RIB's subscription was never replaced.
+        assert not bulk.closed
+        assert wait_for(lambda: stream.connected)
+        assert stream.status()["sessions"] == 2
+    finally:
+        stream.stop()
+
+
+def test_a_main_channel_sync_does_not_sweep_the_rib():
+    """Each subscription's initial sync only speaks for its own paths."""
+    device = FakeDevice({RIB_PATH: RIB_RESPONSE, LLDP_PATH: LLDP_RESPONSE})
+    stream = HostStream("leaf1", device, restart_debounce=TEST_DEBOUNCE)
+    try:
+        stream.ensure_paths([SubscriptionSpec(RIB_PATH, "state", mode="on_change")])
+        stream.ensure_paths([SubscriptionSpec(LLDP_PATH, "state", mode="on_change")])
+        assert wait_for(lambda: all(ch.connected for ch in stream._channels.values()))
+        before = stream.snapshot(RIB_PATH)
+        assert before and before != [{next(iter(before[0])): {}}]
+        # The main RPC restarts and syncs without re-sending the RIB, which it
+        # does not carry: the RIB's entries stay.
+        stream._channels["main"].subscribed_from = time.monotonic() + 1
+        stream._apply({"sync_response": True}, channel=stream._channels["main"])
+        assert stream.snapshot(RIB_PATH) == before
+    finally:
+        stream.stop()
 
 
 def test_a_path_bootstrapped_during_a_resync_survives_the_swap():

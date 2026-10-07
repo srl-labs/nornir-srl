@@ -28,7 +28,7 @@ from ..reports import SERVER, ReportSpec, coerce_params, get_report, reports_for
 from .agent import NO_PROVIDER, ChatService
 from .snapshots import SnapshotStore, _slug, comparable
 from .store import FabricStore, ReportLoad, full_table_read
-from .table import serialize_table, table_digest
+from .table import SerializedTable, serialize_table, table_digest
 
 logger = logging.getLogger(__name__)
 
@@ -106,19 +106,28 @@ async def table_events(
     :data:`PROGRESS_INTERVAL` says the query is still running: the seconds it
     has taken, and what *progress* knows of how many nodes have answered. A
     slow first answer then reads as work in progress rather than as nothing.
+
+    After the first table, a change to a table built from per-node parts is
+    sent as a ``patch`` event: the rows of the nodes that changed, with the
+    order of all of them, rather than every row of the fabric again.
     """
     loop = asyncio.get_running_loop()
     last_digest = ""
     last_sent = 0.0
+    previous: Optional[SerializedTable] = None
 
-    def encoded_render():
+    def encoded_render(before: Optional[SerializedTable]):
         table = render()
-        return serialize_table(table), bool(table.get("loading"))
+        encoded = serialize_table(table)
+        # Built here, in the worker: a patch of most of a fabric is most of
+        # the table, too much to join on the event loop.
+        patch = encoded.patch_from(before) if before is not None and encoded.digest != before.digest else None
+        return encoded, bool(table.get("loading")), patch
 
     try:
         while not await is_disconnected() and not store.stopping:
             try:
-                task = asyncio.ensure_future(anyio.to_thread.run_sync(encoded_render))
+                task = asyncio.ensure_future(anyio.to_thread.run_sync(encoded_render, previous))
                 started = loop.time()
                 while not last_digest:
                     done, _pending = await asyncio.wait({task}, timeout=PROGRESS_INTERVAL)
@@ -133,7 +142,7 @@ async def table_events(
                         except Exception:  # noqa: BLE001 - the elapsed time still says it
                             pass
                     yield f"event: progress\ndata: {json.dumps(status)}\n\n".encode()
-                encoded, loading = await task
+                encoded, loading, patch = await task
             except (asyncio.CancelledError, GeneratorExit):
                 break
             except ValueError as exc:
@@ -158,7 +167,8 @@ async def table_events(
             if digest != last_digest:
                 last_digest = digest
                 last_sent = now
-                yield encoded.event
+                previous = encoded
+                yield patch if patch is not None else encoded.event
             elif now - last_sent > SSE_HEARTBEAT:
                 last_sent = now
                 yield b": keep-alive\n\n"

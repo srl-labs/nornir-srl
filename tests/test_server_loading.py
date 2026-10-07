@@ -22,6 +22,20 @@ from .test_server_app import anyio_backend, client, fabric, store  # noqa: F401 
 ATTR_ONE = "/network-instance[name=default]/bgp-rib/attr-sets/attr-set[index=1]"
 
 
+def rebuild(previous, chunk):
+    """The table a ``table`` or ``patch`` event makes, as the browser does."""
+    data = json.loads(chunk.split(b"data: ", 1)[1])
+    if chunk.startswith(b"event: table"):
+        at, parts = 0, {}
+        for key, count in data.get("row_parts") or []:
+            parts[key] = data["rows"][at:at + count]
+            at += count
+        data["_parts"] = parts
+        return data
+    parts = {key: data["parts"].get(key, previous["_parts"].get(key)) for key in data["order"]}
+    return {**data["head"], "rows": [row for rows in parts.values() for row in rows], "_parts": parts}
+
+
 def prepare_rib(devices):
     for device in devices.values():
         device.responses[ATTR_SETS_TABLE] = BGP_ATTR_RESPONSE
@@ -77,13 +91,25 @@ def test_small_ipv4_rib_does_not_load_attributes_from_other_families(store, monk
     assert device.gets == [(p, "state") for p in [path, *attr_paths]]
     assert list(stream._paths) == [path]
 
-    # Without a broad attribute subscription, attribute-only changes still
-    # expire the rendered table; route notifications are not required.
-    device.responses[attr_paths[0]] = [{attr_paths[0].lstrip("/"): {"as-path": {"segment": [{"member": [65100]}]}}}]
+    # An attribute set does not change under its index, so the Get's TTL
+    # passing re-reads nothing: refreshing ~8000 sets per node every 30s
+    # is what kept a large view re-rendering.
     now += stream.get_ttl + 1
+    assert fabric_store.table(report, hosts=["leaf1"], params={"scope": "all"}) is first
+    assert stream.gets == 2
+
+    # Changed attributes move a route to another index: the route's own
+    # update re-renders, and only the new index is read.
+    new_attr = "/network-instance[name=default]/bgp-rib/attr-sets/attr-set[index=2]"
+    device.responses[new_attr] = [{new_attr.lstrip("/"): {"as-path": {"segment": [{"member": [65100]}]}}}]
+    stream._apply({"update": {"update": [{
+        "path": "network-instance[name=default]/bgp-rib/afi-safi[afi-safi-name=ipv4-unicast]/ipv4-unicast/local-rib/route[prefix=10.0.0.1/32]/attr-id",
+        "val": 2,
+    }]}})
     refreshed = fabric_store.table(report, hosts=["leaf1"], params={"scope": "all"})
     assert {(r["NI"], r["as-path"]) for r in refreshed["rows"]} == {("default", "65100"), ("tenant1", "65002")}
     assert stream.gets == 3
+    assert device.gets[-1] == (new_attr, "state")
 
 
 @pytest.mark.parametrize("related", [False, True])
@@ -231,9 +257,9 @@ async def test_sse_keeps_loading_between_partial_and_complete_results(store, mon
             lambda: fabric_store.table(report, params={"scope": "all"}, progressive=True),
             60, disconnected,
         ):
-            if not chunk.startswith(b"event: table"):
+            if not chunk.startswith((b"event: table", b"event: patch")):
                 continue
-            table = json.loads(chunk.split(b"data: ", 1)[1])
+            table = rebuild(tables[-1] if tables else None, chunk)
             tables.append(table)
             if table.get("loading", {}).get("ready") == 1:
                 assert {row["Node"] for row in table["rows"]} == {"leaf1"}
