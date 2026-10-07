@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import threading
 import time
-from concurrent.futures import Future, ThreadPoolExecutor
+from concurrent.futures import CancelledError, Future, ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Set, Tuple
@@ -28,7 +28,7 @@ from ..reports import ReportSpec, SubscriptionSpec, get_report, reading_reports,
 from ..rows import cell, clean_columns, flatten, merge_fields, sub_item_keys
 from .devices import CachedDevice, DirectDevice, RecordingDevice
 from .readings import NOT_RECORDED, Recorder, TapDevice, TapDirectDevice
-from .stream import MAX_EVICTION_BACKLOG, HostStream
+from .stream import MAX_EVICTION_BACKLOG, DiscoveryRead, HostStream
 from .timeline import Reading, Timeline, Watcher
 from .topology import annotate_aliasing, annotate_health, build_topology, node_facts
 from .tree import key_matches
@@ -36,6 +36,20 @@ from .table import Table
 from .versions import ReadDependencies
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(eq=False)
+class ReportLoad:
+    """One browser stream's interest in unfinished node reads."""
+
+    closed: threading.Event = field(default_factory=threading.Event)
+
+
+@dataclass
+class _Activation:
+    future: Future
+    cancelled: threading.Event
+    readers: Set[Optional[ReportLoad]]
 
 
 @dataclass
@@ -100,6 +114,13 @@ class FabricStore:
         self._activated: Set[Tuple[str, str]] = set()
         #: Why a node could not serve a report, and when that was decided.
         self._activation_errors: Dict[Tuple[str, str], Tuple[float, str]] = {}
+        # Large first reads decode and build trees in Python. Bound their
+        # concurrency so the first few nodes finish sooner, and keep their
+        # workers separate from those rendering completed nodes.
+        self._activation_pool = ThreadPoolExecutor(
+            max_workers=max(1, min(workers, 4)), thread_name_prefix="fcli-activate"
+        )
+        self._activating: Dict[Tuple[str, str, HostStream], _Activation] = {}
         #: The tables being rendered right now, by cache key: a client asking
         #: for one already under way waits for it rather than rendering it too.
         self._rendering: Dict[Any, "Future[Dict[str, Any]]"] = {}
@@ -384,6 +405,7 @@ class FabricStore:
         self._stop.set()
         self.watcher.stop()
         self._background_pool.shutdown(wait=False, cancel_futures=True)
+        self._activation_pool.shutdown(wait=False, cancel_futures=True)
         with self._shutdown_lock:
             if self._stopped:
                 return
@@ -523,6 +545,8 @@ class FabricStore:
         report: ReportSpec,
         hosts: Optional[List[str]] = None,
         params: Optional[Mapping[str, Any]] = None,
+        *,
+        load: Optional[ReportLoad] = None,
     ) -> None:
         """Make sure every node streams the paths *report* needs.
 
@@ -534,12 +558,72 @@ class FabricStore:
         :attr:`~ReportSpec.path_params` - are a report of their own here: the
         paths are discovered, streamed and counted for each value of them apart.
         """
+        for future in self._start_activation(report, hosts, params, load):
+            future.result()
+
+    def cancel_load(self, load: ReportLoad) -> None:
+        """Release this viewer; cancel work that no other reader still needs.
+
+        An in-flight gNMI Get is allowed to return, then discovery stops before
+        its next read. None denotes a one-shot or background caller, whose
+        work must continue independently of any browser disconnecting.
+        """
         with self._lock:
-            names = hosts if hosts is not None else list(self._streams)
-            pending = [n for n in names if n in self._streams]
-        if not pending:
-            return
-        list(self._pool.map(lambda n: self._activate_host(report, n, params), pending))
+            load.closed.set()
+            for job in list(self._activating.values()):
+                job.readers.discard(load)
+                if not job.readers:
+                    job.cancelled.set()
+                    job.future.cancel()
+
+    def _start_activation(
+        self, report: ReportSpec, hosts: Optional[Sequence[str]], params: Optional[Mapping[str, Any]],
+        load: Optional[ReportLoad] = None,
+    ) -> List[Future]:
+        """Start each node's first read once, shared by concurrent clients."""
+        futures = []
+        with self._lock:
+            names = list(hosts) if hosts is not None else list(self._streams)
+        activation = self.activation_name(report, params)
+        for name in names:
+            with self._lock:
+                if self._stop.is_set() or (load is not None and load.closed.is_set()):
+                    break
+                stream = self._streams.get(name)
+                if stream is None:
+                    continue
+                report_key = (name, activation)
+                specs = self._specs.get(report_key)
+                ready = report_key in self._activated and report_key not in self._activation_errors
+            # Touch the node outside the store lock. Warm reports need no
+            # worker, even when every activation worker has a slow first read.
+            if ready and specs is not None and stream.touch_paths(specs):
+                with self._lock:
+                    if self._streams.get(name) is stream:
+                        continue
+            with self._lock:
+                if self._stop.is_set() or (load is not None and load.closed.is_set()):
+                    break
+                stream = self._streams.get(name)
+                if stream is None:
+                    continue
+                key = (name, activation, stream)
+                job = self._activating.get(key)
+                if job is None or job.cancelled.is_set():
+                    cancelled = threading.Event()
+                    pending = self._activation_pool.submit(self._activate_host, report, name, params, cancelled)
+                    job = self._activating[key] = _Activation(pending, cancelled, {load})
+
+                    def finished(_future: Future, key: Any = key, job: _Activation = job) -> None:
+                        with self._lock:
+                            if self._activating.get(key) is job:
+                                self._activating.pop(key, None)
+
+                    pending.add_done_callback(finished)
+                else:
+                    job.readers.add(load)
+                futures.append(job.future)
+        return futures
 
     @staticmethod
     def activation_name(report: ReportSpec, params: Optional[Mapping[str, Any]] = None) -> str:
@@ -547,7 +631,10 @@ class FabricStore:
         shaping = sorted((k, str(v)) for k, v in (params or {}).items() if k in report.path_params and v)
         return report.name + ("?" + "&".join(f"{k}={v}" for k, v in shaping) if shaping else "")
 
-    def _activate_host(self, report: ReportSpec, name: str, params: Optional[Mapping[str, Any]] = None) -> None:
+    def _activate_host(
+        self, report: ReportSpec, name: str, params: Optional[Mapping[str, Any]] = None,
+        cancelled: Optional[threading.Event] = None,
+    ) -> None:
         key = (name, self.activation_name(report, params))
         with self._lock:
             stream = self._streams.get(name)
@@ -571,9 +658,14 @@ class FabricStore:
                 del self._activation_errors[key]
             specs = self._specs.get(key)
         try:
+            if cancelled is not None and cancelled.is_set():
+                return
+            discovered: Dict[Tuple[str, str], DiscoveryRead] = {}
             if specs is None:
                 started = time.perf_counter()
-                specs = self._discover(report, stream, {k: v for k, v in (params or {}).items() if k in report.path_params})
+                specs = self._discover(
+                    report, stream, {k: v for k, v in (params or {}).items() if k in report.path_params}, discovered, cancelled
+                )
                 logger.debug(
                     "%s: report '%s' needs %d path(s), discovered in %.3fs: %s",
                     name,
@@ -583,10 +675,18 @@ class FabricStore:
                     ", ".join(s.path for s in specs) or "none",
                 )
                 with self._lock:
+                    if self._streams.get(name) is not stream:
+                        return
                     self._specs[key] = specs
-            stream.ensure_paths(specs)
+            if cancelled is not None and cancelled.is_set():
+                return
+            stream.ensure_paths(specs, discovered)
             with self._lock:
-                self._activated.add(key)
+                if self._streams.get(name) is stream:
+                    self._activated.add(key)
+        except CancelledError:
+            # Stopping a view is neither a node failure nor a completed read.
+            return
         except Exception as exc:  # noqa: BLE001 - reported per node in the UI
             logger.warning(
                 "%s: activating report '%s' failed: %s", name, report.name, exc
@@ -595,8 +695,9 @@ class FabricStore:
                 "%s: activating report '%s' failed", name, report.name, exc_info=exc
             )
             with self._lock:
-                self._activation_errors[key] = (time.time(), str(exc))
-                self._activated.add(key)
+                if self._streams.get(name) is stream:
+                    self._activation_errors[key] = (time.time(), str(exc))
+                    self._activated.add(key)
 
     #: How long the keys a node's routes are looked up by are kept: they are a
     #: Get of their own, and offering them is about what exists, not what changed.
@@ -686,7 +787,9 @@ class FabricStore:
         return {"ready": done, "total": len(nodes) * len(reports), "nodes": len(nodes)}
 
     def _discover(
-        self, report: ReportSpec, stream: HostStream, params: Optional[Mapping[str, Any]] = None
+        self, report: ReportSpec, stream: HostStream, params: Optional[Mapping[str, Any]] = None,
+        discovered: Optional[Dict[Tuple[str, str], DiscoveryRead]] = None,
+        cancelled: Optional[threading.Event] = None,
     ) -> List[SubscriptionSpec]:
         """Determine which gNMI paths a report needs on this node."""
         if report.subscribe:
@@ -699,7 +802,23 @@ class FabricStore:
                 )
                 for s in report.subscribe
             ]
-        recorder = RecordingDevice(stream.device, stream.discovery_get)
+        def read(path: str, datatype: str) -> List[Dict[str, Any]]:
+            if cancelled is not None and cancelled.is_set():
+                raise CancelledError()
+            response = stream.discovery_get(path, datatype, discovered)
+            if cancelled is not None and cancelled.is_set():
+                raise CancelledError()
+            return response
+
+        def lookup(paths: List[str], datatype: str, table: Optional[str]) -> List[Dict[str, Any]]:
+            if cancelled is not None and cancelled.is_set():
+                raise CancelledError()
+            response = stream.lookup(paths, datatype, table)
+            if cancelled is not None and cancelled.is_set():
+                raise CancelledError()
+            return response
+
+        recorder = RecordingDevice(stream.device, read, lookup)
         report.getter(recorder, **(params or {}))
         interval = self.sample_interval or report.sample_interval
         return [
@@ -717,6 +836,9 @@ class FabricStore:
         inv_filter: Optional[Dict[str, str]] = None,
         params: Optional[Dict[str, Any]] = None,
         hosts: Optional[Sequence[str]] = None,
+        *,
+        progressive: bool = False,
+        load: Optional[ReportLoad] = None,
     ) -> Dict[str, Any]:
         """Render *report* across the (filtered) inventory from streamed state.
 
@@ -724,6 +846,9 @@ class FabricStore:
         :attr:`ReportSpec.params`. They only ever narrow what the getter makes
         of the state already streamed, so they cost no gNMI and never change
         which paths a node subscribes to.
+
+        With *progressive*, return the nodes whose first reads have finished,
+        with ``loading`` counts until the remaining nodes finish or fail.
         """
         if self._stop.is_set():
             return {
@@ -738,13 +863,30 @@ class FabricStore:
                 "oldest_update": None,
             }
         names = self._targets(inv_filter, hosts)
-        self._heal_connections(names)
-        self.activate(report, names, params)
+        loading = None
+        if progressive:
+            activation = self.activation_name(report, params)
+            with self._lock:
+                ready = [n for n in names if n not in self._streams or (n, activation) in self._activated]
+            pending = [n for n in names if n not in ready]
+            # Inspect only completed nodes: bootstrap holds a node's tree
+            # lock, and a large healthy Get can exceed the reconnect grace.
+            self._heal_connections(ready)
+            if pending:
+                self._start_activation(report, pending, params, load)
+                loading = {"ready": len(ready), "total": len(names), "nodes": len(names)}
+                names = ready
+        else:
+            self._heal_connections(names)
+        if loading is None:
+            self.activate(report, names, params, load=load)
 
         inv_key = tuple(sorted(inv_filter.items())) if inv_filter else None
         param_key = tuple(sorted((params or {}).items())) or None
         host_key = tuple(sorted(hosts)) if hosts else None
         cache_key = (report.name, inv_key, param_key, host_key)
+        if loading is not None:
+            cache_key += ("loading", tuple(names))
         while True:
             now = time.time()
             with self._lock:
@@ -772,7 +914,7 @@ class FabricStore:
             logger.debug("report '%s': waiting for the render already under way", report.name)
             return pending.result()
         try:
-            res_table = self._render_table(report, inv_filter, params, names, cache_key)
+            res_table = self._render_table(report, inv_filter, params, names, cache_key, loading)
         except BaseException as exc:
             pending.set_exception(exc)
             raise
@@ -791,11 +933,12 @@ class FabricStore:
         params: Optional[Dict[str, Any]],
         names: List[str],
         cache_key: Any,
+        loading: Optional[Dict[str, int]] = None,
     ) -> Dict[str, Any]:
         """Render *report* over *names* and cache it under *cache_key*."""
         started = time.time()
         errors: List[Dict[str, str]] = []
-        extra: Dict[str, Any] = {}
+        extra: Dict[str, Any] = {"loading": loading} if loading is not None else {}
         dependencies: Dict[str, Tuple[HostStream, ReadDependencies]] = {}
         expires = float("inf")
         if report.name == CHECKS_REPORT:
@@ -858,13 +1001,18 @@ class FabricStore:
             "columns": all_columns,
             "rows": clean_rows,
             "errors": errors,
-            "nodes": len(names),
+            "nodes": loading["total"] if loading is not None else len(names),
             "generated": started,
             "render_ms": round((time.time() - started) * 1000, 1),
             "oldest_update": _oldest_update(self._streams_for(names)),
             **extra,
         })
         with self._lock:
+            # Keep only the latest partial table for this query; accumulating
+            # every growing copy would multiply a large fabric RIB in memory.
+            for key in list(self._table_cache):
+                if key != cache_key and key[:4] == cache_key[:4] and key[4:5] == ("loading",):
+                    del self._table_cache[key]
             # The cache is keyed by the inventory filter and the report's own
             # parameters as well as its name, and an API client picks both, so
             # the key space has no natural bound.

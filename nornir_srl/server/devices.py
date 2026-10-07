@@ -25,10 +25,10 @@ from ..connections.ifstats import InterfaceStatsMixin
 from ..connections.interfaces import NetworkInstanceMixin
 from ..connections.layer2 import Layer2Mixin
 from ..connections.neighbor_discovery import NeighborDiscoveryMixin
-from ..connections.routing import RoutingMixin
+from ..connections.routing import LOOKUP_BY_KEY_LIMIT, RoutingMixin
 from ..connections.system import SystemMixin
 from ..records import InterfaceStats
-from ..connections.routing import LOOKUP_BY_KEY_LIMIT, _suppress_pygnmi_client_logging, pick_entries
+from ..connections.routing import _suppress_pygnmi_client_logging, pick_entries
 from .stream import HostStream
 
 logger = logging.getLogger(__name__)
@@ -69,9 +69,11 @@ class RecordingDevice(MixinDevice):
         self,
         device: Any,
         getter: Optional[Callable[[str, str], List[Dict[str, Any]]]] = None,
+        lookup: Optional[Callable[[List[str], str, Optional[str]], List[Dict[str, Any]]]] = None,
     ) -> None:
         self._device = device
         self._getter = getter
+        self._lookup = lookup
         self.capabilities = getattr(device, "capabilities", None)
         self.recorded: List[Tuple[str, str]] = []
 
@@ -105,19 +107,18 @@ class RecordingDevice(MixinDevice):
     def lookup(
         self, paths: List[str], datatype: Optional[str] = "state", table: Optional[str] = None
     ) -> List[Dict[str, Any]]:
-        """Answered, but not recorded: what a getter asks for by key is not
-        a path to subscribe to; see :meth:`HostStream.lookup`. The *table*
-        the keys are in is: streamed, it answers every lookup in it."""
+        """Small lookups reuse TTL-cached entries without subscribing to them.
+
+        Only a lookup large enough to read the whole table also records it
+        for subscription. A few IPv4 routes must not download and stream
+        every EVPN attribute set just because they share the same table.
+        """
         datatype = datatype or "state"
-        if table is not None and (table, datatype) not in self.recorded:
-            self.recorded.append((table, datatype))
         if table is not None and len(paths) > LOOKUP_BY_KEY_LIMIT:
-            if self._getter is None:
-                with _suppress_pygnmi_client_logging():
-                    resp = self._device.get(paths=[table], datatype=datatype)
-            else:
-                resp = self._getter(table, datatype)
-            return pick_entries(table, resp, paths)
+            # Share this response with bootstrap, avoiding a second large Get.
+            return pick_entries(table, self.get([table], datatype), paths)
+        if self._lookup is not None:
+            return self._lookup(paths, datatype, table)
         if self._getter is None:
             with _suppress_pygnmi_client_logging():
                 return self._device.get(paths=paths, datatype=datatype)

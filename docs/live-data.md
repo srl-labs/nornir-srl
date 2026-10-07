@@ -19,7 +19,11 @@ flowchart TD
 When a report is opened for the first time, the server executes its getter once against a recording proxy of the gNMI connection. This captures the exact set of gNMI paths the report reads. As a result, subscription paths never have to be manually declared or maintained separately from report getters.
 
 ### 2. State bootstrapping & shape pinning
-Each discovered path is bootstrapped with a standard gNMI `Get`. This seeds an in-memory state tree for the node and pins down the response structure the report getter expects.
+Each discovered path seeds an in-memory state tree for the node and pins down the response structure the report getter expects. The server reuses the discovery response for bootstrap, unless a related update arrived during discovery. Predeclared paths and later resynchronizations use a fresh gNMI `Get`. Small lookups fetch only the referenced keys in one batched Get, shared with the first render through the fallback cache. Above 10,000 keys, discovery reads the lookup table once and reuses that response for bootstrap and subscription. Concurrent clients share each node's activation.
+
+When a BGP RIB view lists all routes, the browser receives partial tables as individual nodes finish their first reads. It shows how many nodes have answered and keeps the loading indicator until every selected node has finished or reported an error. A node's routes arrive together, after its routes and attributes have been read; this is progress across nodes, not pagination of a single node's Get. At most four nodes activate concurrently to limit competition for CPU and memory during large reads. Activation has separate workers so it cannot queue completed nodes' renders behind it. The one-shot report API and saved readings still wait for the complete result.
+
+BGP RIB reports show **Stop loading** while a query is running. It closes that browser's stream and preserves the rows already displayed; **Resume** continues loading. For full-table reads, queued node activations are cancelled when no other viewer or background request needs them. A discovery Get already in flight may finish, then cancellation stops the next discovery read. Existing shared subscriptions and reads used by other viewers continue. Leaving the report also releases its unfinished activation work.
 
 ### 3. STREAM subscriptions: ON_CHANGE and SAMPLE
 A gNMI `Subscribe` in STREAM mode keeps the node's state tree current. Report getters execute directly against this local tree instead of querying the physical device, rendering tables with zero device round-trips.
@@ -35,6 +39,10 @@ Because SR Linux streams entire subtrees when subscribing to a branch, multiple 
 
 ### 4. Fallback polling & cache resynchronization
 Paths that cannot be streamed fall back to short-TTL `Get` operations. Additionally, every node is fully re-read every `--resync` seconds (default: 300s) to guarantee that missed deletions cannot leave stale rows behind. Re-sync sweeps are executed round-robin across nodes rather than simultaneously.
+
+BGP routes reference separate attribute sets for fields such as RT, AS-path and communities. If a referenced set is missing from the streamed tree, the server checks the device with a batched fallback `Get`. Both found and absent answers expire after the fallback TTL, and newly streamed attributes take precedence immediately. This lets missing attributes recover without requiring a full report reload or adding subscriptions for individual attribute IDs.
+
+Small BGP reports subscribe to their routes without subscribing to the shared attribute table, which also contains attributes for other address families. Their attribute lookups reuse an existing table subscription when available, or use the fallback Get cache (30 seconds by default). Attribute-only changes therefore refresh after that TTL when no report is streaming the attribute table.
 
 Whatever arrives while a node is being re-read is recorded and applied again, in order, to the re-read tree once it is swapped in. SAMPLE would re-send it on the next tick, but ON_CHANGE never would. When one path covers another, such as `route-table/ipv4-unicast` and its `route/ipv4-prefix` keys, only the wider path's `Get` is written to the tree. A `Get` does not say which leaves key a list, so the narrower answer would otherwise replace every entry with its keys alone.
 

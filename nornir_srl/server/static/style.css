@@ -717,6 +717,11 @@ body {
   font-weight: 600;
 }
 
+#stop-loading {
+  margin-left: auto;
+  flex-shrink: 0;
+}
+
 /* An indeterminate bar along the top edge: something is moving. */
 .query-progress-bar {
   position: absolute;

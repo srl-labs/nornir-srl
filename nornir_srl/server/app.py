@@ -27,7 +27,7 @@ from ..lenses import LENSES_BY_NAME, coerce_lens_params, lenses_for
 from ..reports import SERVER, ReportSpec, coerce_params, get_report, reports_for
 from .agent import NO_PROVIDER, ChatService
 from .snapshots import SnapshotStore, _slug, comparable
-from .store import FabricStore
+from .store import FabricStore, ReportLoad
 from .table import serialize_table, table_digest
 
 logger = logging.getLogger(__name__)
@@ -112,7 +112,8 @@ async def table_events(
     last_sent = 0.0
 
     def encoded_render():
-        return serialize_table(render())
+        table = render()
+        return serialize_table(table), bool(table.get("loading"))
 
     try:
         while not await is_disconnected() and not store.stopping:
@@ -132,7 +133,7 @@ async def table_events(
                         except Exception:  # noqa: BLE001 - the elapsed time still says it
                             pass
                     yield f"event: progress\ndata: {json.dumps(status)}\n\n".encode()
-                encoded = await task
+                encoded, loading = await task
             except (asyncio.CancelledError, GeneratorExit):
                 break
             except ValueError as exc:
@@ -161,7 +162,7 @@ async def table_events(
             elif now - last_sent > SSE_HEARTBEAT:
                 last_sent = now
                 yield b": keep-alive\n\n"
-            deadline = loop.time() + interval
+            deadline = loop.time() + (min(interval, PROGRESS_INTERVAL) if loading else interval)
             while loop.time() < deadline:
                 if store.stopping or await is_disconnected():
                     return
@@ -519,7 +520,9 @@ def create_app(
             raise KeyError(f"report '{name}' cannot be streamed")
         return report
 
-    def renderer(request: Request) -> Callable[[], Dict[str, Any]]:
+    def renderer(
+        request: Request, *, progressive: bool = False, load: Optional[ReportLoad] = None
+    ) -> Callable[[], Dict[str, Any]]:
         """What answers the named report or lens, with the request's arguments.
 
         A lens and a report are asked for the same way and answer in the same
@@ -536,7 +539,8 @@ def create_app(
         report = streamable_report(name)
         params = coerce_params(report, request.query_params)
         hosts = parse_nodes(request.query_params.get("node"))
-        return lambda: store.table(report, inv_filter, params, hosts)
+        gradual = progressive and report.name.startswith("bgp_rib") and params.get("scope") == "all"
+        return lambda: store.table(report, inv_filter, params, hosts, progressive=gradual, load=load if gradual else None)
 
     def progress_of(request: Request) -> Callable[[], Dict[str, Any]]:
         """How far the nodes are with what the named report or lens reads."""
@@ -590,8 +594,9 @@ def create_app(
         return Response(body, media_type="application/json")
 
     async def report_stream(request: Request) -> Response:
+        load = ReportLoad()
         try:
-            render = renderer(request)
+            render = renderer(request, progressive=True, load=load)
         except KeyError as exc:
             return JSONResponse({"error": str(exc)}, status_code=404)
         except ValueError as exc:
@@ -601,15 +606,18 @@ def create_app(
         except ValueError:
             interval = refresh
 
+        async def events() -> AsyncIterator[bytes]:
+            try:
+                async for event in table_events(
+                    store, request.path_params["name"], render, interval,
+                    request.is_disconnected, progress_of(request),
+                ):
+                    yield event
+            finally:
+                store.cancel_load(load)
+
         return StreamingResponse(
-            table_events(
-                store,
-                request.path_params["name"],
-                render,
-                interval,
-                request.is_disconnected,
-                progress_of(request),
-            ),
+            events(),
             media_type="text/event-stream",
             headers=_SSE_HEADERS,
         )

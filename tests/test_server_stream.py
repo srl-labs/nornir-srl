@@ -1431,9 +1431,34 @@ def test_lookups_in_a_streamed_table_are_read_off_it_by_key():
     try:
         stream.ensure_paths([SubscriptionSpec(ATTR_TABLE, "state", mode="on_change")])
         gets = stream.gets
-        found = stream.lookup([_attr(3), _attr(9)], "state", ATTR_TABLE)
-        assert found == [{_attr(3).lstrip("/"): {"med": 3}}, {}]
+        found = stream.lookup([_attr(3), _attr(4)], "state", ATTR_TABLE)
+        assert found == [{_attr(i).lstrip("/"): {"med": i}} for i in (3, 4)]
         assert stream.gets == gets
+    finally:
+        stream.stop()
+
+
+@pytest.mark.parametrize("limit", [2, 10])
+def test_missing_streamed_bgp_attributes_are_recovered_in_one_get(monkeypatch, limit):
+    monkeypatch.setattr(stream_module, "LOOKUP_BY_KEY_LIMIT", limit)
+    paths = [_attr(i) for i in (1, 3, 4)]
+    device = FakeDevice({
+        ATTR_TABLE: ATTR_TABLE_RESPONSE,
+        **{_attr(i): [{_attr(i).lstrip("/"): {"index": str(i), "med": i}}] for i in (1, 3, 4)},
+    })
+    stream = HostStream("leaf1", device, restart_debounce=TEST_DEBOUNCE)
+    try:
+        stream.ensure_paths([SubscriptionSpec(ATTR_TABLE, "state", mode="on_change")])
+        stream._apply({"update": {"delete": paths}})
+        gets = stream.gets
+        device.gets.clear()
+        found = stream.lookup([_attr(0), *paths], "state", ATTR_TABLE)
+        assert [next(iter(f.values()))["med"] for f in found] == [0, 1, 3, 4]
+        assert stream.gets == gets + 1
+        assert device.gets == [(p, "state") for p in ([ATTR_TABLE] if limit == 2 else paths)]
+        assert stream.lookup([_attr(0), *paths], "state", ATTR_TABLE) == found
+        assert stream.gets == gets + 1
+        assert list(stream._paths) == [ATTR_TABLE], "recovery does not add per-key subscriptions"
     finally:
         stream.stop()
 
@@ -1450,12 +1475,17 @@ def test_many_lookups_in_a_table_nothing_streams_are_one_get_of_it(monkeypatch):
         stream.stop()
 
 
-def test_discovery_subscribes_to_the_table_a_getter_looks_entries_up_in(lldp_stream):
+@pytest.mark.parametrize("large", [False, True])
+def test_discovery_subscribes_to_lookup_tables_only_for_large_reads(lldp_stream, monkeypatch, large):
     stream, device = lldp_stream
+    if large:
+        monkeypatch.setattr("nornir_srl.server.devices.LOOKUP_BY_KEY_LIMIT", 0)
+    device.responses[ATTR_TABLE] = ATTR_TABLE_RESPONSE
     device.responses[_attr(1)] = [{_attr(1).lstrip("/"): {"med": 1}}]
     recorder = RecordingDevice(device, stream.discovery_get)
-    recorder.lookup([_attr(1)], "state", ATTR_TABLE)
-    assert recorder.recorded == [(ATTR_TABLE, "state")]
+    result = recorder.lookup([_attr(1)], "state", ATTR_TABLE)
+    assert next(iter(result[0].values()))["med"] == 1
+    assert recorder.recorded == ([(ATTR_TABLE, "state")] if large else [])
 
 
 def test_a_reading_kept_before_a_getter_narrowed_its_paths_still_reads_back():

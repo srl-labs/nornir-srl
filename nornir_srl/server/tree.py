@@ -339,9 +339,11 @@ def _merge_into(
     key_hints: Optional[Dict[str, List[str]]] = None,
     pin: bool = False,
 ) -> None:
-    """Merge a decoded JSON object into a tree node."""
-    for raw_key, raw_val in value.items():
-        _set_child(node, strip_module(raw_key), strip_values(raw_val), key_hints, pin)
+    """Merge an object already normalized by :func:`insert` into a tree node."""
+    # insert strips the entire value once. Repeating that recursive walk at
+    # every container level copies large RIBs and attribute tables repeatedly.
+    for key, child in value.items():
+        _set_child(node, key, child, key_hints, pin)
 
 
 def strip_values(value: Any) -> Any:

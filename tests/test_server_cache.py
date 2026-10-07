@@ -5,17 +5,19 @@ import json
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+from copy import deepcopy
 from dataclasses import replace
 
 import pytest
 
-from nornir_srl.reports import get_report
+from nornir_srl.connections.routing import ATTR_SETS_TABLE
+from nornir_srl.reports import SubscriptionSpec, get_report
 from nornir_srl.server.app import table_events
 from nornir_srl.server.stream import HostStream
 from nornir_srl.server.table import Table, serialize_table, table_digest
 from nornir_srl.server.versions import PathVersions, shape
 
-from .fakes import FakeDevice, LLDP_PATH, LLDP_RESPONSE
+from .fakes import FakeDevice, LLDP_PATH, LLDP_RESPONSE, RIB_PATH, RIB_RESPONSE
 from .test_server_app import anyio_backend, fabric, store  # noqa: F401 - shared fixtures
 
 
@@ -100,13 +102,81 @@ def test_fallback_ttl_is_not_extended_by_rendering_a_table(store, monkeypatch):
     report = replace(get_report("lldp"), name="fallback-probe", subscribe=(),
                      getter=lambda d: d.get_lldp_sum(interface="ethernet-1/1"))
     # No subscription: exercise the report's fallback Get on every render.
-    monkeypatch.setattr(fabric, "activate", lambda *args: None)
+    monkeypatch.setattr(fabric, "activate", lambda *args, **kwargs: None)
     before = fabric.table(report, hosts=["leaf1"])
     assert devices["leaf1"].gets.count((path, "state")) == 1
     clock += 2
     after = fabric.table(report, hosts=["leaf1"])
     assert after is not before
     assert devices["leaf1"].gets.count((path, "state")) == 2
+
+
+@pytest.mark.parametrize("available", [True, False])
+def test_evpn_attributes_missing_from_the_stream_are_retried_and_expire(store, monkeypatch, available):
+    fabric, devices = store
+    stream, device = fabric._streams["leaf1"], devices["leaf1"]
+    rib = deepcopy(RIB_RESPONSE)
+    post = rib[0]["network-instance"][0]["bgp-rib"]["afi-safi"][0]["evpn"]["rib-in-out"]["rib-in-post"]
+    post["ip-prefix-route"] = post.pop("mac-ip-route")
+    post["ip-prefix-route"][0].update({"ip-prefix": "10.0.1.0/24", "route-distinguisher": "10.0.1.1:9001"})
+    device.responses[RIB_PATH.replace("mac-ip-route", "ip-prefix-route")] = rib
+    attrs = {
+        "index": 1,
+        "origin": "igp",
+        "next-hop": "10.0.1.1",
+        "as-path": {"segment": [{"member": [65500, 65001]}]},
+        "communities": {"ext-community": ["target:9001:9001", "bgp-tunnel-encap:VXLAN"]},
+    }
+    device.responses[ATTR_SETS_TABLE] = [
+        {"network-instance": [{"name": "default", "bgp-rib": {"attr-sets": {"attr-set": [attrs]}}}]}
+    ]
+    path = "/network-instance[name=default]/bgp-rib/attr-sets/attr-set[index=1]"
+    report = get_report("bgp_rib_evpn_5")
+    # Another, large RIB view can already be streaming the shared table.
+    stream.ensure_paths([SubscriptionSpec(ATTR_SETS_TABLE, "state", mode="on_change")])
+
+    def render():
+        return fabric.table(report, hosts=["leaf1"], params={"scope": "all"})
+
+    first = render()
+    assert not first["errors"]
+    assert len(first["rows"]) == 1
+    row = first["rows"][0]
+    assert row["RT"] == "9001:9001"
+    assert row["as-path"] == "65500, 65001"
+    assert "target:9001:9001" in row["communities"]
+
+    # Routes and attributes arrive independently. A referenced attribute can
+    # be absent locally even though a direct Get still finds it on the node.
+    device.responses[path] = [{path.lstrip("/"): attrs}] if available else []
+    apply(stream, path, delete=True)
+    now = time.time() + 1
+    monkeypatch.setattr("nornir_srl.server.stream.time.time", lambda: now)
+    recovered = render()
+    assert device.gets.count((path, "state")) == 1
+    assert recovered["rows"][0]["RT"] == ("9001:9001" if available else "")
+    if available:
+        assert recovered["rows"] == first["rows"]
+
+    # Positive and negative answers share the original Get's TTL. Unrelated
+    # telemetry does not trigger more Gets; an empty answer cannot live forever.
+    device.responses[path] = [{path.lstrip("/"): attrs}]
+    now += stream.get_ttl - 1
+    apply(stream, "/system/information/current-datetime", "later")
+    assert render() is recovered
+    assert device.gets.count((path, "state")) == 1
+    now += 2
+    refreshed = render()
+    assert refreshed["rows"] == first["rows"]
+    assert device.gets.count((path, "state")) == 2
+
+    # Streamed state takes precedence as soon as it catches up, even while a
+    # fallback answer is cached, and goes back to needing no device reads.
+    changed = {**attrs, "communities": {"ext-community": ["target:9002:9002"]}}
+    apply(stream, path, changed)
+    age_tables(fabric)
+    assert render()["rows"][0]["RT"] == "9002:9002"
+    assert device.gets.count((path, "state")) == 2
 
 
 def test_fallback_cache_survives_unrelated_updates_but_not_ancestor_delete():

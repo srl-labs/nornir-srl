@@ -25,7 +25,7 @@ from ..connections.helpers import strip_modules
 # One suppressor for the whole process: it swaps pygnmi's handlers out and back
 # under a refcount, and two copies with a count each would restore them while
 # the other still meant them gone.
-from ..connections.routing import LOOKUP_BY_KEY_LIMIT, _gnmi_path_missing, _suppress_pygnmi_client_logging, pick_entries
+from ..connections.routing import ATTR_SETS_TABLE, LOOKUP_BY_KEY_LIMIT, _gnmi_path_missing, _suppress_pygnmi_client_logging, pick_entries
 from ..reports import SubscriptionSpec
 from .tree import (
     ListNode,
@@ -103,6 +103,15 @@ class PathState:
     streamable: bool = True
     #: When a report last read this path, used to retire unwatched paths.
     last_read: float = field(default_factory=time.time)
+
+
+@dataclass(frozen=True)
+class DiscoveryRead:
+    """A transient discovery response that can also seed a subscription."""
+
+    response: List[Dict[str, Any]]
+    at: float
+    version: int
 
 
 class RateTracker:
@@ -430,7 +439,20 @@ class HostStream:
     # subscription lifecycle
     # ------------------------------------------------------------------ #
 
-    def ensure_paths(self, specs: List[SubscriptionSpec]) -> None:
+    def touch_paths(self, specs: List[SubscriptionSpec]) -> bool:
+        """Keep existing paths alive without queuing behind other nodes' Gets."""
+        with self._lock:
+            if any(spec.path not in self._paths for spec in specs):
+                return False
+            now = time.time()
+            for spec in specs:
+                self._paths[spec.path].last_read = now
+            return True
+
+    def ensure_paths(
+        self, specs: List[SubscriptionSpec],
+        discovered: Optional[Dict[Tuple[str, str], DiscoveryRead]] = None,
+    ) -> None:
         """Make sure every spec in *specs* is subscribed.
 
         Newly added paths are bootstrapped with a ``Get`` right away so the
@@ -461,7 +483,8 @@ class HostStream:
         # Widest first, so a path is only ever read into the tree once nothing
         # already there holds more of it.
         for spec in sorted(added, key=lambda s: len(parse_path(s.path))):
-            self._bootstrap(spec, self._tree_for(spec, known, self._tree))
+            seed = (discovered or {}).get((spec.path, spec.datatype))
+            self._bootstrap(spec, self._tree_for(spec, known, self._tree), seed)
         self._dirty.set()
 
     @staticmethod
@@ -480,7 +503,9 @@ class HostStream:
             return {}
         return tree
 
-    def _bootstrap(self, spec: SubscriptionSpec, tree: Dict[str, Any]) -> bool:
+    def _bootstrap(
+        self, spec: SubscriptionSpec, tree: Dict[str, Any], seed: Optional[DiscoveryRead] = None
+    ) -> bool:
         """Seed *tree* with a gNMI Get and learn the response envelope keys.
 
         Returns whether the ``Get`` itself succeeded, which is a different
@@ -489,6 +514,13 @@ class HostStream:
         """
         with self._lock:
             state = self._paths.get(spec.path)
+            # A notification received during discovery makes its response too
+            # old to seed the tree. Validate and absorb under the same lock.
+            if state is not None and seed is not None and seed.version == self._versions.version(shape(spec.path)):
+                self._absorb(spec, seed.response, tree)
+                self._direct_cache[(spec.path, spec.datatype)] = (seed.at, seed.response)
+                self._direct_versions[(spec.path, spec.datatype)] = self._versions.version(shape(spec.path))
+                return True
         if state is None:  # retired while we were getting to it
             return False
         rejected = self._rejected.get((spec.path, spec.datatype))
@@ -1267,7 +1299,9 @@ class HostStream:
         list, out of a cache kept for :attr:`get_ttl`, or else with one Get for
         all the paths still missing - of their *table* whole, when they are
         too many to name. Entries fetched with a Get are kept for their TTL;
-        streamed entries are always read straight from the tree.
+        streamed entries are always read straight from the tree. BGP attribute
+        sets still referenced by routes are verified with a Get if absent from
+        the tree: route and attribute updates can arrive independently.
         """
         now = time.time()
         with self._lock:
@@ -1278,7 +1312,11 @@ class HostStream:
                 del self._lookup_cache[key]
             missing: List[str] = []
             for path in paths:
-                if path in answers:
+                # A route's attribute reference warrants checking an empty
+                # streamed answer. Reuse the bounded fallback cache, including
+                # its expiry dependency, so a missing set cannot leave a
+                # rendered route without its attributes indefinitely.
+                if path in answers and (table != ATTR_SETS_TABLE or answers[path]):
                     continue
                 cached = self._lookup_cache.get((path, datatype))
                 if cached is not None:
@@ -1481,13 +1519,24 @@ class HostStream:
         """
         return self._raw_get(path, datatype)
 
-    def discovery_get(self, path: str, datatype: str) -> List[Dict[str, Any]]:
+    def discovery_get(
+        self, path: str, datatype: str,
+        discovered: Optional[Dict[Tuple[str, str], DiscoveryRead]] = None,
+    ) -> List[Dict[str, Any]]:
         """A Get made while discovering which paths a report needs.
 
-        Uncached on purpose - discovery is what decides the shape of everything
-        that follows - but otherwise accounted for like any other Get.
+        Keep responses only for this activation so bootstrap can reuse them.
+        A later resync still performs a fresh Get.
         """
-        return self._raw_get(path, datatype)
+        with self._lock:
+            version = self._versions.version(shape(path))
+            previous = (discovered or {}).get((path, datatype))
+            if previous is not None and previous.version == version:
+                return previous.response
+        response = self._raw_get(path, datatype)
+        if discovered is not None:
+            discovered[(path, datatype)] = DiscoveryRead(response, time.time(), version)
+        return response
 
     @property
     def getting(self) -> bool:

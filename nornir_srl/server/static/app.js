@@ -57,6 +57,7 @@
     liveLabel: el("live-label"),
     queryProgress: el("query-progress"),
     queryProgressLabel: el("query-progress-label"),
+    stopLoading: el("stop-loading"),
     main: document.querySelector(".main"),
     globalSearch: el("global-search"),
     invFilter: el("inv-filter"),
@@ -202,6 +203,7 @@
     sort: { column: null, dir: 1 },
     windowSize: WINDOW_STEP,
     paused: false,
+    loadStopped: false,
     source: null,
     previous: new Map(), // row identity -> previous row values
     identityColumn: null,
@@ -3550,6 +3552,11 @@
     closeSideDrawer();
     // Whatever was being queried is not what is being looked at any more.
     endQuery();
+    if (state.loadStopped) {
+      state.loadStopped = false;
+      state.paused = false;
+      dom.pause.textContent = "⏸ Pause";
+    }
     if (state.report && !fromPop) {
       saveReportPreferences();
       syncCurrentVisit();
@@ -3833,16 +3840,15 @@
   }
 
   // ------------------------------------------------------ query progress
-  // From opening a stream to its first table, which for a BGP RIB can take a
-  // while: a strip under the toolbar says the query runs, for how long, and -
-  // from the server's progress events - how many nodes have answered. What is
-  // still on screen from before is dimmed, as it is not the answer yet.
+  // Keep progress visible through partial tables until every node answers.
+  // Only rows left over from the previous query are dimmed.
   let queryTimer = null;
 
   function startQuery() {
     endQuery();
-    state.query = { since: performance.now(), status: null };
+    state.query = { since: performance.now(), status: null, answered: false };
     dom.queryProgress.hidden = false;
+    dom.stopLoading.hidden = !state.report || !state.report.name.startsWith("bgp_rib");
     setLive("busy", "querying");
     dom.empty.textContent = "Waiting for the first answer from the fabric…";
     // Nothing on screen yet - a report just opened, or the page came from a
@@ -3867,6 +3873,7 @@
     queryTimer = null;
     state.query = null;
     dom.queryProgress.hidden = true;
+    dom.stopLoading.hidden = true;
     dom.main.classList.remove("is-querying");
     dom.empty.textContent = "No data.";
   }
@@ -3885,6 +3892,24 @@
     }
     if (seconds > 15) parts.push(" · large tables take a while on the first read");
     dom.queryProgressLabel.replaceChildren(...parts);
+  }
+
+  function stopLoading() {
+    if (!state.query || !state.report || !state.report.name.startsWith("bgp_rib")) return;
+    const { status, answered } = state.query;
+    if (state.source) state.source.close();
+    state.source = null;
+    state.paused = true;
+    state.loadStopped = true;
+    dom.pause.textContent = "▶ Resume";
+    endQuery();
+    setLive("paused", "stopped");
+    dom.streamInfo.textContent = answered && status && status.total
+      ? `Loading stopped · partial results · ${status.ready} of ${status.total} nodes answered`
+      : "Loading stopped before a new result arrived";
+    dom.empty.textContent = "Loading stopped. Select Resume to continue.";
+    renderBody();
+    dom.pause.focus();
   }
 
   function connect() {
@@ -3914,7 +3939,7 @@
     params.set("refresh", dom.refresh.value);
     if (state.report.needs_query && listsAll()) {
       dom.streamInfo.textContent =
-        "listing every route of every node: on a large fabric this takes minutes, and keeps them streaming";
+        "reading every node’s routes; results appear as each node answers";
     }
     const source = new EventSource(
       `/api/stream/${encodeURIComponent(state.report.name)}?${params}`
@@ -3930,11 +3955,23 @@
       }
     });
     source.addEventListener("table", (event) => {
-      if (state.source === source) endQuery();
-      setLive("live", "live");
-      ingest(JSON.parse(event.data));
+      if (state.source !== source) return;
+      const table = JSON.parse(event.data);
+      if (table.loading) {
+        if (!state.query) startQuery();
+        state.query.answered = true;
+        updateQuery(table.loading);
+        dom.main.classList.remove("is-querying");
+        dom.empty.textContent = "Waiting for routes from the remaining nodes…";
+        setLive("busy", "loading");
+      } else {
+        endQuery();
+        setLive("live", "live");
+      }
+      ingest(table);
     });
     source.addEventListener("error", (event) => {
+      if (state.source !== source) return;
       if (event.data) {
         try {
           showErrors([{ node: "server", error: JSON.parse(event.data).error }]);
@@ -3988,7 +4025,9 @@
       renderColumnsMenu();
     }
     showErrors(state.errors);
-    dom.streamInfo.textContent = `${table.nodes} node(s), rendered in ${table.render_ms} ms`;
+    dom.streamInfo.textContent = table.loading
+      ? `Partial results · ${table.loading.ready} of ${table.loading.total} nodes answered`
+      : `${table.nodes} node(s), rendered in ${table.render_ms} ms`;
     dom.updated.textContent = "updated " + new Date().toLocaleTimeString();
     renderBody();
   }
@@ -7438,12 +7477,16 @@
     renderBody();
   });
 
+  dom.stopLoading.addEventListener("click", stopLoading);
+
   dom.pause.addEventListener("click", () => {
     state.paused = !state.paused;
+    state.loadStopped = false;
     dom.pause.textContent = state.paused ? "▶ Resume" : "⏸ Pause";
     if (state.paused) {
       if (state.source) state.source.close();
       state.source = null;
+      endQuery();
       setLive("paused", "paused");
     } else if (state.report && state.report.name === "topology") {
       loadTopology();
