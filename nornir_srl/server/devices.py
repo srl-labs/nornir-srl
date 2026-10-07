@@ -25,10 +25,10 @@ from ..connections.ifstats import InterfaceStatsMixin
 from ..connections.interfaces import NetworkInstanceMixin
 from ..connections.layer2 import Layer2Mixin
 from ..connections.neighbor_discovery import NeighborDiscoveryMixin
-from ..connections.routing import RoutingMixin
+from ..connections.routing import LOOKUP_BY_KEY_LIMIT, RoutingMixin
 from ..connections.system import SystemMixin
 from ..records import InterfaceStats
-from ..connections.routing import _suppress_pygnmi_client_logging
+from ..connections.routing import _suppress_pygnmi_client_logging, pick_entries
 from .stream import HostStream
 
 logger = logging.getLogger(__name__)
@@ -69,9 +69,11 @@ class RecordingDevice(MixinDevice):
         self,
         device: Any,
         getter: Optional[Callable[[str, str], List[Dict[str, Any]]]] = None,
+        lookup: Optional[Callable[[List[str], str, Optional[str]], List[Dict[str, Any]]]] = None,
     ) -> None:
         self._device = device
         self._getter = getter
+        self._lookup = lookup
         self.capabilities = getattr(device, "capabilities", None)
         self.recorded: List[Tuple[str, str]] = []
 
@@ -94,6 +96,33 @@ class RecordingDevice(MixinDevice):
         for path in paths:
             result.extend(self._getter(path, datatype or "config"))
         return result
+
+    def query(self, paths: List[str], datatype: Optional[str] = "state") -> List[Dict[str, Any]]:
+        """Answered, but not recorded: a narrow read is not a path to subscribe to."""
+        if self._getter is None:
+            with _suppress_pygnmi_client_logging():
+                return self._device.get(paths=paths, datatype=datatype)
+        return [payload for path in paths for payload in self._getter(path, datatype or "state")]
+
+    def lookup(
+        self, paths: List[str], datatype: Optional[str] = "state", table: Optional[str] = None
+    ) -> List[Dict[str, Any]]:
+        """Small lookups reuse TTL-cached entries without subscribing to them.
+
+        Only a lookup large enough to read the whole table also records it
+        for subscription. A few IPv4 routes must not download and stream
+        every EVPN attribute set just because they share the same table.
+        """
+        datatype = datatype or "state"
+        if table is not None and len(paths) > LOOKUP_BY_KEY_LIMIT:
+            # Share this response with bootstrap, avoiding a second large Get.
+            return pick_entries(table, self.get([table], datatype), paths)
+        if self._lookup is not None:
+            return self._lookup(paths, datatype, table)
+        if self._getter is None:
+            with _suppress_pygnmi_client_logging():
+                return self._device.get(paths=paths, datatype=datatype)
+        return [next(iter(self._getter(path, datatype)), {}) for path in paths]
 
 
 class DirectDevice(MixinDevice):
@@ -120,6 +149,14 @@ class DirectDevice(MixinDevice):
             result.extend(self.stream.direct_get(path, datatype or "config"))
         return result
 
+    def lookup(
+        self, paths: List[str], datatype: Optional[str] = "state", table: Optional[str] = None
+    ) -> List[Dict[str, Any]]:
+        return self.stream.lookup(paths, datatype or "state", table)
+
+    def query(self, paths: List[str], datatype: Optional[str] = "state") -> List[Dict[str, Any]]:
+        return self.stream.query(paths, datatype or "state")
+
 
 class CachedDevice(MixinDevice):
     """Report getters served from a :class:`~nornir_srl.server.stream.HostStream`."""
@@ -141,6 +178,14 @@ class CachedDevice(MixinDevice):
                 snapshot = self.stream.direct_get(path, datatype or "config")
             result.extend(snapshot)
         return result
+
+    def lookup(
+        self, paths: List[str], datatype: Optional[str] = "state", table: Optional[str] = None
+    ) -> List[Dict[str, Any]]:
+        return self.stream.lookup(paths, datatype or "state", table)
+
+    def query(self, paths: List[str], datatype: Optional[str] = "state") -> List[Dict[str, Any]]:
+        return self.stream.query(paths, datatype or "state")
 
     def get_ifstats(self, interface: str = "*", interval: int = 5) -> Dict[str, Any]:
         """Interface rates derived from the streamed counter samples.

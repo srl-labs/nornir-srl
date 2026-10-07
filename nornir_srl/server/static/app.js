@@ -57,10 +57,13 @@
     liveLabel: el("live-label"),
     queryProgress: el("query-progress"),
     queryProgressLabel: el("query-progress-label"),
+    queryProgressBar: document.querySelector("#query-progress .query-progress-bar"),
+    stopLoading: el("stop-loading"),
     main: document.querySelector(".main"),
     globalSearch: el("global-search"),
     invFilter: el("inv-filter"),
     reportParams: el("report-params"),
+    keyRow: el("key-row"),
     scopeChip: el("scope-chip"),
     clearFiltersBtn: el("clear-filters-btn"),
     filterBadge: el("filter-badge"),
@@ -80,6 +83,12 @@
     errors: el("errors"),
     tableWrap: el("table-wrap"),
     overviewDashboard: el("overview-dashboard"),
+    activityView: el("activity-view"),
+    activitySummary: el("activity-summary"),
+    activityChart: el("activity-chart"),
+    activityWindow: el("activity-window"),
+    activityTable: el("activity-table"),
+    activityTooltip: el("activity-tooltip"),
     topologyView: el("topology-view"),
     topoCanvas: el("topo-canvas"),
     topoLegend: el("topo-legend"),
@@ -96,6 +105,7 @@
     topoZoomFit: el("topo-zoom-fit"),
     topoExportDrawio: el("topo-export-drawio"),
     servicesTreeView: el("services-tree-view"),
+    checksBoard: el("checks-board"),
     pathGraphView: el("path-graph-view"),
     configDiffView: el("config-diff-view"),
     viewModeBtn: el("view-mode-btn"),
@@ -114,6 +124,7 @@
     kpiHealthSub: el("kpi-health-sub"),
     kpiHealthWorst: el("kpi-health-worst"),
     kpiHealthChanges: el("kpi-health-changes"),
+    kpiHealthProgress: el("kpi-health-progress"),
     headRow: el("head-row"),
     filterRow: el("filter-row"),
     gridCols: el("grid-cols"),
@@ -164,6 +175,9 @@
     kpiRoutersDown: el("kpi-routers-down"),
     kpiRoutersInstances: el("kpi-routers-instances"),
     kpiSubCount: el("kpi-sub-count"),
+    kpiCardTelemetry: el("kpi-card-telemetry"),
+    kpiPathsSub: el("kpi-paths-sub"),
+    kpiBacklog: el("kpi-backlog"),
     kpiCacheCount: el("kpi-cache-count"),
     kpiResyncInt: el("kpi-resync-int"),
   };
@@ -191,6 +205,8 @@
     sort: { column: null, dir: 1 },
     windowSize: WINDOW_STEP,
     paused: false,
+    loadStopped: false,
+    rowParts: null, // part key (node) -> its rows, for patches to apply to
     source: null,
     previous: new Map(), // row identity -> previous row values
     identityColumn: null,
@@ -234,7 +250,43 @@
 
   let overviewTimer = null;
   let topologyTimer = null;
+  let activityTimer = null;
   let navSeq = 0;
+
+  // The dashboards poll every PANEL_POLL_MS once the server has read the
+  // fabric, and every PANEL_LOADING_POLL_MS while it is still reading it, so
+  // each card fills in as its nodes answer. Never two requests at a time: a
+  // slow answer is not asked for again while it is under way - one asked for
+  // meanwhile is made as soon as it is in.
+  const PANEL_POLL_MS = 5000;
+  const PANEL_LOADING_POLL_MS = 1000;
+
+  /** *load* as a poll: one request at a time, due sooner while loading. */
+  function panelPoller(load) {
+    const poll = { busy: false, again: false, next: 0 };
+    async function run() {
+      if (poll.busy) {
+        poll.again = true;
+        return;
+      }
+      poll.busy = true;
+      let loading = false;
+      try {
+        loading = Boolean(await load());
+      } finally {
+        poll.busy = false;
+        poll.next = Date.now() + (loading ? PANEL_LOADING_POLL_MS : PANEL_POLL_MS);
+      }
+      if (poll.again) {
+        poll.again = false;
+        run();
+      }
+    }
+    run.tick = () => {
+      if (!poll.busy && Date.now() >= poll.next) run();
+    };
+    return run;
+  }
 
   /* ------------------------------------------------------------ helpers */
 
@@ -262,7 +314,7 @@
     value !== "" && value !== null && value !== undefined && !isNaN(Number(value));
 
   /** Reports the server computes for a panel of their own, not as a table. */
-  const isPanelReport = (name) => name === "overview" || name === "topology";
+  const isPanelReport = (name) => name === "overview" || name === "topology" || name === "activity";
 
   /** The column a comparison puts its verdict in; matches nornir_srl.diff. */
   const DIFF_STATUS = "\u00b1";
@@ -370,7 +422,19 @@
   // The arguments a lens cannot answer without, still to be typed.
   function missingParams() {
     const specs = (state.report && state.report.params) || [];
-    return specs.filter((spec) => spec.required && !state.reportParams.get(spec.name));
+    const missing = specs.filter((spec) => spec.required && !state.reportParams.get(spec.name));
+    // A report too large to read whole by default - a BGP RIB - waits for a
+    // key to look routes up by, or for being asked to list them all.
+    if (state.report && state.report.needs_query && !listsAll()) {
+      const keyed = specs.some((spec) => spec.kind === "rib-key" && state.reportParams.get(spec.name));
+      if (!keyed) missing.push({ label: "a key, or choose List all" });
+    }
+    return missing;
+  }
+
+  /** Whether the report was asked to list everything rather than look up by key. */
+  function listsAll() {
+    return (state.reportParams.get("scope") || "").split(",").includes("all");
   }
 
   // The chip saying a page is about some nodes only, and letting it be about
@@ -386,11 +450,20 @@
   function renderReportParams() {
     renderScope();
     dom.reportParams.replaceChildren();
-    const specs = (state.report && state.report.params) || [];
+    const keyed = Boolean(state.report && state.report.needs_query);
+    const all = (state.report && state.report.params) || [];
+    // A report looked up by key has its keys, and whether to list by key or
+    // everything, on a row of their own; its other arguments stay here.
+    renderKeyRow(keyed ? all.filter((spec) => spec.kind === "rib-key") : []);
+    const specs = keyed ? all.filter((spec) => spec.kind !== "rib-key" && spec.name !== "scope") : all;
     dom.reportParams.hidden = !specs.length;
     for (const spec of specs) {
       if (spec.kind === "choices") {
         dom.reportParams.append(choicesParam(spec));
+        continue;
+      }
+      if (spec.kind === "rib-key") {
+        dom.reportParams.append(keyParam(spec));
         continue;
       }
       const field = document.createElement("label");
@@ -462,6 +535,250 @@
     }
     if (specs.some((spec) => spec.kind === "ni")) refreshInstanceOptions();
     if (specs.some((spec) => spec.kind === "config-node" || spec.kind === "commit")) refreshConfigOptions();
+  }
+
+  /**
+   * The keys a report is looked up by, and [List by key] [List all]: by key,
+   * the node is asked for the routes the keys match; all reads every route of
+   * every node, which on a large fabric takes minutes. The keys are cleared
+   * and set aside while everything is listed.
+   */
+  function renderKeyRow(keySpecs) {
+    if (!dom.keyRow) return;
+    dom.keyRow.replaceChildren();
+    dom.keyRow.hidden = !keySpecs.length;
+    if (!keySpecs.length) return;
+    const everything = listsAll();
+
+    const fields = document.createElement("div");
+    fields.className = "key-fields";
+    for (const spec of keySpecs) {
+      const field = keyParam(spec);
+      const input = field.querySelector("input");
+      if (everything) {
+        input.disabled = true;
+        input.title = "Not used while listing all: choose List by key to look routes up";
+      }
+      fields.append(field);
+    }
+
+    const mode = document.createElement("div");
+    mode.className = "segmented key-mode";
+    mode.setAttribute("role", "radiogroup");
+    mode.setAttribute("aria-label", "How to list the routes");
+    const choose = (listAll) => {
+      if (listAll === listsAll()) return;
+      if (listAll) {
+        state.reportParams.set("scope", "all");
+        for (const spec of keySpecs) state.reportParams.delete(spec.name);
+      } else {
+        state.reportParams.delete("scope");
+      }
+      renderKeyRow(keySpecs);
+      updateFilterUI();
+      connect();
+      syncCurrentVisit();
+      if (!listAll) {
+        const first = dom.keyRow.querySelector(".key-fields input");
+        if (first) first.focus();
+      }
+    };
+    for (const [label, listAll, title] of [
+      ["List by key", false, "Ask the nodes for the routes the keys match: quick, whatever the size of the RIB"],
+      ["List all", true, "Every route of every node, no key asked: on a large fabric tens of thousands per node, and minutes to read and stream"],
+    ]) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "btn segment";
+      button.textContent = label;
+      button.title = title;
+      button.setAttribute("role", "radio");
+      button.setAttribute("aria-checked", listAll === everything ? "true" : "false");
+      button.classList.toggle("is-active", listAll === everything);
+      button.addEventListener("click", () => choose(listAll));
+      mode.append(button);
+    }
+
+    const note = document.createElement("span");
+    note.className = "muted key-note";
+    note.textContent = everything
+      ? "every route of every node - slow on a large fabric"
+      : "a value, or a pattern with * - the node does the matching";
+    note.classList.toggle("is-warning", everything);
+
+    dom.keyRow.append(fields, mode, note);
+  }
+
+  // A route key, typed or picked from the values it takes on the fabric: a
+  // drop-down of them, the most common first, each with how many routes have
+  // it. The server reads every node's keys - and nothing else of its routes -
+  // once in a while, and narrows them to what is typed. A pattern with * is
+  // kept as typed; the node matches it.
+  const KEY_OPTIONS_DELAY_MS = 250;
+
+  function keyParam(spec) {
+    const field = document.createElement("div");
+    field.className = "field menu key-param";
+    const name = document.createElement("span");
+    name.className = "muted";
+    name.textContent = spec.label;
+    const input = document.createElement("input");
+    input.className = "input";
+    input.type = "search";
+    input.placeholder = spec.placeholder || "";
+    input.autocomplete = "off";
+    input.spellcheck = false;
+    input.value = state.reportParams.get(spec.name) || "";
+    input.title = spec.help || "";
+    input.setAttribute("role", "combobox");
+    input.setAttribute("aria-autocomplete", "list");
+    input.setAttribute("aria-expanded", "false");
+    const panel = document.createElement("div");
+    panel.className = "menu-panel opens-right key-menu";
+    panel.id = `param-${spec.name}-values`;
+    panel.setAttribute("role", "listbox");
+    panel.hidden = true;
+    input.setAttribute("aria-controls", panel.id);
+
+    let options = [];
+    let active = -1;
+    let asked = null;
+    let timer = null;
+
+    const commit = (value) => {
+      const text = value.trim();
+      if (text) state.reportParams.set(spec.name, text);
+      else state.reportParams.delete(spec.name);
+      updateFilterUI();
+      connect();
+      syncCurrentVisit();
+    };
+    const close = () => {
+      panel.hidden = true;
+      input.setAttribute("aria-expanded", "false");
+      active = -1;
+    };
+    const highlight = (index) => {
+      active = index;
+      panel.querySelectorAll(".key-option").forEach((row, i) => {
+        row.classList.toggle("is-active", i === index);
+        row.setAttribute("aria-selected", i === index ? "true" : "false");
+        if (i === index) row.scrollIntoView({ block: "nearest" });
+      });
+    };
+    const pick = (value) => {
+      input.value = value;
+      close();
+      commit(value);
+    };
+    const draw = (found, note) => {
+      panel.replaceChildren();
+      const head = document.createElement("div");
+      head.className = "menu-heading";
+      head.textContent = note;
+      panel.append(head);
+      options = (found && found.values) || [];
+      options.forEach((option, index) => {
+        const row = document.createElement("button");
+        row.type = "button";
+        row.className = "key-option";
+        row.setAttribute("role", "option");
+        const value = document.createElement("span");
+        value.className = "key-option-value";
+        value.textContent = option.value;
+        const count = document.createElement("span");
+        count.className = "muted key-option-count";
+        count.textContent = `${option.routes} route${option.routes === 1 ? "" : "s"}`;
+        row.append(value, count);
+        // Before the input's blur takes the menu away.
+        row.addEventListener("mousedown", (event) => event.preventDefault());
+        row.addEventListener("click", () => pick(option.value));
+        row.addEventListener("mousemove", () => highlight(index));
+        panel.append(row);
+      });
+      active = -1;
+    };
+    const load = async () => {
+      const params = queryParams();
+      params.delete(spec.name);
+      params.set("param", spec.name);
+      params.set("q", input.value.trim());
+      const query = params.toString();
+      if (query === asked) return;
+      asked = query;
+      if (!options.length) draw(null, "reading the keys on the fabric…");
+      input.classList.add("is-loading");
+      try {
+        const res = await fetch(`/api/keys/${encodeURIComponent(state.report.name)}?${query}`);
+        if (asked !== query) return;
+        if (!res.ok) {
+          draw(null, "no values to offer: type one");
+          return;
+        }
+        const found = await res.json();
+        if (asked !== query) return;
+        const shown = (found.values || []).length;
+        draw(
+          found,
+          !found.total
+            ? input.value.trim()
+              ? "no such value on the fabric"
+              : "no values on the fabric"
+            : found.total > shown
+              ? `${found.total} values - the ${shown} most common`
+              : `${found.total} value${found.total === 1 ? "" : "s"}`
+        );
+      } catch {
+        if (asked === query) draw(null, "no values to offer: type one");
+      } finally {
+        if (asked === query) input.classList.remove("is-loading");
+      }
+    };
+    const open = () => {
+      // One open at a time.
+      for (const other of document.querySelectorAll(".key-menu, .choices-menu")) {
+        if (other !== panel) other.hidden = true;
+      }
+      panel.hidden = false;
+      input.setAttribute("aria-expanded", "true");
+      load();
+    };
+
+    input.addEventListener("focus", open);
+    input.addEventListener("click", () => {
+      if (panel.hidden) open();
+    });
+    input.addEventListener("input", () => {
+      if (panel.hidden) open();
+      clearTimeout(timer);
+      timer = setTimeout(load, KEY_OPTIONS_DELAY_MS);
+    });
+    input.addEventListener("keydown", (event) => {
+      if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+        event.preventDefault();
+        if (panel.hidden) open();
+        if (!options.length) return;
+        const step = event.key === "ArrowDown" ? 1 : -1;
+        highlight((active + step + options.length) % options.length);
+      } else if (event.key === "Enter") {
+        event.preventDefault();
+        if (!panel.hidden && active >= 0 && options[active]) pick(options[active].value);
+        else {
+          close();
+          commit(input.value);
+        }
+      } else if (event.key === "Escape") {
+        close();
+      }
+    });
+    input.addEventListener("blur", () => {
+      close();
+      // A value typed and left is as good as one picked.
+      if ((state.reportParams.get(spec.name) || "") !== input.value.trim()) commit(input.value);
+    });
+
+    field.append(name, input, panel);
+    return field;
   }
 
   // Parameters chosen from a list rather than typed. A function, not a
@@ -788,6 +1105,8 @@
     const needle = dom.reportSearch.value.trim().toLowerCase();
     const groups = new Map();
     for (const report of state.reports) {
+      // Reached from another report - a peer's routes from BGP peers.
+      if (report.listed === false) continue;
       const haystack = `${report.title} ${report.name} ${report.description} ${report.category}`;
       if (needle && !haystack.toLowerCase().includes(needle)) continue;
       if (!groups.has(report.category)) groups.set(report.category, []);
@@ -850,8 +1169,11 @@
     }
   }
 
-  async function loadOverview() {
-    if (!state.report || state.report.name !== "overview") return;
+  const loadOverview = panelPoller(fetchOverview);
+
+  /** Draw the dashboard; returns whether the server is still reading for it. */
+  async function fetchOverview() {
+    if (!state.report || state.report.name !== "overview") return false;
     try {
       const params = new URLSearchParams();
       const inv = dom.invFilter.value.trim();
@@ -859,7 +1181,12 @@
       const url = "/api/overview" + (inv ? `?${params}` : "");
       const res = await fetch(url);
       const data = await res.json();
-      renderHealthKpi(data.health);
+      renderHealthKpi(data.health, data.health_loading);
+      // Counted from what the nodes have streamed so far: marked as such
+      // until every node has answered.
+      for (const card of [dom.kpiCardBgp, dom.kpiCardItf, dom.kpiCardBd, dom.kpiCardRouters]) {
+        if (card) card.classList.toggle("kpi-loading", Boolean(data.loading));
+      }
       dom.kpiNodesTotal.textContent = data.nodes.total;
       dom.kpiNodesConnected.textContent = `${data.nodes.connected} connected`;
       dom.kpiNodesStreaming.textContent = `${data.nodes.streaming} streaming`;
@@ -953,26 +1280,593 @@
         }
       }
 
-      dom.kpiSubCount.textContent = data.telemetry.subscriptions;
-      dom.kpiCacheCount.textContent = `${data.telemetry.cached_tables} cached tables`;
-      dom.kpiResyncInt.textContent = `${data.telemetry.resync_interval}s resync`;
+      renderTelemetryKpi(data.telemetry);
 
       setLive("live", "live");
       dom.rowCount.textContent = "Executive Dashboard";
-      dom.streamInfo.textContent = "KPI overview metrics";
+      dom.streamInfo.textContent = data.loading
+        ? `KPI overview metrics · reading the fabric: ${readingProgress(data.loading)}`
+        : "KPI overview metrics";
       dom.updated.textContent = "updated " + new Date().toLocaleTimeString();
+      return Boolean(data.loading || data.health_loading || (data.health && data.health.reading_since));
     } catch (_err) {
       setLive("error", "error");
+      return false;
     }
   }
 
+  /** "3 of 12 nodes" - how far the server is in reading the fabric for a page. */
+  function readingProgress(progress) {
+    const reports = progress.nodes ? progress.total / progress.nodes : 1;
+    const nodes = Math.floor(progress.ready / (reports || 1));
+    return `${nodes} of ${progress.nodes} node${progress.nodes === 1 ? "" : "s"}`;
+  }
+
+  /**
+   * The Telemetry Engine card: the gNMI paths the reports in use read, how
+   * they are served, and whether every node's stream is being kept up with.
+   */
+  function renderTelemetryKpi(telemetry) {
+    const t = telemetry || {};
+    dom.kpiSubCount.textContent = t.subscriptions ?? 0;
+    if (dom.kpiPathsSub) {
+      const parts = [`gNMI paths on ${t.nodes ?? 0} node${t.nodes === 1 ? "" : "s"}`];
+      if (t.streaming !== undefined) parts.push(`${t.streaming} streaming`);
+      if (t.pending) parts.push(`${t.pending} pending`);
+      if (t.polled) parts.push(`${t.polled} polled`);
+      dom.kpiPathsSub.textContent = parts.join(" · ");
+    }
+    const behind = (t.backlog || 0) > (t.backlog_limit || Infinity);
+    if (dom.kpiBacklog) {
+      const node = t.backlog_node ? ` (${t.backlog_node})` : "";
+      dom.kpiBacklog.textContent = behind ? `${t.backlog} behind${node}` : `backlog ${t.backlog || 0}${node}`;
+      dom.kpiBacklog.classList.toggle("muted", !behind);
+      dom.kpiBacklog.classList.toggle("state-warn", behind);
+    }
+    if (dom.kpiCardTelemetry) {
+      dom.kpiCardTelemetry.classList.remove("kpi-ok", "kpi-warn", "kpi-err");
+      if (behind) dom.kpiCardTelemetry.classList.add("kpi-warn");
+    }
+    dom.kpiCacheCount.textContent = `${t.cached_tables ?? 0} cached tables`;
+    dom.kpiResyncInt.textContent = `${t.resync_interval ?? 0}s resync`;
+  }
+
+  /* -------------------------------------------------------------- checks */
+
+  // What a check came to: its colour, icon and the word for it - never the
+  // colour alone.
+  const CHECK_STATUS = {
+    failed: { tone: "err", icon: "!", label: "check failed" },
+    error: { tone: "err", icon: "✖", label: "errors" },
+    warning: { tone: "warn", icon: "▲", label: "warnings" },
+    skipped: { tone: "muted", icon: "–", label: "skipped" },
+    pass: { tone: "ok", icon: "✔", label: "passed" },
+  };
+  const CHECK_FINDINGS_SHOWN = 40;
+
+  function renderChecksBoard(checks) {
+    const board = dom.checksBoard;
+    board.replaceChildren();
+    if (!checks.length) {
+      const p = document.createElement("p");
+      p.className = "empty";
+      p.textContent = "The checks are reading the fabric…";
+      board.append(p);
+      return;
+    }
+    board.append(checksSummary(checks));
+    const grid = document.createElement("div");
+    grid.className = "checks-grid";
+    for (const check of checks) grid.append(checkCard(check));
+    board.append(grid);
+  }
+
+  /** How many checks came to what, as a bar and as words. */
+  function checksSummary(checks) {
+    const wrap = document.createElement("div");
+    wrap.className = "checks-summary";
+    const counts = ["error", "failed", "warning", "pass", "skipped"].map((status) => [status, checks.filter((c) => c.status === status).length]);
+    const bar = document.createElement("div");
+    bar.className = "checks-bar";
+    bar.setAttribute("role", "img");
+    bar.setAttribute("aria-label", counts.filter(([, n]) => n).map(([s, n]) => `${n} ${CHECK_STATUS[s].label}`).join(", "));
+    const words = document.createElement("div");
+    words.className = "checks-counts";
+    for (const [status, n] of counts) {
+      if (!n) continue;
+      const info = CHECK_STATUS[status];
+      const part = document.createElement("span");
+      part.className = `tone-${info.tone}`;
+      part.style.flexGrow = String(n);
+      part.title = `${n} ${info.label}`;
+      bar.append(part);
+      const word = document.createElement("span");
+      word.className = `check-pill tone-${info.tone}`;
+      word.textContent = `${info.icon} ${n} ${info.label}`;
+      words.append(word);
+    }
+    wrap.append(bar, words);
+    return wrap;
+  }
+
+  function checkCard(check) {
+    const info = CHECK_STATUS[check.status] || CHECK_STATUS.skipped;
+    const card = document.createElement("article");
+    card.className = `check-card is-${info.tone}`;
+
+    const head = document.createElement("div");
+    head.className = "check-head";
+    const pill = document.createElement("span");
+    pill.className = `check-pill tone-${info.tone}`;
+    pill.textContent =
+      check.status === "error" || check.status === "warning"
+        ? `${info.icon} ${[check.errors && `${check.errors} error${check.errors === 1 ? "" : "s"}`, check.warnings && `${check.warnings} warning${check.warnings === 1 ? "" : "s"}`].filter(Boolean).join(" · ")}`
+        : `${info.icon} ${check.status === "skipped" ? "skipped: nothing to read" : info.label}`;
+    const title = document.createElement("h4");
+    title.className = "check-title";
+    title.textContent = check.title;
+    head.append(title, pill);
+    card.append(head);
+
+    if (check.requires && check.requires.length) {
+      const reads = document.createElement("div");
+      reads.className = "muted check-reads";
+      reads.textContent = `reads ${check.requires.join(", ")}`;
+      card.append(reads);
+    }
+
+    // One cell per node read, in the colour of the worst found there.
+    const nodes = Object.entries(check.nodes || {});
+    if (nodes.length) {
+      const strip = document.createElement("div");
+      strip.className = "check-nodes";
+      for (const [node, worst] of nodes) {
+        const cell = document.createElement("span");
+        const tone = worst === "error" ? "err" : worst === "warning" ? "warn" : "ok";
+        cell.className = `check-node tone-${tone}`;
+        cell.title = `${shortNode(node)}: ${worst === "pass" ? "nothing found" : worst}`;
+        strip.append(cell);
+      }
+      const flagged = nodes.filter(([, worst]) => worst !== "pass").length;
+      const caption = document.createElement("span");
+      caption.className = "muted check-nodes-caption";
+      caption.textContent = `${nodes.length} node${nodes.length === 1 ? "" : "s"}${flagged ? ` · ${flagged} with findings` : ""}`;
+      const row = document.createElement("div");
+      row.className = "check-nodes-row";
+      row.append(strip, caption);
+      card.append(row);
+    }
+
+    const findings = check.findings || [];
+    if (findings.length) {
+      const details = document.createElement("details");
+      details.className = "check-findings";
+      details.open = findings.length <= 6;
+      const summary = document.createElement("summary");
+      summary.textContent = `${findings.length} finding${findings.length === 1 ? "" : "s"}`;
+      details.append(summary);
+      const list = document.createElement("ul");
+      for (const row of findings.slice(0, CHECK_FINDINGS_SHOWN)) {
+        const item = document.createElement("li");
+        const sev = document.createElement("span");
+        const tone = row.Severity === "error" ? "err" : "warn";
+        sev.className = `check-sev tone-${tone}`;
+        sev.textContent = row.Severity === "error" ? "✖" : "▲";
+        sev.title = row.Severity;
+        const where = document.createElement("span");
+        where.className = "check-where";
+        where.textContent = [row.Node && row.Node !== "-" ? shortNode(row.Node) : "", row.Subject].filter(Boolean).join(" · ");
+        const what = document.createElement("span");
+        what.className = "muted check-detail";
+        what.textContent = row.Detail || "";
+        // Together, so a long subject - a link-local peer and its interface -
+        // pushes the detail onto a line of its own rather than squeezing it.
+        const text = document.createElement("span");
+        text.className = "check-text";
+        text.append(where, what);
+        item.append(sev, text);
+        list.append(item);
+      }
+      details.append(list);
+      if (findings.length > CHECK_FINDINGS_SHOWN) {
+        const more = document.createElement("p");
+        more.className = "muted check-more";
+        more.textContent = `and ${findings.length - CHECK_FINDINGS_SHOWN} more`;
+        details.append(more);
+      }
+      card.append(details);
+      const open = document.createElement("button");
+      open.type = "button";
+      open.className = "btn btn-ghost check-open";
+      open.textContent = "Show in table";
+      open.title = "This check's findings in the Table View, where they can be sorted and filtered";
+      open.addEventListener("click", () => {
+        state.viewMode = "table";
+        dom.viewModeBtn.textContent = viewModeLabel();
+        jumpToFilteredReport("checks", [], [], { Check: `^${escapeRegex(check.name)}$` });
+      });
+      card.append(open);
+    }
+    return card;
+  }
+
+  /* ------------------------------------------------------- server activity */
+
+  // What each node streams to the server, how fast, and whether the server
+  // keeps up - from the counters /api/status carries, sampled every
+  // ACTIVITY_POLL_MS and kept for ACTIVITY_POINTS samples.
+  const ACTIVITY_POLL_MS = 2000;
+  const ACTIVITY_POINTS = 90;
+  const activity = { busy: false, prev: new Map(), history: new Map(), fabric: [] };
+
+  async function loadActivity() {
+    if (activity.busy || !state.report || state.report.name !== "activity" || state.paused) return;
+    activity.busy = true;
+    try {
+      const res = await fetch("/api/status");
+      if (!res.ok) throw new Error(String(res.status));
+      ingestActivity(await res.json(), Date.now());
+      renderActivity();
+      setLive("live", "live");
+      dom.rowCount.textContent = "Server Activity";
+      dom.streamInfo.textContent = `sampled every ${ACTIVITY_POLL_MS / 1000}s`;
+      dom.updated.textContent = "updated " + new Date().toLocaleTimeString();
+    } catch (_err) {
+      setLive("error", "error");
+    } finally {
+      activity.busy = false;
+    }
+  }
+
+  /** Rates per node since the previous sample, appended to each one's history. */
+  function ingestActivity(status, now) {
+    activity.status = status;
+    let total = 0;
+    let complete = true;
+    for (const node of status.nodes || []) {
+      const prev = activity.prev.get(node.node);
+      const rate = (key) => {
+        if (!prev) return null;
+        const dt = (now - prev.t) / 1000;
+        const delta = (node[key] || 0) - (prev[key] || 0);
+        // A reconnect starts the counters over: no rate rather than a negative one.
+        return dt > 0 && delta >= 0 ? delta / dt : null;
+      };
+      // Gets come in bursts - start-up, a resync, a pending path now and then
+      // - so they are counted per sample rather than read as a rate.
+      const gets = prev && (node.gets || 0) >= (prev.gets || 0) ? (node.gets || 0) - (prev.gets || 0) : null;
+      const sample = { t: now, leaves: rate("leaves"), notifications: rate("notifications"), gets };
+      activity.prev.set(node.node, { t: now, leaves: node.leaves, notifications: node.notifications, gets: node.gets });
+      if (sample.leaves === null) complete = false;
+      else total += sample.leaves;
+      const history = activity.history.get(node.node) || [];
+      history.push(sample);
+      if (history.length > ACTIVITY_POINTS) history.shift();
+      activity.history.set(node.node, history);
+    }
+    if (complete && (status.nodes || []).length) {
+      activity.fabric.push({ t: now, value: total });
+      if (activity.fabric.length > ACTIVITY_POINTS) activity.fabric.shift();
+    }
+  }
+
+  /**
+   * Gets per minute, over the last minute of samples of *history* - or what
+   * there is of one, scaled up to a minute. ``null`` before two samples.
+   */
+  function getsPerMinute(history) {
+    const recent = history.filter((p) => p.gets !== null && p.gets !== undefined).slice(-Math.round(60000 / ACTIVITY_POLL_MS));
+    if (!recent.length) return null;
+    const total = recent.reduce((acc, p) => acc + p.gets, 0);
+    return (total * 60000) / (recent.length * ACTIVITY_POLL_MS);
+  }
+
+  const formatRate = (value) =>
+    value === null || value === undefined
+      ? "—"
+      : value >= 1000
+        ? `${(value / 1000).toFixed(value >= 10000 ? 0 : 1)}k`
+        : value >= 10
+          ? Math.round(value).toLocaleString()
+          : value.toFixed(1);
+
+  function renderActivity() {
+    const status = activity.status || { nodes: [] };
+    const nodes = status.nodes || [];
+    const latest = (name) => (activity.history.get(name) || []).slice(-1)[0] || {};
+    const sum = (key) => nodes.reduce((acc, n) => acc + (latest(n.node)[key] || 0), 0);
+    const limit = (activity.status && activity.status.backlog_limit) || 500;
+    const worst = nodes.reduce((a, n) => ((n.backlog || 0) > ((a && a.backlog) || 0) ? n : a), null);
+    const paths = nodes.flatMap((n) => n.paths || []);
+    const peak = activity.fabric.reduce((m, p) => Math.max(m, p.value), 0);
+
+    dom.activitySummary.replaceChildren(
+      activityTile("Nodes", `${nodes.filter((n) => n.connected).length}/${nodes.length}`, "connected", nodes.some((n) => !n.connected) ? "kpi-warn" : "kpi-ok"),
+      activityTile("Leaves/s", formatRate(activity.fabric.length ? activity.fabric.slice(-1)[0].value : null), `peak ${formatRate(peak)} in the window`),
+      activityTile("Notifications/s", formatRate(sum("notifications")), "applied, all nodes"),
+      activityTile(
+        "Gets/min",
+        formatRate(
+          nodes.some((n) => getsPerMinute(activity.history.get(n.node) || []) !== null)
+            ? nodes.reduce((acc, n) => acc + (getsPerMinute(activity.history.get(n.node) || []) || 0), 0)
+            : null
+        ),
+        `${nodes.filter((n) => n.getting).length} in flight · ${nodes.reduce((acc, n) => acc + (n.gets || 0), 0).toLocaleString()} since start`
+      ),
+      activityTile(
+        "Worst backlog",
+        String((worst && worst.backlog) || 0),
+        worst && worst.backlog ? shortNode(worst.node) : `of ${limit} before falling behind`,
+        worst && worst.backlog > limit ? "kpi-warn" : "kpi-ok"
+      ),
+      activityTile("gNMI paths", String(paths.length), `${paths.filter((p) => p.streaming).length} streaming`)
+    );
+
+    const span = activity.fabric.length > 1 ? (activity.fabric.slice(-1)[0].t - activity.fabric[0].t) / 1000 : 0;
+    dom.activityWindow.textContent = span ? `last ${Math.round(span)}s` : "collecting…";
+    dom.activityChart.replaceChildren(
+      seriesChart(activity.fabric, {
+        width: Math.max(dom.activityChart.clientWidth || 600, 280),
+        height: 180,
+        axes: true,
+        unit: "leaves/s",
+      })
+    );
+
+    const body = dom.activityTable.tBodies[0];
+    body.replaceChildren(...nodes.slice().sort((a, b) => a.node.localeCompare(b.node, undefined, { numeric: true })).map((node) => activityRow(node, limit)));
+  }
+
+  /** "clab-tunnelscale-leaf1" as "leaf1": the lab prefix every node shares says nothing. */
+  function shortNode(name) {
+    return String(name).replace(/^clab-[^-]+-/, "");
+  }
+
+  function activityTile(title, value, sub, tone) {
+    const card = document.createElement("div");
+    card.className = `kpi-card activity-tile ${tone || ""}`;
+    const head = document.createElement("div");
+    head.className = "kpi-header";
+    const name = document.createElement("span");
+    name.className = "kpi-title";
+    name.textContent = title;
+    head.append(name);
+    const big = document.createElement("div");
+    big.className = "kpi-value";
+    big.textContent = value;
+    const small = document.createElement("div");
+    small.className = "kpi-sub muted";
+    small.textContent = sub;
+    card.append(head, big, small);
+    return card;
+  }
+
+  function activityRow(node, limit) {
+    const history = activity.history.get(node.node) || [];
+    const now = history.slice(-1)[0] || {};
+    const row = document.createElement("tr");
+
+    const health = !node.connected ? ["err", "not connected"] : node.resyncing ? ["warn", "resyncing"] : node.failing_since ? ["warn", "failing"] : ["ok", "streaming"];
+    const name = document.createElement("td");
+    name.className = "activity-node";
+    const dot = document.createElement("span");
+    dot.className = `status-dot is-${health[0]}`;
+    dot.setAttribute("aria-hidden", "true");
+    const label = document.createElement("span");
+    label.textContent = shortNode(node.node);
+    const sub = document.createElement("span");
+    sub.className = "muted activity-state";
+    sub.textContent = health[1];
+    name.title = node.error ? `${node.node}: ${node.error}` : node.node;
+    name.append(dot, label, sub);
+
+    const leaves = document.createElement("td");
+    leaves.className = "activity-spark";
+    leaves.append(
+      seriesChart(history.map((p) => ({ t: p.t, value: p.leaves })), { width: 140, height: 28, unit: "leaves/s" })
+    );
+    const value = document.createElement("span");
+    value.className = "activity-value";
+    value.textContent = formatRate(now.leaves);
+    leaves.append(value);
+
+    const cell = (text, title) => {
+      const td = document.createElement("td");
+      td.className = "num";
+      td.textContent = text;
+      if (title) td.title = title;
+      return td;
+    };
+
+    const backlog = document.createElement("td");
+    const behind = (node.backlog || 0) > limit;
+    const meter = document.createElement("span");
+    meter.className = `activity-meter${behind ? " is-behind" : ""}`;
+    const fill = document.createElement("span");
+    fill.style.width = `${Math.min(100, ((node.backlog || 0) / limit) * 100)}%`;
+    meter.append(fill);
+    const count = document.createElement("span");
+    count.className = behind ? "state-warn" : "muted";
+    count.textContent = behind ? `${node.backlog} behind` : String(node.backlog || 0);
+    backlog.title = `${node.backlog || 0} notifications waiting; past ${limit} the server is not keeping up`;
+    backlog.append(meter, count);
+
+    const paths = document.createElement("td");
+    const list = node.paths || [];
+    const counts = [
+      ["streaming", list.filter((p) => p.streaming).length, "viz-1"],
+      ["pending", list.filter((p) => p.pending).length, "viz-2"],
+      ["polled", list.filter((p) => p.polled).length, "viz-3"],
+    ];
+    const bar = document.createElement("span");
+    bar.className = "activity-stack";
+    for (const [kind, n, color] of counts) {
+      if (!n) continue;
+      const part = document.createElement("span");
+      part.className = color;
+      part.style.flexGrow = String(n);
+      part.title = `${n} ${kind}`;
+      bar.append(part);
+    }
+    const legend = document.createElement("span");
+    legend.className = "muted activity-counts";
+    legend.textContent = counts.map(([, n]) => n).join(" · ");
+    paths.title = counts.map(([kind, n]) => `${n} ${kind}`).join(", ") + ` of ${list.length} paths`;
+    paths.append(bar, legend);
+
+    const age = node.last_update ? Math.max(0, Date.now() / 1000 - node.last_update) : null;
+    row.append(
+      name,
+      leaves,
+      cell(formatRate(now.notifications)),
+      cell(
+        `${formatRate(getsPerMinute(history))}${node.getting ? " ●" : ""}`,
+        `${(node.gets || 0).toLocaleString()} Gets since the node connected${node.getting ? "; one in flight now" : ""}`
+      ),
+      backlog,
+      paths,
+      cell(age === null ? "—" : age < 60 ? `${Math.round(age)}s ago` : `${Math.round(age / 60)}m ago`)
+    );
+    return row;
+  }
+
+  /** The smallest round number at least *value*, for the top of an axis. */
+  function niceCeiling(value) {
+    if (value <= 0) return 1;
+    const step = 10 ** Math.floor(Math.log10(value));
+    return [1, 2, 2.5, 5, 10].map((m) => m * step).find((m) => m >= value);
+  }
+
+  /**
+   * One series over time as an SVG line on a light area, with a crosshair and
+   * a tooltip under the pointer. *axes* draws a recessive grid with values and
+   * the time span; without it, a sparkline.
+   */
+  function seriesChart(points, { width, height, axes, unit }) {
+    const svg = svgEl("svg", { class: axes ? "series-chart" : "sparkline", width, height, viewBox: `0 0 ${width} ${height}`, role: "img" });
+    const pad = axes ? { l: 44, r: 10, t: 8, b: 20 } : { l: 1, r: 1, t: 3, b: 3 };
+    const known = points.filter((p) => p.value !== null && p.value !== undefined);
+    svg.setAttribute("aria-label", known.length ? `${unit}: now ${formatRate(known.slice(-1)[0].value)}` : `${unit}: collecting`);
+    const max = niceCeiling(Math.max(1, ...known.map((p) => p.value)));
+    const w = width - pad.l - pad.r;
+    const h = height - pad.t - pad.b;
+    const x = (i) => pad.l + (points.length > 1 ? (i / (ACTIVITY_POINTS - 1)) * w + (w * (ACTIVITY_POINTS - points.length)) / (ACTIVITY_POINTS - 1) : w);
+    const y = (v) => pad.t + h - (v / max) * h;
+
+    if (axes) {
+      for (const frac of [0, 0.5, 1]) {
+        const gy = pad.t + h - frac * h;
+        svg.append(svgEl("line", { x1: pad.l, x2: width - pad.r, y1: gy, y2: gy, class: "chart-grid" }));
+        const tick = svgEl("text", { x: pad.l - 6, y: gy + 4, class: "chart-tick", "text-anchor": "end" });
+        tick.textContent = formatRate(max * frac);
+        svg.append(tick);
+      }
+      const left = svgEl("text", { x: pad.l, y: height - 4, class: "chart-tick" });
+      left.textContent = `-${Math.round((ACTIVITY_POINTS * ACTIVITY_POLL_MS) / 60000)}m`;
+      const right = svgEl("text", { x: width - pad.r, y: height - 4, class: "chart-tick", "text-anchor": "end" });
+      right.textContent = "now";
+      svg.append(left, right);
+    }
+
+    const coords = points.map((p, i) => (p.value === null || p.value === undefined ? null : [x(i), y(p.value)]));
+    const runs = [];
+    let run = [];
+    for (const c of coords) {
+      if (c) run.push(c);
+      else if (run.length) {
+        runs.push(run);
+        run = [];
+      }
+    }
+    if (run.length) runs.push(run);
+    for (const r of runs) {
+      if (r.length < 2) continue;
+      const line = r.map(([px, py], i) => `${i ? "L" : "M"}${px.toFixed(1)},${py.toFixed(1)}`).join("");
+      svg.append(svgEl("path", { d: `${line}L${r[r.length - 1][0].toFixed(1)},${pad.t + h}L${r[0][0].toFixed(1)},${pad.t + h}Z`, class: "chart-area" }));
+      svg.append(svgEl("path", { d: line, class: "chart-line" }));
+    }
+
+    // Crosshair and tooltip: the sample nearest the pointer.
+    const cross = svgEl("line", { y1: pad.t, y2: pad.t + h, class: "chart-cross", visibility: "hidden" });
+    const marker = svgEl("circle", { r: axes ? 4 : 3, class: "chart-marker", visibility: "hidden" });
+    const hit = svgEl("rect", { x: 0, y: 0, width, height, fill: "transparent" });
+    svg.append(cross, marker, hit);
+    const hide = () => {
+      cross.setAttribute("visibility", "hidden");
+      marker.setAttribute("visibility", "hidden");
+      dom.activityTooltip.hidden = true;
+    };
+    hit.addEventListener("mousemove", (event) => {
+      const box = svg.getBoundingClientRect();
+      const px = ((event.clientX - box.left) / box.width) * width;
+      let best = -1;
+      let bestDist = Infinity;
+      coords.forEach((c, i) => {
+        if (c && Math.abs(c[0] - px) < bestDist) {
+          best = i;
+          bestDist = Math.abs(c[0] - px);
+        }
+      });
+      if (best < 0) return hide();
+      const [cx, cy] = coords[best];
+      cross.setAttribute("x1", cx);
+      cross.setAttribute("x2", cx);
+      cross.setAttribute("visibility", "visible");
+      marker.setAttribute("cx", cx);
+      marker.setAttribute("cy", cy);
+      marker.setAttribute("visibility", "visible");
+      const tip = dom.activityTooltip;
+      tip.textContent = `${new Date(points[best].t).toLocaleTimeString()} · ${formatRate(points[best].value)} ${unit}`;
+      tip.hidden = false;
+      tip.style.left = `${event.clientX + 12}px`;
+      tip.style.top = `${event.clientY + 12}px`;
+    });
+    hit.addEventListener("mouseleave", hide);
+    return svg;
+  }
+
   /** The Fabric Health card: incidents by severity, the worst, and what changed. */
-  function renderHealthKpi(health) {
+  /**
+   * The bar along the checks card: filled by the first reading's report
+   * reads, a moving strip while a later reading is under way, else hidden.
+   */
+  function renderHealthProgress(health, loading) {
+    const bar = dom.kpiHealthProgress;
+    if (!bar) return;
+    const share = !health && loading && loading.total ? loading.ready / loading.total : null;
+    const busy = (!health && loading && !loading.total) || Boolean(health && health.reading_since);
+    bar.hidden = share === null && !busy;
+    bar.classList.toggle("is-indeterminate", share === null && busy);
+    if (share !== null) {
+      const percent = Math.round(share * 100);
+      bar.style.setProperty("--progress", `${percent}%`);
+      bar.setAttribute("aria-valuenow", String(percent));
+      bar.setAttribute("aria-valuemin", "0");
+      bar.setAttribute("aria-valuemax", "100");
+    } else {
+      bar.removeAttribute("aria-valuenow");
+    }
+  }
+
+  /** "12 s ago", "3 min ago": how old the reading on the card is. */
+  function ageText(seconds) {
+    if (seconds < 60) return `${Math.round(seconds)} s ago`;
+    if (seconds < 3600) return `${Math.round(seconds / 60)} min ago`;
+    return `${Math.round(seconds / 3600)} h ago`;
+  }
+
+  function renderHealthKpi(health, loading) {
     if (!dom.kpiCardHealth) return;
+    renderHealthProgress(health, loading);
     dom.kpiCardHealth.classList.remove("kpi-ok", "kpi-warn", "kpi-err");
+    dom.kpiCardHealth.classList.toggle("kpi-loading", Boolean(!health && loading));
     if (!health) {
       dom.kpiHealthValue.textContent = "—";
-      dom.kpiHealthSub.textContent = "checks not available";
+      dom.kpiHealthSub.textContent = loading
+        ? loading.total
+          ? `checks running: ${loading.ready} of ${loading.total} report reads in (${Math.round((100 * loading.ready) / loading.total)}%)`
+          : "checks running: connecting to the nodes…"
+        : "checks not available";
       dom.kpiHealthWorst.textContent = "";
       dom.kpiHealthChanges.textContent = "";
       return;
@@ -993,7 +1887,13 @@
         ? ` · baseline ${new Date(health.baseline_at * 1000).toLocaleTimeString()}`
         : " · baseline pending";
       const failures = health.failures_15m ? ` (${health.failures_15m} failures)` : "";
-      dom.kpiHealthChanges.textContent = `${health.changes_15m} change(s) in 15 min${failures}${baseline}`;
+      const checked = health.reading_since
+        ? "checking now"
+        : typeof health.age === "number"
+          ? `checked ${ageText(health.age)}`
+          : "";
+      dom.kpiHealthChanges.textContent =
+        `${checked ? checked + " · " : ""}${health.changes_15m} change(s) in 15 min${failures}${baseline}`;
     }
   }
 
@@ -1064,8 +1964,11 @@
 
   const shortPort = (port) => String(port || "").replace(/^ethernet-/, "e");
 
-  async function loadTopology() {
-    if (!state.report || state.report.name !== "topology" || state.paused) return;
+  const loadTopology = panelPoller(fetchTopology);
+
+  /** Draw the topology; returns whether the server is still reading for it. */
+  async function fetchTopology() {
+    if (!state.report || state.report.name !== "topology" || state.paused) return false;
     try {
       const inv = dom.invFilter.value.trim();
       const params = new URLSearchParams();
@@ -1073,8 +1976,16 @@
       const res = await fetch("/api/topology" + (inv ? `?${params}` : ""));
       const graph = await res.json();
       setLive("live", "live");
-      dom.streamInfo.textContent = `LLDP topology, rendered in ${graph.render_ms} ms`;
+      // Drawn as far as the nodes have answered, and coloured once the
+      // checks have read the fabric: until then the line says how far each is.
+      const pending = [];
+      if (graph.loading) pending.push(`reading the fabric: ${readingProgress(graph.loading)}`);
+      if (graph.health_loading) {
+        pending.push(`checks running: ${graph.health_loading.ready} of ${graph.health_loading.total} report reads in`);
+      }
+      dom.streamInfo.textContent = [`LLDP topology, rendered in ${graph.render_ms} ms`, ...pending].join(" · ");
       dom.updated.textContent = "updated " + new Date().toLocaleTimeString();
+      const loading = pending.length > 0;
       // Re-drawing would drop the hover and lose the scroll position. Rates
       // change every poll; the cables themselves do not, so colour in place.
       state.topology = graph;
@@ -1086,12 +1997,14 @@
         if (state.topoSelection && state.topoSelection.kind === "link") {
           renderTopoLinkDetail(state.topoSelection.id);
         }
-        return;
+        return loading;
       }
       state.topoKey = key;
       renderTopology(graph);
+      return loading;
     } catch (_err) {
       setLive("error", "error");
+      return false;
     }
   }
 
@@ -2687,6 +3600,11 @@
     closeSideDrawer();
     // Whatever was being queried is not what is being looked at any more.
     endQuery();
+    if (state.loadStopped) {
+      state.loadStopped = false;
+      state.paused = false;
+      dom.pause.textContent = "⏸ Pause";
+    }
     if (state.report && !fromPop) {
       saveReportPreferences();
       syncCurrentVisit();
@@ -2744,6 +3662,10 @@
       clearInterval(topologyTimer);
       topologyTimer = null;
     }
+    if (activityTimer) {
+      clearInterval(activityTimer);
+      activityTimer = null;
+    }
 
     loadReportPreferences();
     // Opened from the list, a report is about the whole inventory again.
@@ -2763,28 +3685,34 @@
       dom.tableWrap.hidden = true;
       dom.servicesTreeView.hidden = true;
       dom.pathGraphView.hidden = true;
+      dom.checksBoard.hidden = true;
       dom.viewModeBtn.hidden = true;
       dom.columnsBtn.hidden = true;
       dom.exportBtn.hidden = true;
       dom.compareBtn.hidden = true;
       dom.overviewDashboard.hidden = report.name !== "overview";
       dom.topologyView.hidden = report.name !== "topology";
+      dom.activityView.hidden = report.name !== "activity";
       if (state.source) {
         state.source.close();
         state.source = null;
       }
       if (report.name === "overview") {
         loadOverview();
-        overviewTimer = setInterval(loadOverview, 5000);
+        overviewTimer = setInterval(loadOverview.tick, PANEL_LOADING_POLL_MS);
+      } else if (report.name === "activity") {
+        loadActivity();
+        activityTimer = setInterval(loadActivity, ACTIVITY_POLL_MS);
       } else {
         state.topoKey = "";
         state.topoSelection = null;
         loadTopology();
-        topologyTimer = setInterval(loadTopology, 5000);
+        topologyTimer = setInterval(loadTopology.tick, PANEL_LOADING_POLL_MS);
       }
     } else {
       dom.overviewDashboard.hidden = true;
       dom.topologyView.hidden = true;
+      dom.activityView.hidden = true;
       dom.columnsBtn.hidden = false;
       dom.exportBtn.hidden = false;
       // A lens answers a question asked now; there is nothing to keep and
@@ -2817,7 +3745,7 @@
 
   function hasTreeView(report) {
     return Boolean(
-      report && (isLens(report) || ["bridge_domains", "services", "routers"].includes(report.name))
+      report && (isLens(report) || ["bridge_domains", "services", "routers", "checks"].includes(report.name))
     );
   }
 
@@ -2833,6 +3761,7 @@
   }
 
   function viewModes(report) {
+    if (report && report.name === "checks") return ["board", "table"];
     if (hasGraphView(report)) return ["graph", "tree", "table"];
     if (hasDiffView(report)) return ["diff", "tree", "table"];
     return ["tree", "table"];
@@ -2848,6 +3777,7 @@
     if (next === "table") return "📊 Table View";
     if (next === "graph") return "🗺 Path View";
     if (next === "diff") return "🔀 Diff View";
+    if (next === "board") return "▦ Board View";
     return isLens(state.report) ? "🌲 Tree View" : "🌲 Services View";
   }
 
@@ -2958,16 +3888,15 @@
   }
 
   // ------------------------------------------------------ query progress
-  // From opening a stream to its first table, which for a BGP RIB can take a
-  // while: a strip under the toolbar says the query runs, for how long, and -
-  // from the server's progress events - how many nodes have answered. What is
-  // still on screen from before is dimmed, as it is not the answer yet.
+  // Keep progress visible through partial tables until every node answers.
+  // Only rows left over from the previous query are dimmed.
   let queryTimer = null;
 
   function startQuery() {
     endQuery();
-    state.query = { since: performance.now(), status: null };
+    state.query = { since: performance.now(), status: null, answered: false };
     dom.queryProgress.hidden = false;
+    dom.stopLoading.hidden = !state.report || !state.report.name.startsWith("bgp_rib");
     setLive("busy", "querying");
     dom.empty.textContent = "Waiting for the first answer from the fabric…";
     // Nothing on screen yet - a report just opened, or the page came from a
@@ -2992,6 +3921,8 @@
     queryTimer = null;
     state.query = null;
     dom.queryProgress.hidden = true;
+    if (dom.queryProgressBar) dom.queryProgressBar.classList.remove("is-determinate");
+    dom.stopLoading.hidden = true;
     dom.main.classList.remove("is-querying");
     dom.empty.textContent = "No data.";
   }
@@ -3004,12 +3935,42 @@
     const title = document.createElement("strong");
     title.textContent = state.report ? state.report.title : "report";
     parts.push("Querying ", title, ` · ${seconds.toFixed(seconds < 10 ? 1 : 0)} s`);
+    const bar = dom.queryProgressBar;
     if (status.total) {
       const unit = status.total === status.nodes ? "nodes" : "node reports";
-      parts.push(` · ${status.ready} of ${status.total} ${unit} answered`);
+      const percent = Math.round((100 * status.ready) / status.total);
+      const count = document.createElement("span");
+      count.className = "query-progress-count";
+      count.textContent = ` · ${status.ready} of ${status.total} ${unit} answered (${percent}%)`;
+      parts.push(count);
+      if (bar) {
+        // Filled by what has answered, rather than only saying something moves.
+        bar.classList.add("is-determinate");
+        bar.style.setProperty("--progress", `${percent}%`);
+      }
+    } else if (bar) {
+      bar.classList.remove("is-determinate");
     }
     if (seconds > 15) parts.push(" · large tables take a while on the first read");
     dom.queryProgressLabel.replaceChildren(...parts);
+  }
+
+  function stopLoading() {
+    if (!state.query || !state.report || !state.report.name.startsWith("bgp_rib")) return;
+    const { status, answered } = state.query;
+    if (state.source) state.source.close();
+    state.source = null;
+    state.paused = true;
+    state.loadStopped = true;
+    dom.pause.textContent = "▶ Resume";
+    endQuery();
+    setLive("paused", "stopped");
+    dom.streamInfo.textContent = answered && status && status.total
+      ? `Loading stopped · partial results · ${status.ready} of ${status.total} nodes answered`
+      : "Loading stopped before a new result arrived";
+    dom.empty.textContent = "Loading stopped. Select Resume to continue.";
+    renderBody();
+    dom.pause.focus();
   }
 
   function connect() {
@@ -3037,6 +3998,10 @@
     }
     const params = queryParams();
     params.set("refresh", dom.refresh.value);
+    if (state.report.needs_query && listsAll()) {
+      dom.streamInfo.textContent =
+        "reading every node’s routes; results appear as each node answers";
+    }
     const source = new EventSource(
       `/api/stream/${encodeURIComponent(state.report.name)}?${params}`
     );
@@ -3050,12 +4015,39 @@
         /* a malformed progress event only costs the counts */
       }
     });
+    const showTable = (table) => {
+      if (table.loading) {
+        if (!state.query) startQuery();
+        state.query.answered = true;
+        updateQuery(table.loading);
+        dom.main.classList.remove("is-querying");
+        dom.empty.textContent = "Waiting for routes from the remaining nodes…";
+        setLive("busy", "loading");
+      } else {
+        endQuery();
+        setLive("live", "live");
+      }
+      ingest(table);
+    };
     source.addEventListener("table", (event) => {
-      if (state.source === source) endQuery();
-      setLive("live", "live");
-      ingest(JSON.parse(event.data));
+      if (state.source !== source) return;
+      const table = JSON.parse(event.data);
+      rememberParts(table);
+      showTable(table);
+    });
+    // A change to a few nodes of a large table: their rows alone.
+    source.addEventListener("patch", (event) => {
+      if (state.source !== source) return;
+      const table = applyPatch(JSON.parse(event.data));
+      if (table) {
+        showTable(table);
+      } else {
+        // A part this page never had: start over from a full table.
+        connect();
+      }
     });
     source.addEventListener("error", (event) => {
+      if (state.source !== source) return;
       if (event.data) {
         try {
           showErrors([{ node: "server", error: JSON.parse(event.data).error }]);
@@ -3092,12 +4084,43 @@
     dom.rowCount.textContent = "not loaded";
   }
 
+  /** Keep a full table's rows by part (node), for later patches to apply to. */
+  function rememberParts(table) {
+    state.rowParts = null;
+    if (!Array.isArray(table.row_parts)) return;
+    const parts = new Map();
+    let at = 0;
+    for (const [key, count] of table.row_parts) {
+      parts.set(key, table.rows.slice(at, at + count));
+      at += count;
+    }
+    state.rowParts = parts;
+  }
+
+  /**
+   * The table a patch makes of the one on screen: the parts it carries, the
+   * rest as they were, in the order it gives. ``null`` when it names a part
+   * this page does not have.
+   */
+  function applyPatch(patch) {
+    if (!state.rowParts) return null;
+    const parts = new Map();
+    for (const key of patch.order) {
+      const rows = Object.prototype.hasOwnProperty.call(patch.parts, key) ? patch.parts[key] : state.rowParts.get(key);
+      if (rows === undefined) return null;
+      parts.set(key, rows);
+    }
+    state.rowParts = parts;
+    return { ...patch.head, rows: [...parts.values()].flat() };
+  }
+
   function ingest(table) {
     if (state.diff) return; // a stream that outlived the switch to a comparison
     const columnsChanged = table.columns.join(" ") !== state.columns.join(" ");
     state.columns = table.columns;
     state.rows = table.rows;
     state.tree = table.tree || null;
+    state.checks = table.checks || null;
     state.records = table.records || null;
     if (state.report && state.report.name === "incidents") renderAckAll();
     state.graph = table.graph || null;
@@ -3108,7 +4131,9 @@
       renderColumnsMenu();
     }
     showErrors(state.errors);
-    dom.streamInfo.textContent = `${table.nodes} node(s), rendered in ${table.render_ms} ms`;
+    dom.streamInfo.textContent = table.loading
+      ? `Partial results · ${table.loading.ready} of ${table.loading.total} nodes answered`
+      : `${table.nodes} node(s), rendered in ${table.render_ms} ms`;
     dom.updated.textContent = "updated " + new Date().toLocaleTimeString();
     renderBody();
   }
@@ -3796,8 +4821,10 @@
       return;
     }
     const [report, column] = target;
+    // The peer as the RIB's neighbor key: the node picks its routes, rather
+    // than the whole RIB being read for a table filtered in the browser.
     jumpToFilteredReport(report, [niName], [nodeName],
-      { [column]: peer, st: BGP_RIB_USED_FILTER }, null, [nodeName]);
+      { [column]: peer, st: BGP_RIB_USED_FILTER }, { neighbor: peerAddress }, [nodeName]);
   }
 
   /**
@@ -6101,6 +7128,17 @@
     }
     dom.pathGraphView.hidden = true;
 
+    if (!state.diff && state.report && state.report.name === "checks" && state.viewMode === "board") {
+      dom.tableWrap.hidden = true;
+      dom.servicesTreeView.hidden = true;
+      dom.checksBoard.hidden = false;
+      renderChecksBoard(state.checks || []);
+      const failing = (state.checks || []).filter((c) => c.status === "error" || c.status === "warning" || c.status === "failed").length;
+      dom.rowCount.textContent = `${(state.checks || []).length} checks, ${failing} with findings, ${state.rows.length} finding(s)`;
+      return;
+    }
+    dom.checksBoard.hidden = true;
+
     if (!state.diff && isLens(state.report) && state.viewMode === "tree") {
       dom.tableWrap.hidden = true;
       dom.servicesTreeView.hidden = false;
@@ -6495,6 +7533,7 @@
   };
 
   if (dom.kpiCardHealth) dom.kpiCardHealth.addEventListener("click", () => openReport("incidents"));
+  if (dom.kpiCardTelemetry) dom.kpiCardTelemetry.addEventListener("click", () => openReport("activity"));
 
   if (dom.baselineBtn) {
     dom.baselineBtn.addEventListener("click", () => {
@@ -6544,12 +7583,16 @@
     renderBody();
   });
 
+  dom.stopLoading.addEventListener("click", stopLoading);
+
   dom.pause.addEventListener("click", () => {
     state.paused = !state.paused;
+    state.loadStopped = false;
     dom.pause.textContent = state.paused ? "▶ Resume" : "⏸ Pause";
     if (state.paused) {
       if (state.source) state.source.close();
       state.source = null;
+      endQuery();
       setLive("paused", "paused");
     } else if (state.report && state.report.name === "topology") {
       loadTopology();

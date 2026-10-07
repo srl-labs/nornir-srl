@@ -582,6 +582,11 @@ class Watcher:
         self.clock = clock
         self.persist_every = max(1, persist_every)
         self.readings = 0
+        #: Readings tried, kept or failed: what tells a first reading still
+        #: under way from one that failed, for whoever waits on it.
+        self.attempts = 0
+        #: When the reading under way started, or ``None`` between readings.
+        self.reading_since: Optional[float] = None
         #: Whether the first reading after the warm-up has been taken.
         self._settled = False
         #: Findings the timeline has reported raised and not yet cleared.
@@ -600,6 +605,10 @@ class Watcher:
         self._thread = threading.Thread(target=self._run, name="fcli-watch", daemon=True)
         self._thread.start()
 
+    @property
+    def running(self) -> bool:
+        return self._thread is not None and self._thread.is_alive() and not self._stop.is_set()
+
     def stop(self) -> None:
         self._stop.set()
         if self._thread is not None:
@@ -613,14 +622,29 @@ class Watcher:
             self.timeline.mark_stopped(self.clock())
             self._thread = None
 
+    #: How long the first reading waits for the dashboards to be read.
+    WARM_UP_WAIT = 60.0
+
     def _run(self) -> None:
+        # A node answers one Get at a time: the first reading goes after the
+        # dashboards' reports, or its far larger tables keep them empty.
+        warmed = getattr(self.store, "warmed", None)
+        if warmed is not None:
+            deadline = time.monotonic() + self.WARM_UP_WAIT
+            while not warmed.wait(0.2) and time.monotonic() < deadline:
+                if self._stop.is_set():
+                    return
         while not self._stop.is_set():
             started = time.perf_counter()
+            self.reading_since = self.clock()
             try:
                 self.tick()
             except Exception as exc:  # noqa: BLE001 - one bad reading is not the end of it
                 logger.warning("fabric reading failed: %s", exc)
                 logger.debug("fabric reading failed", exc_info=exc)
+            finally:
+                self.attempts += 1
+                self.reading_since = None
             logger.debug("fabric reading took %.2fs", time.perf_counter() - started)
             if self._stop.wait(self.interval):
                 return

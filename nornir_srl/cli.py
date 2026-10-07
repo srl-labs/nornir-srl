@@ -993,9 +993,28 @@ def bgp_rib(
         help="Include all path attributes (communities, SoO, D-PATH, tunnel-encap, "
         "status). Automatically enabled for non-table output (json/yaml/csv).",
     ),
+    all_routes: bool = typer.Option(
+        False,
+        "--all",
+        help="Every path received, not only the routes the node uses.",
+    ),
+    key: Optional[List[str]] = typer.Option(
+        None,
+        "--key",
+        "-k",
+        help="Look routes up by a key of the route list, as key=value - e.g. "
+        "mac-address=1A:A4:02:FF:00:01 or esi=00:00:00:00:01:* - in the gNMI Get "
+        "itself. Repeat for several keys.",
+    ),
     field_filter: Optional[List[str]] = FIELD_FILTER,
 ) -> None:
-    """Displays BGP RIB"""
+    """Displays BGP RIB (the used routes, unless --all)"""
+    keys: Dict[str, str] = {}
+    for item in key or []:
+        name, sep, value = item.partition("=")
+        if not sep or not name.strip() or not value.strip():
+            raise typer.BadParameter(f"'{item}' is not key=value", param_hint="--key")
+        keys[name.strip()] = value.strip()
     family = BGP_RIB_ROUTE_FAM_ALIASES.get(route_fam.lower(), route_fam)
     run_report(
         ctx,
@@ -1004,6 +1023,8 @@ def bgp_rib(
         title=f"BGP RIB ({family})",
         route_fam=route_fam,
         route_type=route_type,
+        paths="all" if all_routes else "used",
+        keys=keys,
         # Structured output has room for every attribute, so always include them.
         detail=detail or ctx.obj["output"] != OutputFormat.TABLE,
     )

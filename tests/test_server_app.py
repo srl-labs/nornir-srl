@@ -25,6 +25,7 @@ from nornir_srl.server.app import (
     table_digest,
     table_events,
 )
+from nornir_srl.connections.layer2 import ES_DEST_PATH, VXLAN_DEST_PATH, VXLAN_VNI_PATH
 from nornir_srl.server.store import FabricStore
 
 from .fakes import (
@@ -77,7 +78,9 @@ def _responses(name="leaf1"):
         # Reports gate the bridged, EVPN and VXLAN paths on this, as a node
         # that does none of them does not implement them.
         "/system/features": [{"system/features": ["bridged", "evpn", "vxlan"]}],
-        "/tunnel-interface[name=*]/vxlan-interface": [{"tunnel-interface": []}],
+        VXLAN_VNI_PATH: [{"tunnel-interface": []}],
+        VXLAN_DEST_PATH: [{"tunnel-interface": []}],
+        ES_DEST_PATH: [{"tunnel-interface": []}],
         HOSTNAME_PATH: hostname_response(name),
         ES_PATH: es_response("mh-1", ES_ESI, "lag1"),
         IFSTATS_PATH: IFSTATS_RESPONSE,
@@ -291,11 +294,13 @@ def test_table_subscribes_to_the_paths_the_report_needs(store):
 
 def test_bgp_rib_reflects_streamed_best_route_changes(store):
     fabric_store, devices = store
-    fabric_store.table(get_report("bgp_rib_evpn_2"))
+    # The whole RIB, which is what is streamed; a route asked for by key is not.
+    everything = {"scope": "all", "paths": "all"}
+    fabric_store.table(get_report("bgp_rib_evpn_2"), None, everything)
     assert wait_for(lambda: devices["leaf1"].subscribe_requests)
 
     def route_state():
-        rows = fabric_store.table(get_report("bgp_rib_evpn_2"))["rows"]
+        rows = fabric_store.table(get_report("bgp_rib_evpn_2"), None, everything)["rows"]
         leaf_rows = [r for r in rows if r["Node"] == "leaf1"]
         return leaf_rows[0]["st"] if leaf_rows else None
 
@@ -490,7 +495,7 @@ def test_rendering_a_report_keeps_its_paths_subscribed(store):
     stream = fabric_store._streams["leaf1"]
     stream.idle_timeout = 60.0
     fabric_store.table(get_report("lldp"))
-    assert stream._retire_idle_paths() is False
+    assert not stream._retire_idle_paths()
     assert stream.status()["paths"][0]["path"] == LLDP_PATH
 
 
@@ -1037,6 +1042,16 @@ def test_a_report_says_what_identifies_its_rows(client):
     test_client, _devices = client
     reports = {r["name"]: r for r in test_client.get("/api/reports").json()["reports"]}
     assert reports["bgp_peers"]["key_columns"] == ["Node", "NI", "peer"]
+
+
+def test_a_peers_routes_are_served_but_not_listed_on_their_own(client):
+    """Reached from the BGP peers table, not from the navigation."""
+    test_client, _devices = client
+    reports = {r["name"]: r for r in test_client.get("/api/reports").json()["reports"]}
+    assert not reports["bgp_received_routes"]["listed"]
+    assert not reports["bgp_advertised_routes"]["listed"]
+    # Lenses say nothing, which the browser reads as listed.
+    assert all(r.get("listed", True) for name, r in reports.items() if name not in ("bgp_received_routes", "bgp_advertised_routes"))
 
 
 # --------------------------------------------------------------------------- #
@@ -1865,3 +1880,102 @@ def test_a_failed_shared_render_fails_every_waiter_and_is_tried_again(store, mon
     with pytest.raises(RuntimeError):
         fabric_store.table(report)
     assert calls == ["lldp", "lldp"]
+
+
+# --------------------------------------------------------------------------- #
+# dashboards while the fabric is still being read
+# --------------------------------------------------------------------------- #
+
+
+def test_the_dashboards_are_read_first_at_start_up(fabric, monkeypatch):
+    monkeypatch.setattr(FabricStore, "WARM_UP_REPORTS", ("overview", "topology"))
+    nornir, _devices = fabric
+    store = FabricStore(nornir, resync_interval=0, restart_debounce=0.02)
+    store.start()
+    try:
+        assert store.warmed.wait(5)
+        assert store.progress(["overview", "topology"]) == {"ready": 4, "total": 4, "nodes": 2}
+    finally:
+        store.stop()
+
+
+def test_the_overview_answers_with_what_has_streamed_while_a_node_is_slow(store, monkeypatch):
+    fabric_store, devices = store
+    release = threading.Event()
+    slow = devices["leaf1"]
+    original = slow.get
+
+    def held(*args, **kwargs):
+        release.wait(10)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(slow, "get", held)
+    monkeypatch.setattr(FabricStore, "PAGE_WAIT", 0.3)
+    try:
+        started = time.time()
+        data = fabric_store.overview()
+        assert time.time() - started < 3, "not held up by the slow node"
+        assert data["loading"]["ready"] < data["loading"]["total"]
+        assert data["health"] is None and data["health_loading"]["total"] > 0
+        graph = fabric_store.topology()
+        assert graph["loading"] is not None and graph["health_loading"] is not None
+    finally:
+        release.set()
+    assert wait_for(lambda: fabric_store.overview()["loading"] is None, timeout=10)
+    assert wait_for(lambda: fabric_store.overview()["health"] is not None, timeout=10)
+
+
+
+def test_a_bgp_rib_looked_up_by_key_is_read_not_streamed(store):
+    """A question asked by key is a Get; streaming it would restart the node's
+    subscription for every question."""
+    fabric_store, devices = store
+    fabric_store.table(get_report("bgp_rib_evpn_2"), None, {"mac_address": "00:00:00:00:00:01"})
+    keyed = [path for path, _ in devices["leaf1"].gets if "mac-ip-route[mac-address=00:00:00:00:00:01]" in path]
+    assert keyed, "asked for by key, in the Get"
+    time.sleep(0.2)
+    subscribed = json.dumps(devices["leaf1"].subscribe_requests)
+    assert "mac-ip-route" not in subscribed
+
+
+def test_a_report_s_keys_are_offered_most_common_first(store):
+    import dataclasses
+
+    fabric_store, _devices = store
+    rows = [
+        {"ni": "default", "mac-address": "AA:00", "neighbor": "10.0.0.1"},
+        {"ni": "default", "mac-address": "AA:00", "neighbor": "10.0.0.2"},
+        {"ni": "default", "mac-address": "BB:00", "neighbor": "10.0.0.1"},
+    ]
+    report = dataclasses.replace(get_report("bgp_rib_evpn_2"), keys=lambda _device: rows)
+    found = fabric_store.key_values(report, "mac_address")
+    assert [v["value"] for v in found["values"]] == ["AA:00", "BB:00"]
+    assert found["values"][0]["routes"] == 4, "two rows on each of the two nodes"
+    narrowed = fabric_store.key_values(report, "mac_address", None, {"neighbor": "10.0.0.2"})
+    assert [v["value"] for v in narrowed["values"]] == ["AA:00"]
+    typed = fabric_store.key_values(report, "mac_address", None, None, "bb")
+    assert [v["value"] for v in typed["values"]] == ["BB:00"]
+    globbed = fabric_store.key_values(report, "mac_address", None, None, "A*")
+    assert [v["value"] for v in globbed["values"]] == ["AA:00"]
+
+
+def test_the_keys_endpoint_takes_only_a_key_parameter(client):
+    test_client, _devices = client
+    assert test_client.get("/api/keys/bgp_rib_evpn_2?param=paths").status_code == 400
+    assert test_client.get("/api/keys/lldp?param=x").status_code == 400
+    resp = test_client.get("/api/keys/bgp_rib_evpn_2?param=mac_address")
+    assert resp.status_code == 200 and resp.json()["param"] == "mac_address"
+
+
+def test_the_telemetry_card_counts_paths_by_how_they_are_served():
+    from nornir_srl.server.store import _telemetry_summary
+
+    statuses = [
+        ("leaf1", {"backlog": 3, "paths": [{"streaming": True}, {"pending": True}]}),
+        ("leaf2", {"backlog": 0, "paths": [{"streaming": True}, {"polled": True}, {"streaming": True}]}),
+    ]
+    summary = _telemetry_summary(statuses, 300, 9)
+    assert (summary["subscriptions"], summary["nodes"], summary["streaming"]) == (5, 2, 3)
+    assert (summary["pending"], summary["polled"]) == (1, 1)
+    assert (summary["backlog"], summary["backlog_node"]) == (3, "leaf1")
+    assert _telemetry_summary([("leaf1", {"backlog": 0, "paths": []})], 300, 0)["backlog_node"] is None

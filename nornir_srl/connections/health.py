@@ -282,8 +282,11 @@ class HealthMixin:
         components: List[Component] = []
         paths = [p for p in _COMPONENT_PATHS if p[0] != "fabric" or "chassis" in self._features()]
         for kind, path, key in paths:
-            payload = _payload(self._get_optional(path), "platform")
-            for item in _dicts(_container(payload).get(kind)):
+            if kind in _CARD_LEAVES_ONLY:
+                items = self._card_leaves(kind, path, key)
+            else:
+                items = _dicts(_container(_payload(self._get_optional(path), "platform")).get(kind))
+            for item in items:
                 components.append(
                     Component(
                         kind=kind,
@@ -296,6 +299,20 @@ class HealthMixin:
                 )
         return {"components": components}
 
+    def _card_leaves(self, kind: str, path: str, key: str) -> List[Dict[str, Any]]:
+        """The leaves of each card a component is made of, card by card.
+
+        Not the card's subtree: a line card's holds the forwarding tables,
+        a hundred thousand leaves on an EVPN fabric of a thousand services,
+        which the server would otherwise be sent again every sample.
+        """
+        cards: Dict[str, Dict[str, Any]] = {}
+        for leaf in _CARD_LEAVES:
+            payload = _payload(self._get_optional(f"{path}/{leaf}", datatype="all"), "platform")
+            for item in _dicts(_container(payload).get(kind)):
+                cards.setdefault(_text(item.get(key)), {}).update(item)
+        return list(cards.values())
+
     def get_transceivers(self) -> Dict[str, Any]:
         resp = self._get_optional("/interface[name=*]/transceiver")
         found = []
@@ -307,6 +324,12 @@ class HealthMixin:
             found.append(_transceiver(_text(itf.get("name")), optic))
         return {"transceivers": found}
 
+
+#: What a component is read as: whether it is up and healthy, and what it is.
+_CARD_LEAVES: Tuple[str, ...] = ("oper-state", "healthz", "type", "serial-number")
+
+#: The components read leaf by leaf rather than whole; see _card_leaves.
+_CARD_LEAVES_ONLY = frozenset({"linecard"})
 
 #: Hardware lists, with the key each is indexed by. ``fabric`` is asked only
 #: of a modular chassis; see :meth:`HealthMixin.get_components`.

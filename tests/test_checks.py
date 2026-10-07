@@ -429,6 +429,38 @@ def test_evpn_service_mismatch_finds_a_vni_that_differs():
     assert all("VNI" in f["Detail"] for f in findings)
 
 
+def test_evpn_service_mismatch_does_not_hold_an_unread_vni_against_every_node():
+    """A node read without its vxlan-interfaces has an unknown VNI, not a different one."""
+    state = fabric(
+        ni={**_ni("leaf1"), **_ni("leaf2"), **_ni("leaf3")},
+        vxlan={"leaf1": [], **_vxlan("leaf2"), **_vxlan("leaf3")},
+    )
+    findings = run("evpn_service_mismatch", state)
+    # One warning about the gap, on the node that has it - not an error per
+    # service on every node carrying it.
+    assert [(f["Node"], f["Severity"], f["Subject"]) for f in findings] == [("leaf1", "warning", "VNI")]
+    assert "vxlan1.100" in findings[0]["Detail"]
+
+
+def test_evpn_service_mismatch_leaves_an_unreadable_vxlan_report_to_collection():
+    state = fabric(
+        ni={**_ni("leaf1"), **_ni("leaf2")},
+        vxlan=_vxlan("leaf2"),
+    )
+    state.errors[("vxlan", "leaf1")] = "timed out"
+    assert run("evpn_service_mismatch", state) == []
+
+
+def test_evpn_service_mismatch_still_compares_route_targets_without_a_vni():
+    state = fabric(
+        ni={**_ni("leaf1", out_rt="65000:999"), **_ni("leaf2")},
+        vxlan={"leaf1": [], **_vxlan("leaf2")},
+    )
+    findings = run("evpn_service_mismatch", state)
+    assert any(f["Severity"] == "error" and "export route-target" in f["Detail"] for f in findings)
+    assert not any(f["Detail"].startswith("VNI") for f in findings)
+
+
 def test_evpn_service_mismatch_finds_route_targets_that_differ():
     state = fabric(
         ni={**_ni("leaf1"), **_ni("leaf2", out_rt="65000:999")},
@@ -952,3 +984,33 @@ def test_bgp_peer_mismatch_compares_no_as_a_dynamic_neighbour_only_learned():
         _session("10.0.0.1", 65100, 65001, state="active"),
     )
     assert run("bgp_peer_mismatch", state) == []
+
+
+def test_check_results_list_every_check_passing_failing_or_skipped():
+    from nornir_srl.checks import CHECKS, Finding, check_results
+    from nornir_srl.fabric import FabricState
+
+    state = FabricState()
+    first, second = CHECKS[0], CHECKS[1]
+    for report in first.requires:
+        state.reports[report] = {"leaf1": [], "leaf2": []}
+    for report in second.requires:
+        state.reports[report] = {"leaf1": [], "leaf2": []}
+    state.errors[("lldp", "spine1")] = "unreachable"
+    findings = [
+        Finding(first.name, "error", "leaf1", "peer 10.0.0.1", "down"),
+        Finding(first.name, "warning", "leaf2", "peer 10.0.0.2", "flapping"),
+        Finding("collection", "warning", "spine1", "lldp", "not checked: unreachable"),
+    ]
+    results = {r["name"]: r for r in check_results(state, findings)}
+    assert set(results) == {c.name for c in CHECKS} | {"collection"}
+    one = results[first.name]
+    assert (one["status"], one["errors"], one["warnings"]) == ("error", 1, 1)
+    assert one["nodes"] == {"leaf1": "error", "leaf2": "warning"}
+    assert results[second.name]["status"] == "pass"
+    assert results[second.name]["nodes"] == {"leaf1": "pass", "leaf2": "pass"}
+    unread = [c for c in CHECKS if c.requires and not set(c.requires) & set(state.reports)]
+    assert unread and all(results[c.name]["status"] == "skipped" for c in unread)
+    assert results["collection"]["status"] == "warning"
+    ordered = check_results(state, findings)
+    assert ordered[0]["status"] == "error", "worst first"

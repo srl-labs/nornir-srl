@@ -15,7 +15,6 @@ leaves merged in) by :func:`materialize`.
 
 from __future__ import annotations
 
-import copy
 import fnmatch
 import re
 import time
@@ -35,6 +34,8 @@ __all__ = [
     "prune",
     "sweep",
     "select_path",
+    "select_many",
+    "select_materialized",
     "strip_module",
     "strip_values",
 ]
@@ -338,9 +339,11 @@ def _merge_into(
     key_hints: Optional[Dict[str, List[str]]] = None,
     pin: bool = False,
 ) -> None:
-    """Merge a decoded JSON object into a tree node."""
-    for raw_key, raw_val in value.items():
-        _set_child(node, strip_module(raw_key), strip_values(raw_val), key_hints, pin)
+    """Merge an object already normalized by :func:`insert` into a tree node."""
+    # insert strips the entire value once. Repeating that recursive walk at
+    # every container level copies large RIBs and attribute tables repeatedly.
+    for key, child in value.items():
+        _set_child(node, key, child, key_hints, pin)
 
 
 def strip_values(value: Any) -> Any:
@@ -526,8 +529,22 @@ def materialize(node: Any) -> Any:
         items = list(node.items())
         return {k: materialize(v) for k, v in items}
     if isinstance(node, list):
-        return copy.deepcopy(node)
+        return _copy_json(node)
     return node
+
+
+def _copy_json(value: Any) -> Any:
+    """A copy of a decoded JSON value: all a tree's opaque lists ever hold.
+
+    Several times quicker than :func:`copy.deepcopy`, which has to allow for
+    shared references and arbitrary objects - and a dashboard copies a LAG's
+    thousand subinterfaces on every poll.
+    """
+    if isinstance(value, dict):
+        return {k: _copy_json(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_copy_json(v) for v in value]
+    return value
 
 
 def prune(node: Any, cutoff: float) -> int:
@@ -638,6 +655,154 @@ def _select_children(container: Any, elems: List[Tuple[str, Dict[str, str]]]) ->
         return None
     leaves = {k: v for k, v in container.items() if not _is_branch(v)}
     return {**leaves, name: child}
+
+
+def select_materialized(node: Any, request: str, envelope: str) -> Any:
+    """``select_path(materialize(node), request, envelope)``, without the waste.
+
+    Walks the tree itself and renders only what *request* selects. Materializing
+    the whole envelope first copies every entry every other subscription put
+    under it - on a node with a thousand network-instances, all of them for a
+    report that reads one leaf of each - and the stream's lock is held all the
+    while. The answer is the same one, entry for entry.
+    """
+    elems = parse_path(request)
+    depth = len(parse_path(envelope)) if envelope else 0
+    if depth == 0:
+        selected = _tree_select_children(node, elems)
+    else:
+        selected = _tree_select(node, elems[depth - 1 :])
+    if selected is None:
+        return [] if isinstance(node, (ListNode, list)) else {}
+    return selected
+
+
+def _tree_select(node: Any, elems: List[Tuple[str, Dict[str, str]]]) -> Any:
+    """:func:`_select` on a tree node rather than on its materialized form."""
+    if not elems:
+        return materialize(node)
+    if not isinstance(node, (ListNode, dict)):
+        return _select(materialize(node), elems)
+    keys = elems[0][1]
+    rest = elems[1:]
+    if isinstance(node, ListNode):
+        entries = [
+            (entry_keys, child)
+            for entry_keys, child in list(node.entries.values())
+            if _entry_matches(entry_keys, child, keys)
+        ]
+        if not rest:
+            return [{**entry_keys, **materialize(child)} for entry_keys, child in entries]
+        kept = [_tree_select_children(child, rest, entry_keys) for entry_keys, child in entries]
+        return [item for item in kept if item is not None] or None
+    if not rest:
+        return materialize(node)
+    return _tree_select_children(node, rest)
+
+
+def _tree_select_children(
+    container: Any,
+    elems: List[Tuple[str, Dict[str, str]]],
+    keys: Optional[Dict[str, Any]] = None,
+) -> Any:
+    """:func:`_select_children` on a tree node, a list entry's *keys* merged in."""
+    keys = keys or {}
+    if not isinstance(container, dict):
+        return _select_children(materialize(container), elems)
+    if not elems:
+        return {**keys, **materialize(container)}
+    name = elems[0][0]
+    if name in container:
+        child = _tree_select(container[name], elems)
+    elif name in keys:
+        child = _select(keys[name], elems)
+    else:
+        return None
+    if child is None or child == [] or child == {}:
+        return None
+    leaves: Dict[str, Any] = {}
+    for k in [*keys, *(k for k in container if k not in keys)]:
+        value = container[k] if k in container else keys[k]
+        if not _tree_is_branch(value):
+            leaves[k] = materialize(value)
+    return {**leaves, name: child}
+
+
+def select_many(root: Dict[str, Any], requests: Sequence[str]) -> Dict[str, Any]:
+    """The whole tree, rendered as far as any of *requests* reaches into it.
+
+    What a summary spanning several paths reads - the dashboards, each over
+    its report's subscriptions. Rendering whole roots instead also copies
+    every table any other report streams under them, which on a large fabric
+    is nearly all of the work. Like :func:`select_path`, an entry holding
+    none of the requested branches is left out, and the leaves along the way
+    are kept.
+    """
+    return _many_children(root, [parse_path(r) for r in requests]) or {}
+
+
+def _many_children(
+    container: Any,
+    paths: List[List[Tuple[str, Dict[str, str]]]],
+    keys: Optional[Dict[str, Any]] = None,
+) -> Optional[Dict[str, Any]]:
+    """*container* restricted to the children the first element of *paths* name."""
+    keys = keys or {}
+    if not isinstance(container, dict):
+        return None
+    if any(not path for path in paths):
+        return {**keys, **materialize(container)}
+    by_name: Dict[str, List[List[Tuple[str, Dict[str, str]]]]] = {}
+    for path in paths:
+        by_name.setdefault(path[0][0], []).append(path)
+    branches: Dict[str, Any] = {}
+    for name, named in by_name.items():
+        if name not in container:
+            continue
+        child = _many_node(container[name], named)
+        if child is None or child == [] or child == {}:
+            continue
+        branches[name] = child
+    if not branches:
+        return None
+    leaves: Dict[str, Any] = {}
+    for k in [*keys, *(k for k in container if k not in keys)]:
+        value = container[k] if k in container else keys[k]
+        if not _tree_is_branch(value):
+            leaves[k] = materialize(value)
+    return {**leaves, **branches}
+
+
+def _many_node(node: Any, paths: List[List[Tuple[str, Dict[str, str]]]]) -> Any:
+    """*node*, which each of *paths* starts at, restricted to what they select."""
+    if isinstance(node, ListNode):
+        kept = []
+        for entry_keys, child in list(node.entries.values()):
+            live = [path[1:] for path in paths if _entry_matches(entry_keys, child, path[0][1])]
+            if live:
+                item = _many_children(child, live, entry_keys)
+                if item is not None:
+                    kept.append(item)
+        return kept or None
+    if isinstance(node, dict):
+        return _many_children(node, [path[1:] for path in paths])
+    return materialize(node)
+
+
+def _entry_matches(entry_keys: Dict[str, Any], child: Dict[str, Any], keys: Dict[str, str]) -> bool:
+    """:func:`_matching_entries` for one list entry, without rendering it."""
+    for key, pattern in keys.items():
+        value = materialize(child[key]) if key in child else entry_keys.get(key, "")
+        if not key_matches(pattern, str(value)):
+            return False
+    return True
+
+
+def _tree_is_branch(value: Any) -> bool:
+    """:func:`_is_branch` on a tree node: a non-empty list renders as one."""
+    if isinstance(value, ListNode):
+        return bool(value.entries)
+    return _is_branch(value)
 
 
 def _is_branch(value: Any) -> bool:

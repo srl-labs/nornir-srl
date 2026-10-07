@@ -44,7 +44,7 @@ DEFAULT_PORT = 57400
 #: correlates the reports it declares, and is recorded through those;
 #: ``bgp_received_routes`` makes exactly the gets of the ``bgp_rib_*``
 #: reports, and is replayed from theirs.
-SKIP = {"overview", "topology", "checks", "bgp_received_routes"}
+SKIP = {"overview", "topology", "activity", "checks", "bgp_received_routes"}
 
 
 class RecordingDevice(SrLinux):

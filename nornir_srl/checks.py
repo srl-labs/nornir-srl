@@ -435,14 +435,16 @@ def check_mtu_outlier(state: FabricState) -> List[Finding]:
 # --------------------------------------------------------------------------- #
 
 
-def service_facts(vni: str, instances: Sequence[Any]) -> Dict[str, Any]:
+def service_facts(vni: Optional[str], instances: Sequence[Any]) -> Dict[str, Any]:
     """What one node thinks a service looks like, by the name of each fact.
 
     The route-targets are one fact per bgp-vpn instance: a gateway carries a
     second instance for its WAN side, with route-targets the leaves never
-    see, and that is not the two of them disagreeing.
+    see, and that is not the two of them disagreeing. A *vni* of ``None`` is
+    one that could not be read, which leaves the VNI out rather than holding
+    an unknown against every other node's.
     """
-    facts: Dict[str, Any] = {"VNI": vni}
+    facts: Dict[str, Any] = {} if vni is None else {"VNI": vni}
     for inst in instances:
         which = f" of bgp-instance {inst.id}" if inst.id != 1 else ""
         facts[f"import route-target{which}"] = _rt_set(inst.import_rts)
@@ -580,11 +582,17 @@ def check_evpn_service_mismatch(state: FabricState) -> List[Finding]:
     # and which nodes carry it as a gateway, with a WAN-side instance too.
     services: Dict[str, Dict[str, Dict[str, Any]]] = {}
     gateways: Dict[str, Set[str]] = {}
+    # vxlan-interfaces a service names that the node's VXLAN state does not
+    # have. Their VNI is unknown, not different: held against every other
+    # node, one gap in a node's state is an error per service per node.
+    unknown: Dict[str, List[str]] = {}
     for node, instance in state.items("ni"):
         if _text(instance.type) not in ("mac-vrf", "ip-vrf"):
             continue
+        missing = [overlay for overlay in instance.overlays if (node, overlay) not in vnis]
+        unknown.setdefault(node, []).extend(missing)
         services.setdefault(instance.name, {})[node] = service_facts(
-            ", ".join(str(vnis.get((node, overlay), "?")) for overlay in instance.overlays),
+            None if missing else ", ".join(str(vnis[(node, overlay)]) for overlay in instance.overlays),
             instance.instances,
         )
         if len(instance.instances) > 1:
@@ -608,6 +616,22 @@ def check_evpn_service_mismatch(state: FabricState) -> List[Finding]:
                 )
 
     findings: List[Finding] = []
+    # A node whose VXLAN state could not be read at all is a collection
+    # finding already; one read without these interfaces is said once here.
+    read = state.reports.get("vxlan") or {}
+    for node, missing in sorted(unknown.items()):
+        if not missing or node not in read:
+            continue
+        shown = ", ".join(missing[:5]) + (f" and {len(missing) - 5} more" if len(missing) > 5 else "")
+        findings.append(
+            Finding(
+                check="evpn_service_mismatch",
+                severity=WARNING,
+                node=node,
+                subject="VNI",
+                detail=f"no VXLAN state for {len(missing)} vxlan-interface(s) its services use ({shown}); their VNI was not compared",
+            )
+        )
     for name, by_node in sorted(services.items()):
         wan = gateways.get(name, set())
         for domain in underlay_domains(list(by_node), system, hosts, wan):
@@ -1369,6 +1393,67 @@ def collect_fabric_state(
     them. A lens names its own.
     """
     return _collect(target, reports)
+
+
+#: What a check came to, as the Checks page shows it, worst first.
+CHECK_STATUSES = ("failed", "error", "warning", "skipped", "pass")
+
+
+def check_results(state: FabricState, findings: Sequence[Finding]) -> List[Dict[str, Any]]:
+    """Each check, whether it ran, and what it found where - the passing ones too.
+
+    *findings* is what :func:`run_checks` made of *state*. A check is
+    ``skipped`` when none of the reports it reads were collected, ``failed``
+    when it raised, and otherwise as bad as its worst finding, or ``pass``.
+    ``nodes`` holds every node the check had something to read on, with the
+    worst it found there - ``pass`` where it found nothing - so a passing node
+    shows as one rather than as missing. The nodes the checks could not read
+    at all are a check of their own, ``collection``.
+    """
+    by_check: Dict[str, List[Finding]] = {}
+    for finding in findings:
+        by_check.setdefault(finding.check, []).append(finding)
+
+    def summary(name: str, title: str, requires: Tuple[str, ...], ran: bool, checked: Set[str]) -> Dict[str, Any]:
+        found = by_check.get(name, [])
+        failed = any(f.node == "-" and f.subject == "check failed" for f in found)
+        errors = sum(1 for f in found if f.severity == ERROR)
+        warnings = sum(1 for f in found if f.severity == WARNING)
+        nodes: Dict[str, str] = {node: "pass" for node in checked}
+        for f in found:
+            if f.node == "-":
+                continue
+            worst = nodes.get(f.node, "pass")
+            if worst == "pass" or (worst == WARNING and f.severity == ERROR):
+                nodes[f.node] = f.severity
+        status = (
+            "failed" if failed
+            else "skipped" if not ran
+            else ERROR if errors
+            else WARNING if warnings
+            else "pass"
+        )
+        return {
+            "name": name,
+            "title": title,
+            "requires": list(requires),
+            "status": status,
+            "errors": errors,
+            "warnings": warnings,
+            "nodes": dict(sorted(nodes.items())),
+            "findings": [f.as_row() for f in found],
+        }
+
+    results = []
+    for check in CHECKS:
+        collected = {node for report in check.requires for node in (state.reports.get(report) or {})}
+        ran = not check.requires or bool(collected)
+        results.append(summary(check.name, check.title, check.requires, ran, collected if ran else set()))
+    unread = {node for (_report, node) in state.errors}
+    read = {node for payloads in state.reports.values() for node in payloads}
+    results.append(summary("collection", "Nodes the checks could not read", (), True, read | unread))
+    results.sort(key=lambda r: (CHECK_STATUSES.index(r["status"]), -(r["errors"] + r["warnings"]), r["title"]))
+    return results
 
 
 def run_checks(

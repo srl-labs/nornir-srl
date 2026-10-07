@@ -101,6 +101,11 @@ class GnmiSubscription:
             # queue forever.
             self.error = ConnectionError("subscription closed by target")
 
+    @property
+    def backlog(self) -> int:
+        """Notifications received and not yet read."""
+        return self._updates.qsize()
+
     def get_update(self, timeout: Optional[float] = None) -> Dict[str, Any]:
         """Return the next parsed notification.
 

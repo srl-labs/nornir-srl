@@ -526,7 +526,7 @@ CONVERTED = (
 
 #: What is left without a table: computed by the server's store rather than a
 #: getter, nested too deep for a table, or collected fabric-wide as findings.
-NOT_A_GETTER = ("overview", "topology", "services", "bridge_domains", "routers", "routing_pol", "checks")
+NOT_A_GETTER = ("overview", "topology", "activity", "services", "bridge_domains", "routers", "routing_pol", "checks")
 
 
 @pytest.mark.parametrize("name", CONVERTED)

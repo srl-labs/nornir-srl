@@ -365,7 +365,9 @@ def test_components_survive_a_chassis_without_fabric_modules():
         {
             "/system/features": [{"system/features": ["bridged"]}],
             "/platform/control[slot=*]": [{"platform": {"control": [{"slot": "A", "oper-state": "up", "healthz": {"status": "healthy"}}]}}],
-            "/platform/linecard[slot=*]": [{"platform": {"linecard": [{"slot": 1, "oper-state": "up", "type": "imm36"}]}}],
+            # Leaf by leaf: a line card's subtree holds the forwarding tables.
+            "/platform/linecard[slot=*]/oper-state": [{"platform": {"linecard": [{"slot": 1, "oper-state": "up"}]}}],
+            "/platform/linecard[slot=*]/type": [{"platform": {"linecard": [{"slot": 1, "type": "imm36"}]}}],
             "/platform/fan-tray[id=*]": [{"platform": {"fan-tray": [{"id": 1, "oper-state": "failed"}]}}],
             "/platform/power-supply[id=*]": [{"platform": {"power-supply": [{"id": 1, "oper-state": "empty"}]}}],
         }

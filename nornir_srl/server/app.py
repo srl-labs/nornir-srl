@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import functools
-import hashlib
 import json
 import logging
 import threading
@@ -28,7 +27,8 @@ from ..lenses import LENSES_BY_NAME, coerce_lens_params, lenses_for
 from ..reports import SERVER, ReportSpec, coerce_params, get_report, reports_for
 from .agent import NO_PROVIDER, ChatService
 from .snapshots import SnapshotStore, _slug, comparable
-from .store import FabricStore
+from .store import FabricStore, ReportLoad, full_table_read
+from .table import SerializedTable, serialize_table, table_digest
 
 logger = logging.getLogger(__name__)
 
@@ -87,16 +87,6 @@ def parse_nodes(value: Optional[str]) -> Optional[List[str]]:
     return names or None
 
 
-def table_digest(table: Dict[str, Any]) -> str:
-    """Fingerprint the parts of a rendered table the browser actually shows."""
-    material = json.dumps(
-        {"c": table.get("columns"), "r": table.get("rows"), "e": table.get("errors")},
-        default=str,
-        sort_keys=True,
-    )
-    return hashlib.sha1(material.encode()).hexdigest()
-
-
 async def table_events(
     store: FabricStore,
     name: str,
@@ -116,14 +106,28 @@ async def table_events(
     :data:`PROGRESS_INTERVAL` says the query is still running: the seconds it
     has taken, and what *progress* knows of how many nodes have answered. A
     slow first answer then reads as work in progress rather than as nothing.
+
+    After the first table, a change to a table built from per-node parts is
+    sent as a ``patch`` event: the rows of the nodes that changed, with the
+    order of all of them, rather than every row of the fabric again.
     """
     loop = asyncio.get_running_loop()
     last_digest = ""
     last_sent = 0.0
+    previous: Optional[SerializedTable] = None
+
+    def encoded_render(before: Optional[SerializedTable]):
+        table = render()
+        encoded = serialize_table(table)
+        # Built here, in the worker: a patch of most of a fabric is most of
+        # the table, too much to join on the event loop.
+        patch = encoded.patch_from(before) if before is not None and encoded.digest != before.digest else None
+        return encoded, bool(table.get("loading")), patch
+
     try:
         while not await is_disconnected() and not store.stopping:
             try:
-                task = asyncio.ensure_future(anyio.to_thread.run_sync(render))
+                task = asyncio.ensure_future(anyio.to_thread.run_sync(encoded_render, previous))
                 started = loop.time()
                 while not last_digest:
                     done, _pending = await asyncio.wait({task}, timeout=PROGRESS_INTERVAL)
@@ -138,7 +142,7 @@ async def table_events(
                         except Exception:  # noqa: BLE001 - the elapsed time still says it
                             pass
                     yield f"event: progress\ndata: {json.dumps(status)}\n\n".encode()
-                table = await task
+                encoded, loading, patch = await task
             except (asyncio.CancelledError, GeneratorExit):
                 break
             except ValueError as exc:
@@ -158,17 +162,17 @@ async def table_events(
                 continue
             if store.stopping:
                 return
-            digest = table_digest(table)
+            digest = encoded.digest
             now = loop.time()
             if digest != last_digest:
                 last_digest = digest
                 last_sent = now
-                body = json.dumps(table, default=str)
-                yield f"event: table\ndata: {body}\n\n".encode()
+                previous = encoded
+                yield patch if patch is not None else encoded.event
             elif now - last_sent > SSE_HEARTBEAT:
                 last_sent = now
                 yield b": keep-alive\n\n"
-            deadline = loop.time() + interval
+            deadline = loop.time() + (min(interval, PROGRESS_INTERVAL) if loading else interval)
             while loop.time() < deadline:
                 if store.stopping or await is_disconnected():
                     return
@@ -526,7 +530,9 @@ def create_app(
             raise KeyError(f"report '{name}' cannot be streamed")
         return report
 
-    def renderer(request: Request) -> Callable[[], Dict[str, Any]]:
+    def renderer(
+        request: Request, *, progressive: bool = False, load: Optional[ReportLoad] = None
+    ) -> Callable[[], Dict[str, Any]]:
         """What answers the named report or lens, with the request's arguments.
 
         A lens and a report are asked for the same way and answer in the same
@@ -543,7 +549,8 @@ def create_app(
         report = streamable_report(name)
         params = coerce_params(report, request.query_params)
         hosts = parse_nodes(request.query_params.get("node"))
-        return lambda: store.table(report, inv_filter, params, hosts)
+        gradual = progressive and full_table_read(report, params)
+        return lambda: store.table(report, inv_filter, params, hosts, progressive=gradual, load=load if gradual else None)
 
     def progress_of(request: Request) -> Callable[[], Dict[str, Any]]:
         """How far the nodes are with what the named report or lens reads."""
@@ -553,7 +560,35 @@ def create_app(
         if lens is not None and lens.on(SERVER):
             return lambda: store.progress(list(lens.requires), inv_filter)
         hosts = parse_nodes(request.query_params.get("node"))
-        return lambda: store.progress([name], inv_filter, hosts)
+        try:
+            report = streamable_report(name)
+            activated = store.activation_name(report, coerce_params(report, request.query_params))
+        except (KeyError, ValueError):
+            activated = name
+        return lambda: store.progress([activated], inv_filter, hosts)
+
+    async def report_keys(request: Request) -> Response:
+        """The values a key parameter of a report takes, for a surface to offer."""
+        try:
+            report = streamable_report(request.path_params["name"])
+        except KeyError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=404)
+        param = request.query_params.get("param", "")
+        if not any(spec.name == param and spec.kind == "rib-key" for spec in report.params):
+            return JSONResponse({"error": f"'{param}' is not a key of {report.name}"}, status_code=400)
+        inv_filter = parse_kv(request.query_params.get("inv_filter"))
+        try:
+            chosen = coerce_params(report, request.query_params)
+        except ValueError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400)
+        keys = {k: v for k, v in chosen.items() if any(s.name == k and s.kind == "rib-key" for s in report.params)}
+        try:
+            found = await anyio.to_thread.run_sync(
+                lambda: store.key_values(report, param, inv_filter, keys, request.query_params.get("q", ""))
+            )
+        except KeyError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=404)
+        return JSONResponse(found)
 
     async def report_once(request: Request) -> Response:
         try:
@@ -563,14 +598,15 @@ def create_app(
         except ValueError as exc:
             return JSONResponse({"error": str(exc)}, status_code=400)
         try:
-            table = await anyio.to_thread.run_sync(render)
+            body = await anyio.to_thread.run_sync(lambda: serialize_table(render()).body)
         except ValueError as exc:
             return JSONResponse({"error": str(exc)}, status_code=400)
-        return JSONResponse(table)
+        return Response(body, media_type="application/json")
 
     async def report_stream(request: Request) -> Response:
+        load = ReportLoad()
         try:
-            render = renderer(request)
+            render = renderer(request, progressive=True, load=load)
         except KeyError as exc:
             return JSONResponse({"error": str(exc)}, status_code=404)
         except ValueError as exc:
@@ -580,15 +616,18 @@ def create_app(
         except ValueError:
             interval = refresh
 
+        async def events() -> AsyncIterator[bytes]:
+            try:
+                async for event in table_events(
+                    store, request.path_params["name"], render, interval,
+                    request.is_disconnected, progress_of(request),
+                ):
+                    yield event
+            finally:
+                store.cancel_load(load)
+
         return StreamingResponse(
-            table_events(
-                store,
-                request.path_params["name"],
-                render,
-                interval,
-                request.is_disconnected,
-                progress_of(request),
-            ),
+            events(),
             media_type="text/event-stream",
             headers=_SSE_HEADERS,
         )
@@ -768,6 +807,7 @@ def create_app(
         Route("/api/ack", ack_change, methods=["POST"]),
         Route("/api/unack", ack_change, methods=["POST"]),
         Route("/api/ack-all", ack_all, methods=["POST"]),
+        Route("/api/keys/{name}", report_keys),
         Route("/api/report/{name}", report_once),
         Route("/api/stream/{name}", report_stream),
         Route("/api/diff/{name}", report_diff),

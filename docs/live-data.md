@@ -1,6 +1,6 @@
 # How the Live Data Works
 
-`fcli server` serves the same reports as the CLI as a live web UI, kept continuously up-to-date by gNMI **subscriptions** rather than periodic polling. Every node in the inventory receives a single `Subscribe` RPC carrying the paths needed by the open reports. Whenever data changes on a device, updated tables are rendered and pushed to the browser via Server-Sent Events (SSE).
+`fcli server` serves the same reports as the CLI as a live web UI, kept continuously up-to-date by gNMI **subscriptions** rather than periodic polling. Every node in the inventory receives a `Subscribe` RPC carrying the paths needed by the open reports, and a second one for BGP RIB paths once a RIB view streams. Whenever data changes on a device, updated tables are rendered and pushed to the browser via Server-Sent Events (SSE).
 
 ## Telemetry architecture
 
@@ -19,7 +19,11 @@ flowchart TD
 When a report is opened for the first time, the server executes its getter once against a recording proxy of the gNMI connection. This captures the exact set of gNMI paths the report reads. As a result, subscription paths never have to be manually declared or maintained separately from report getters.
 
 ### 2. State bootstrapping & shape pinning
-Each discovered path is bootstrapped with a standard gNMI `Get`. This seeds an in-memory state tree for the node and pins down the response structure the report getter expects.
+Each discovered path seeds an in-memory state tree for the node and pins down the response structure the report getter expects. The server reuses the discovery response for bootstrap, unless a related update arrived during discovery. Predeclared paths and later resynchronizations use a fresh gNMI `Get`. Small lookups fetch only the referenced keys in one batched Get, shared with the first render through the fallback cache. Above 10,000 keys, discovery reads the lookup table once and reuses that response for bootstrap and subscription. Concurrent clients share each node's activation.
+
+When a BGP RIB view lists all routes, the browser receives partial tables as individual nodes finish their first reads. It shows how many nodes have answered and keeps the loading indicator until every selected node has finished or reported an error. A node's routes arrive together, after its routes and attributes have been read; this is progress across nodes, not pagination of a single node's Get. At most four nodes run these full-table reads concurrently to limit competition for CPU and memory. Other reports' first reads have workers of their own, so a small report such as the IPv4 RIB never queues behind a RIB download. Activation has separate workers so it cannot queue completed nodes' renders behind it. The one-shot report API and saved readings still wait for the complete result.
+
+BGP RIB reports show **Stop loading** while a query is running. It closes that browser's stream and preserves the rows already displayed; **Resume** continues loading. For full-table reads, queued node activations are cancelled when no other viewer or background request needs them. A discovery Get already in flight may finish, then cancellation stops the next discovery read. Existing shared subscriptions and reads used by other viewers continue. Leaving the report also releases its unfinished activation work.
 
 ### 3. STREAM subscriptions: ON_CHANGE and SAMPLE
 A gNMI `Subscribe` in STREAM mode keeps the node's state tree current. Report getters execute directly against this local tree instead of querying the physical device, rendering tables with zero device round-trips.
@@ -36,9 +40,17 @@ Because SR Linux streams entire subtrees when subscribing to a branch, multiple 
 ### 4. Fallback polling & cache resynchronization
 Paths that cannot be streamed fall back to short-TTL `Get` operations. Additionally, every node is fully re-read every `--resync` seconds (default: 300s) to guarantee that missed deletions cannot leave stale rows behind. Re-sync sweeps are executed round-robin across nodes rather than simultaneously.
 
+BGP routes reference separate attribute sets for fields such as RT, AS-path and communities. If a referenced set is missing from the streamed tree, the server checks the device with a batched fallback `Get`. An absent answer expires after the fallback TTL; newly streamed attributes take precedence immediately. This lets missing attributes recover without requiring a full report reload or adding subscriptions for individual attribute IDs.
+
+Small BGP reports subscribe to their routes without subscribing to the shared attribute table, which also contains attributes for other address families. Their attribute lookups reuse an existing table subscription when available, or a Get of just the referenced indexes. An attribute set does not change under its index: when a route's attributes change, the route moves to a new index and the old one is removed (verified on SR Linux 26.7). A set found by a Get is therefore kept for 10 minutes and its age never makes a table stale; a route update naming a new index re-renders the view and fetches only that index. Before this, a large EVPN view re-read every referenced set of every node each 30 seconds, ~8,000 per node at ~1 ms each, and never stopped re-rendering.
+
 Whatever arrives while a node is being re-read is recorded and applied again, in order, to the re-read tree once it is swapped in. SAMPLE would re-send it on the next tick, but ON_CHANGE never would. When one path covers another, such as `route-table/ipv4-unicast` and its `route/ipv4-prefix` keys, only the wider path's `Get` is written to the tree. A `Get` does not say which leaves key a list, so the narrower answer would otherwise replace every entry with its keys alone.
 
 In between sweeps, list entries that a SAMPLE subscription ceases to send are aged out after a few sample intervals. This aging is measured relative to the last update timestamp received by that subtree rather than wall-clock time, preventing a node with a lagging telemetry stream from spuriously clearing out data.
+
+Rendered reports retain the revisions of the paths they read on their selected nodes, and so does each node's share of a table: a re-render reuses the rows of every node whose paths did not change and runs the getter only for the nodes that did. Heartbeats, unrelated counters, and updates on other nodes leave those tables cached. Relevant updates, deletes, resynchronization, and connection replacement invalidate them; fallback reads also carry their original Get-cache expiry, so rendering a table does not extend its data's lifetime. Revisions group entries by schema path to keep bookkeeping bounded even with large route tables: changing one route can invalidate other queries into the same route list.
+
+Clients sharing a cached table also share its JSON encoding and SSE fingerprint. Encoding runs in a worker thread, and its bytes are released with the cached table. Each node's rows are encoded once and reused by every later table that keeps them, so a change on one node re-encodes that node alone. After the first full table, a stream sends a change as a `patch` event carrying only the rows of the nodes that changed, plus the order of all of them; the browser rebuilds the table from the rows it already has. A patch is only sent while the columns stay the same; otherwise the full table is. Cards, graphs, and check summaries count as visible changes; render timings alone do not trigger an SSE update.
 
 ### 5. Narrow path subscriptions
 Subscriptions stream everything under their path (configuration and state alike). `fcli` subscribes strictly to the specific branches read by the getter. For example, subscribing to `/network-instance[name=*]` entirely would stream all route tables and the entire BGP RIB—on a spine router, this represents massive payload volume capable of delaying the telemetry stream. Instead, `fcli` selectively subscribes only to types, interfaces, overlays, and BGP instances.
@@ -115,7 +127,7 @@ SR Linux enforces a concurrent session limit per gRPC server:
 This budget is shared across all gRPC clients connecting to the switch. Every active RPC, including long-lived streaming `Subscribe` RPCs, counts against this limit.
 
 To prevent exhausting session limits:
-* **One session per node**: `fcli server` multiplexes all open reports into a **single `Subscribe` RPC** per node, with at most one auxiliary `Get` in flight at any time.
+* **Two sessions per node at most**: `fcli server` multiplexes all open reports into one `Subscribe` RPC per node, plus one for BGP RIB paths while a RIB view streams, with at most one auxiliary `Get` in flight at any time. gNMI cannot add paths to a running subscription, so opening a report replaces the RPC that carries its paths, and that RPC's initial sync re-sends everything on it. Kept apart, opening any other report no longer re-streams a full RIB, and opening a RIB view does not re-send every interface counter.
 * **Batched RPC restarts**: Because gNMI does not support dynamically adding paths to an existing subscription, adding new paths requires restarting the `Subscribe` RPC. These restarts are debounced and batched, so navigating a dashboard with multiple reports triggers a single re-subscription rather than one per widget.
 * **Idle path pruning**: Paths that have not been requested by any active report for longer than `--idle-timeout` (default: 900s) are automatically pruned from the subscription.
 

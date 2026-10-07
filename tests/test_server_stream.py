@@ -211,7 +211,7 @@ def test_paths_a_report_still_reads_are_not_retired(lldp_stream):
     stream, _device = lldp_stream
     stream.idle_timeout = 60.0
     assert stream.snapshot(LLDP_PATH) is not None
-    assert stream._retire_idle_paths() is False
+    assert not stream._retire_idle_paths()
     assert stream.status()["paths"][0]["path"] == LLDP_PATH
 
 
@@ -334,6 +334,18 @@ def test_a_candidate_the_target_stopped_sending_is_dropped(es_stream):
     assert _df_candidates(stream) == [
         {"address": "192.168.255.1", "designated-forwarder": True}
     ]
+
+
+def test_nothing_is_evicted_while_the_stream_is_behind_its_node(es_stream):
+    """Applied late, every entry is refreshed late - long enough after the last
+    time to read as gone, in the middle of the sample about to refresh it."""
+    stream, device = es_stream
+    for subscriber in device.subscribers:
+        subscriber.backlog = stream_module.MAX_EVICTION_BACKLOG + 1
+    assert not _sample_until(device, ["192.168.255.1"], lambda: len(_df_candidates(stream)) == 1, timeout=1.0)
+    for subscriber in device.subscribers:
+        subscriber.backlog = 0
+    assert _sample_until(device, ["192.168.255.1"], lambda: len(_df_candidates(stream)) == 1)
 
 
 _ES_CANDIDATE_WITH_MODULES = (
@@ -1337,3 +1349,258 @@ def test_a_sampled_only_subscription_needs_no_heartbeat(lldp_stream):
     stream, device = lldp_stream
     assert wait_for(lambda: device.subscribe_requests)
     assert stream_module.HEARTBEAT.as_gnmi() not in device.subscribe_requests[-1]["subscription"]
+
+
+# --------------------------------------------------------------------------- #
+# lookups by key
+# --------------------------------------------------------------------------- #
+
+NHG_TABLE = "/network-instance[name=*]/route-table/next-hop-group[index=*]"
+NHG_7 = "/network-instance[name=default]/route-table/next-hop-group[index=7]"
+NHG_8 = "/network-instance[name=default]/route-table/next-hop-group[index=8]"
+NHG_7_PAYLOAD = {"network-instance[name=default]/route-table/next-hop-group[index=7]": {"next-hop": [{"id": 0, "next-hop": "9"}]}}
+
+
+def test_a_lookup_is_one_get_answered_per_path_and_then_cached():
+    device = FakeDevice({NHG_7: [NHG_7_PAYLOAD], NHG_8: [{}]})
+    stream = HostStream("leaf1", device, restart_debounce=TEST_DEBOUNCE)
+    try:
+        assert stream.lookup([NHG_7, NHG_8], "state") == [NHG_7_PAYLOAD, {}]
+        assert stream.lookup([NHG_8, NHG_7], "state") == [{}, NHG_7_PAYLOAD]
+        assert stream.gets == 1, "both keys in one Get, then out of the cache"
+        assert not stream._paths, "nothing is subscribed for a key"
+    finally:
+        stream.stop()
+
+
+def test_a_lookup_cache_outlives_the_notifications_that_clear_the_get_cache(lldp_stream):
+    stream, device = lldp_stream
+    device.responses[NHG_7] = [NHG_7_PAYLOAD]
+    stream.lookup([NHG_7], "state")
+    gets = stream.gets
+    stream._apply({"update": {"prefix": "", "update": [{"path": "system/lldp/interface[name=ethernet-1/1]/admin-state", "val": "enable"}]}})
+    stream.lookup([NHG_7], "state")
+    assert stream.gets == gets
+
+
+def test_a_lookup_is_read_off_a_streamed_table():
+    table = [{"network-instance": [{"name": "default", "route-table": {"next-hop-group": [{"index": "7", "next-hop": [{"id": 0, "next-hop": "9"}]}]}}]}]
+    device = FakeDevice({NHG_TABLE: table})
+    stream = HostStream("leaf1", device, restart_debounce=TEST_DEBOUNCE)
+    try:
+        stream.ensure_paths([SubscriptionSpec(NHG_TABLE, "state", mode="on_change")])
+        gets = stream.gets
+        assert stream.lookup([NHG_7, NHG_8], "state") == [NHG_7_PAYLOAD, {}]
+        assert stream.gets == gets
+    finally:
+        stream.stop()
+
+
+def test_discovery_does_not_subscribe_to_what_a_getter_looks_up_by_key(lldp_stream):
+    stream, device = lldp_stream
+    device.responses[NHG_7] = [NHG_7_PAYLOAD]
+    recorder = RecordingDevice(device, stream.discovery_get)
+    assert recorder.lookup([NHG_7, NHG_8]) == [NHG_7_PAYLOAD, {}]
+    assert recorder.recorded == []
+
+
+def test_a_reading_taken_before_lookups_answers_them_from_the_table():
+    from nornir_srl.server.readings import ReplayDevice
+
+    table = [{"network-instance": [{"name": "default", "route-table": {"next-hop-group": [{"index": "7", "next-hop": [{"next-hop": "9"}]}]}}]}]
+    old = [{"paths": ["/network-instance[name=default]/route-table/next-hop-group[index=*]"], "datatype": "state", "response": table}]
+    device = ReplayDevice(old)
+    (found, gone) = device.lookup([NHG_7, NHG_8], "state")
+    assert found == {NHG_7.lstrip("/"): {"index": "7", "next-hop": [{"next-hop": "9"}]}}
+    assert gone == {}
+
+
+ATTR_TABLE = "/network-instance[name=*]/bgp-rib/attr-sets/attr-set[index=*]"
+ATTR_TABLE_RESPONSE = [
+    {"network-instance": [{"name": "default", "bgp-rib": {"attr-sets": {"attr-set": [{"index": str(i), "med": i} for i in range(5)]}}}]}
+]
+
+
+def _attr(i: int) -> str:
+    return f"/network-instance[name=default]/bgp-rib/attr-sets/attr-set[index={i}]"
+
+
+def test_lookups_in_a_streamed_table_are_read_off_it_by_key():
+    device = FakeDevice({ATTR_TABLE: ATTR_TABLE_RESPONSE})
+    stream = HostStream("leaf1", device, restart_debounce=TEST_DEBOUNCE)
+    try:
+        stream.ensure_paths([SubscriptionSpec(ATTR_TABLE, "state", mode="on_change")])
+        gets = stream.gets
+        found = stream.lookup([_attr(3), _attr(4)], "state", ATTR_TABLE)
+        assert found == [{_attr(i).lstrip("/"): {"med": i}} for i in (3, 4)]
+        assert stream.gets == gets
+    finally:
+        stream.stop()
+
+
+@pytest.mark.parametrize("limit", [2, 10])
+def test_missing_streamed_bgp_attributes_are_recovered_in_one_get(monkeypatch, limit):
+    monkeypatch.setattr(stream_module, "LOOKUP_BY_KEY_LIMIT", limit)
+    paths = [_attr(i) for i in (1, 3, 4)]
+    device = FakeDevice({
+        ATTR_TABLE: ATTR_TABLE_RESPONSE,
+        **{_attr(i): [{_attr(i).lstrip("/"): {"index": str(i), "med": i}}] for i in (1, 3, 4)},
+    })
+    stream = HostStream("leaf1", device, restart_debounce=TEST_DEBOUNCE)
+    try:
+        stream.ensure_paths([SubscriptionSpec(ATTR_TABLE, "state", mode="on_change")])
+        stream._apply({"update": {"delete": paths}})
+        gets = stream.gets
+        device.gets.clear()
+        found = stream.lookup([_attr(0), *paths], "state", ATTR_TABLE)
+        assert [next(iter(f.values()))["med"] for f in found] == [0, 1, 3, 4]
+        assert stream.gets == gets + 1
+        assert device.gets == [(p, "state") for p in ([ATTR_TABLE] if limit == 2 else paths)]
+        assert stream.lookup([_attr(0), *paths], "state", ATTR_TABLE) == found
+        assert stream.gets == gets + 1
+        assert list(stream._paths) == [ATTR_TABLE], "recovery does not add per-key subscriptions"
+    finally:
+        stream.stop()
+
+
+def test_many_lookups_in_a_table_nothing_streams_are_one_get_of_it(monkeypatch):
+    monkeypatch.setattr(stream_module, "LOOKUP_BY_KEY_LIMIT", 2)
+    device = FakeDevice({ATTR_TABLE: ATTR_TABLE_RESPONSE})
+    stream = HostStream("leaf1", device, restart_debounce=TEST_DEBOUNCE)
+    try:
+        found = stream.lookup([_attr(0), _attr(1), _attr(4)], "state", ATTR_TABLE)
+        assert [next(iter(f.values()))["med"] for f in found] == [0, 1, 4]
+        assert device.gets == [(ATTR_TABLE, "state")]
+    finally:
+        stream.stop()
+
+
+@pytest.mark.parametrize("large", [False, True])
+def test_discovery_subscribes_to_lookup_tables_only_for_large_reads(lldp_stream, monkeypatch, large):
+    stream, device = lldp_stream
+    if large:
+        monkeypatch.setattr("nornir_srl.server.devices.LOOKUP_BY_KEY_LIMIT", 0)
+    device.responses[ATTR_TABLE] = ATTR_TABLE_RESPONSE
+    device.responses[_attr(1)] = [{_attr(1).lstrip("/"): {"med": 1}}]
+    recorder = RecordingDevice(device, stream.discovery_get)
+    result = recorder.lookup([_attr(1)], "state", ATTR_TABLE)
+    assert next(iter(result[0].values()))["med"] == 1
+    assert recorder.recorded == ([(ATTR_TABLE, "state")] if large else [])
+
+
+def test_a_reading_kept_before_a_getter_narrowed_its_paths_still_reads_back():
+    """A reading recorded the whole vxlan-interface subtree; the getter now asks
+    for the VNIs and the destinations alone, and is answered from it."""
+    from nornir_srl.server.readings import ReplayDevice
+
+    whole = [
+        {
+            "tunnel-interface": [
+                {
+                    "name": "vxlan0",
+                    "vxlan-interface": [
+                        {
+                            "index": 10,
+                            "ingress": {"vni": 10010},
+                            "bridge-table": {
+                                "statistics": {"active-entries": 4},
+                                "unicast-destinations": {"destination": [{"vtep": "10.0.0.2", "vni": 10010}]},
+                            },
+                        }
+                    ],
+                }
+            ]
+        }
+    ]
+    old = [
+        {"paths": ["/system/features"], "datatype": "state", "response": [{"system/features": ["vxlan"]}]},
+        {"paths": ["/network-instance[name=*]/vxlan-interface"], "datatype": "config", "response": [{"network-instance": [{"name": "mac-vrf-1", "vxlan-interface": [{"name": "vxlan0.10"}]}]}]},
+        {"paths": ["/tunnel-interface[name=*]/vxlan-interface"], "datatype": "all", "response": whole},
+    ]
+    (record,) = ReplayDevice(old).get_vxlan()["vxlan"]
+    assert (record.name, record.ni, record.vni) == ("vxlan0.10", "mac-vrf-1", 10010)
+    assert [d.vtep for d in record.destinations] == ["10.0.0.2"]
+
+
+def test_rib_paths_have_a_subscription_other_reports_do_not_restart():
+    """Opening a report replaces the RPC carrying its paths, and that RPC's
+    initial sync re-sends all of them: a full RIB must not ride on it."""
+    device = FakeDevice({RIB_PATH: RIB_RESPONSE, LLDP_PATH: LLDP_RESPONSE, IFSTATS_PATH: IFSTATS_RESPONSE})
+    stream = HostStream("leaf1", device, restart_debounce=TEST_DEBOUNCE)
+    try:
+        def paths(request):
+            return {s["path"] for s in request["subscription"]}
+
+        stream.ensure_paths([SubscriptionSpec(RIB_PATH, "state", mode="on_change")])
+        assert wait_for(lambda: len(device.subscribe_requests) == 1)
+        bulk = device.subscribers[0]
+        assert any("bgp-rib" in p for p in paths(device.subscribe_requests[0]))
+
+        stream.ensure_paths([SubscriptionSpec(LLDP_PATH, "state", mode="on_change")])
+        assert wait_for(lambda: len(device.subscribe_requests) == 2)
+        stream.ensure_paths([SubscriptionSpec(IFSTATS_PATH, "state")])
+        assert wait_for(lambda: len(device.subscribe_requests) == 3)
+        for request in device.subscribe_requests[1:]:
+            assert not any("bgp-rib" in p for p in paths(request))
+        # The RIB's subscription was never replaced.
+        assert not bulk.closed
+        assert wait_for(lambda: stream.connected)
+        assert stream.status()["sessions"] == 2
+    finally:
+        stream.stop()
+
+
+def test_a_main_channel_sync_does_not_sweep_the_rib():
+    """Each subscription's initial sync only speaks for its own paths."""
+    device = FakeDevice({RIB_PATH: RIB_RESPONSE, LLDP_PATH: LLDP_RESPONSE})
+    stream = HostStream("leaf1", device, restart_debounce=TEST_DEBOUNCE)
+    try:
+        stream.ensure_paths([SubscriptionSpec(RIB_PATH, "state", mode="on_change")])
+        stream.ensure_paths([SubscriptionSpec(LLDP_PATH, "state", mode="on_change")])
+        assert wait_for(lambda: all(ch.connected for ch in stream._channels.values()))
+        before = stream.snapshot(RIB_PATH)
+        assert before and before != [{next(iter(before[0])): {}}]
+        # The main RPC restarts and syncs without re-sending the RIB, which it
+        # does not carry: the RIB's entries stay.
+        stream._channels["main"].subscribed_from = time.monotonic() + 1
+        stream._apply({"sync_response": True}, channel=stream._channels["main"])
+        assert stream.snapshot(RIB_PATH) == before
+    finally:
+        stream.stop()
+
+
+def test_a_path_bootstrapped_during_a_resync_survives_the_swap():
+    """The resync swaps in a tree read from the paths it started with; one
+    added while it read went into the old tree and must be carried over."""
+    from nornir_srl.server.stream import DiscoveryRead
+    from nornir_srl.server.versions import shape
+
+    device = FakeDevice({RIB_PATH: RIB_RESPONSE, LLDP_PATH: LLDP_RESPONSE})
+    stream = HostStream("leaf1", device, restart_debounce=TEST_DEBOUNCE)
+    try:
+        stream.ensure_paths([SubscriptionSpec(LLDP_PATH, "state", mode="on_change")])
+        entered, release = threading.Event(), threading.Event()
+        original = device.get
+
+        def slow_get(*args, **kwargs):
+            if LLDP_PATH in (kwargs.get("paths") or args[0]):
+                entered.set()
+                assert release.wait(5)
+            return original(*args, **kwargs)
+
+        device.get = slow_get
+        resync = threading.Thread(target=stream.resync)
+        resync.start()
+        assert entered.wait(5)
+        # A report opened now: its path is bootstrapped from its discovery read.
+        seed = DiscoveryRead(RIB_RESPONSE, time.time(), stream._versions.version(shape(RIB_PATH)))
+        stream.ensure_paths([SubscriptionSpec(RIB_PATH, "state", mode="on_change")], {(RIB_PATH, "state"): seed})
+        before = stream.snapshot(RIB_PATH)
+        assert before and any(before[0].values())
+        release.set()
+        resync.join(5)
+        assert not resync.is_alive()
+        assert stream.snapshot(RIB_PATH) == before
+    finally:
+        release.set()
+        stream.stop()

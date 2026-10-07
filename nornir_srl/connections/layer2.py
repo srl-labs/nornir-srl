@@ -757,6 +757,14 @@ def _interface_less_routing(neighbor_cfg: Dict[str, Any]) -> bool:
     return any("interface-less-routing" in entry for entry in _evpn_advertise_entries(neighbor_cfg))
 
 
+#: Each vxlan-interface's VNI.
+VXLAN_VNI_PATH = "/tunnel-interface[name=*]/vxlan-interface[index=*]/ingress"
+#: The VTEPs each vxlan-interface sends unicast to.
+VXLAN_DEST_PATH = "/tunnel-interface[name=*]/vxlan-interface[index=*]/bridge-table/unicast-destinations/destination"
+#: The VTEPs of each ethernet-segment destination, per vxlan-interface.
+ES_DEST_PATH = "/tunnel-interface[name=*]/vxlan-interface[index=*]/bridge-table/unicast-destinations/es-destination[esi=*]/vtep"
+
+
 class Layer2Mixin:
     """Mixin providing Layer2 related getters."""
 
@@ -935,7 +943,10 @@ class Layer2Mixin:
         return {"es": records}
 
     def get_es_dest(self) -> Dict[str, Any]:
-        path = "/tunnel-interface[name=*]/vxlan-interface/bridge-table/unicast-destinations/es-destination"
+        # The VTEPs of each destination alone: an es-destination also carries
+        # counters and a MAC table, which on a fabric with a thousand
+        # bridge-domains is tens of thousands of leaves per node per sample.
+        path = ES_DEST_PATH
         if not self._has_feature("bridged"):
             return {"es_dest": []}
         with _suppress_pygnmi_client_logging():
@@ -973,11 +984,6 @@ class Layer2Mixin:
         return {"es_dest": records}
 
     def get_vxlan(self) -> Dict[str, Any]:
-        # ``all`` rather than ``state``: up to 25.3 the state datastore also
-        # carried the configured ``ingress/vni`` and ``type``, and from 25.10
-        # it does not, which left the VNI column empty on newer releases. The
-        # destinations only exist in state, so both datastores are needed.
-        path = "/tunnel-interface[name=*]/vxlan-interface"
         # 'vxlan' rather than 'bridged': a 7220 IXR-H does bridging but no
         # VXLAN, and has no vxlan-interface under network-instance to ask for.
         if not self._has_feature("vxlan"):
@@ -991,32 +997,49 @@ class Layer2Mixin:
             for vxlan_itf in as_list(ni.get("vxlan-interface")):
                 ni_map[vxlan_itf["name"]] = ni["name"]
 
+        # The VNI and the destinations alone, not the vxlan-interface subtree:
+        # that also holds the counters and MAC tables of every ES destination,
+        # tens of thousands of leaves per node per sample on a large fabric -
+        # more than a server streaming a dozen nodes keeps up with.
+        # ``all`` for the VNI: up to 25.3 the state datastore also carried the
+        # configured ``ingress/vni``, and from 25.10 it does not.
         with _suppress_pygnmi_client_logging():
             try:
-                resp = self.get(paths=[path], datatype="all")
+                resp = self.get(paths=[VXLAN_VNI_PATH], datatype="all")
             except BaseException as e:
                 if _gnmi_path_missing(e):
                     return {"vxlan": []}
                 raise
+            try:
+                dest_resp = self.get(paths=[VXLAN_DEST_PATH], datatype="all")
+            except BaseException as e:
+                if not _gnmi_path_missing(e):
+                    raise
+                dest_resp = []
+        destinations: Dict[Tuple[str, str], List[Any]] = {}
+        for tun in as_list(first_payload(dest_resp).get("tunnel-interface")):
+            if not isinstance(tun, dict):
+                continue
+            for vxlan in as_list(tun.get("vxlan-interface")):
+                if isinstance(vxlan, dict):
+                    unicast = (vxlan.get("bridge-table") or {}).get("unicast-destinations") or {}
+                    destinations[(str(tun.get("name")), str(vxlan.get("index")))] = as_list(unicast.get("destination"))
         records = []
         for tun in as_list(first_payload(resp).get("tunnel-interface")):
+            if not isinstance(tun, dict):
+                continue
             for vxlan in as_list(tun.get("vxlan-interface")):
                 if not isinstance(vxlan, dict):
                     continue
                 name = f"{tun['name']}.{vxlan['index']}"
-                destinations = (
-                    vxlan.get("bridge-table", {})
-                    .get("unicast-destinations", {})
-                    .get("destination", [])
-                )
                 records.append(
                     VxlanInterface(
                         name=name,
                         ni=ni_map.get(name, ""),
-                        vni=as_int(vxlan.get("ingress", {}).get("vni")),
+                        vni=as_int((vxlan.get("ingress") or {}).get("vni")),
                         destinations=tuple(
                             VxlanDestination(str(d.get("vtep", "")), as_int(d.get("vni")))
-                            for d in as_list(destinations)
+                            for d in destinations.get((str(tun["name"]), str(vxlan["index"])), [])
                             if isinstance(d, dict)
                         ),
                     )
@@ -1026,8 +1049,10 @@ class Layer2Mixin:
     def get_irb(self) -> Dict[str, Any]:
         # The instances an irb is in, from the interface lists alone: the whole
         # network-instance subtree carries the BGP RIBs, which is far more
-        # than a subscription serving this Get should have to stream.
-        bound = instances_by_interface(self.get)
+        # than a subscription serving this Get should have to stream. And
+        # their irb entries alone, matched by the node: on a fabric of a
+        # thousand bridge-domains the lists hold a thousand other bindings.
+        bound = instances_by_interface(self.get, "irb*")
         resp = self.get(paths=["/interface[name=irb*]/subinterface"], datatype="all")
 
         records = []

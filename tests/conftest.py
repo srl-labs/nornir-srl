@@ -12,3 +12,16 @@ def _private_state_home(tmp_path_factory, monkeypatch):
     write into the home directory of whoever runs the suite.
     """
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path_factory.mktemp("state")))
+
+
+@pytest.fixture(autouse=True)
+def _no_warm_up(monkeypatch):
+    """A store reads only what a test asks of it, not the dashboards as well.
+
+    Warming up at start-up subscribes the overview's and the topology's paths
+    before anything asks, which every test counting paths or Gets would have
+    to allow for. The tests of the warm-up itself put it back.
+    """
+    from nornir_srl.server.store import FabricStore
+
+    monkeypatch.setattr(FabricStore, "WARM_UP_REPORTS", ())
