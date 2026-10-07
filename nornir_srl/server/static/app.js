@@ -1459,7 +1459,12 @@
         const what = document.createElement("span");
         what.className = "muted check-detail";
         what.textContent = row.Detail || "";
-        item.append(sev, where, what);
+        // Together, so a long subject - a link-local peer and its interface -
+        // pushes the detail onto a line of its own rather than squeezing it.
+        const text = document.createElement("span");
+        text.className = "check-text";
+        text.append(where, what);
+        item.append(sev, text);
         list.append(item);
       }
       details.append(list);

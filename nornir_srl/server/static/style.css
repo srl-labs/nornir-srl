@@ -4134,21 +4134,36 @@ button.pill-jump:hover {
 
 .check-findings li {
   display: grid;
-  grid-template-columns: 16px minmax(0, auto) minmax(0, 1fr);
+  grid-template-columns: 16px minmax(0, 1fr);
   gap: 6px;
   align-items: baseline;
   font-size: 12px;
+  text-align: left;
+}
+
+/* Subject and detail side by side while both fit; a long subject sends the
+   detail to the next line instead of squeezing it into a sliver. */
+.check-text {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  column-gap: 6px;
+  min-width: 0;
 }
 
 .check-sev.tone-err { color: var(--err); }
 .check-sev.tone-warn { color: var(--warn); }
 
 .check-where {
+  flex: 0 1 auto;
+  min-width: 0;
   font-weight: 500;
   overflow-wrap: anywhere;
 }
 
 .check-detail {
+  flex: 1 1 14em;
+  min-width: 0;
   overflow-wrap: anywhere;
 }
 
