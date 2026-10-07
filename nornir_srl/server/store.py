@@ -60,6 +60,15 @@ class _CachedTable:
     expires: float = float("inf")
 
 
+def full_table_read(report: ReportSpec, params: Optional[Mapping[str, Any]] = None) -> bool:
+    """Whether *report*'s first read downloads every route of a node's BGP RIB.
+
+    Those reads take minutes on a large fabric: they arrive node by node in
+    a browser, and run on activation workers of their own.
+    """
+    return report.name.startswith("bgp_rib") and (params or {}).get("scope") == "all"
+
+
 def _baseline_name(name: Optional[str]) -> str:
     """A baseline's name as it is kept: letters, digits, ``.``, ``_`` and ``-``."""
     import re  # noqa: PLC0415
@@ -114,11 +123,16 @@ class FabricStore:
         self._activated: Set[Tuple[str, str]] = set()
         #: Why a node could not serve a report, and when that was decided.
         self._activation_errors: Dict[Tuple[str, str], Tuple[float, str]] = {}
-        # Large first reads decode and build trees in Python. Bound their
+        # Full-table first reads decode and build trees in Python. Bound their
         # concurrency so the first few nodes finish sooner, and keep their
         # workers separate from those rendering completed nodes.
         self._activation_pool = ThreadPoolExecutor(
             max_workers=max(1, min(workers, 4)), thread_name_prefix="fcli-activate"
+        )
+        # Every other first read: a second-long report must not queue for
+        # minutes behind a RIB download on the bounded workers above.
+        self._light_activation_pool = ThreadPoolExecutor(
+            max_workers=max(workers, 1), thread_name_prefix="fcli-activate-light"
         )
         self._activating: Dict[Tuple[str, str, HostStream], _Activation] = {}
         #: The tables being rendered right now, by cache key: a client asking
@@ -408,6 +422,7 @@ class FabricStore:
         self.watcher.stop()
         self._background_pool.shutdown(wait=False, cancel_futures=True)
         self._activation_pool.shutdown(wait=False, cancel_futures=True)
+        self._light_activation_pool.shutdown(wait=False, cancel_futures=True)
         with self._shutdown_lock:
             if self._stopped:
                 return
@@ -587,6 +602,7 @@ class FabricStore:
         with self._lock:
             names = list(hosts) if hosts is not None else list(self._streams)
         activation = self.activation_name(report, params)
+        pool = self._activation_pool if full_table_read(report, params) else self._light_activation_pool
         for name in names:
             with self._lock:
                 if self._stop.is_set() or (load is not None and load.closed.is_set()):
@@ -613,7 +629,7 @@ class FabricStore:
                 job = self._activating.get(key)
                 if job is None or job.cancelled.is_set():
                     cancelled = threading.Event()
-                    pending = self._activation_pool.submit(self._activate_host, report, name, params, cancelled)
+                    pending = pool.submit(self._activate_host, report, name, params, cancelled)
                     job = self._activating[key] = _Activation(pending, cancelled, {load})
 
                     def finished(_future: Future, key: Any = key, job: _Activation = job) -> None:

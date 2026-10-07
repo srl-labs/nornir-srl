@@ -390,3 +390,23 @@ def test_stream_cleanup_releases_its_load(client, monkeypatch):
     monkeypatch.setattr(app_module, "table_events", once)
     assert test_client.get("/api/stream/bgp_rib_evpn_2?scope=all").status_code == 200
     assert len(loads) == 1 and loads[0].closed.is_set()
+
+
+def test_a_small_report_does_not_queue_behind_a_full_rib_read(store):
+    """Full-table RIB reads have bounded workers; everything else has its own."""
+    fabric_store, _devices = store
+    fabric_store._activation_pool.shutdown()
+    fabric_store._activation_pool = ThreadPoolExecutor(max_workers=1)
+    release = threading.Event()
+    # Every full-table worker is busy with a read that takes minutes.
+    blocked = fabric_store._activation_pool.submit(release.wait, 5)
+    try:
+        report = get_report("lldp")
+        futures = fabric_store._start_activation(report, ["leaf1", "spine1"], None)
+        for future in futures:
+            future.result(timeout=2)
+        assert not blocked.done()
+        rib = fabric_store._start_activation(get_report("bgp_rib_evpn_2"), ["leaf1"], {"scope": "all"})
+        assert rib and not rib[0].done()
+    finally:
+        release.set()

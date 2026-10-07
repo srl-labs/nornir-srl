@@ -27,7 +27,7 @@ from ..lenses import LENSES_BY_NAME, coerce_lens_params, lenses_for
 from ..reports import SERVER, ReportSpec, coerce_params, get_report, reports_for
 from .agent import NO_PROVIDER, ChatService
 from .snapshots import SnapshotStore, _slug, comparable
-from .store import FabricStore, ReportLoad
+from .store import FabricStore, ReportLoad, full_table_read
 from .table import serialize_table, table_digest
 
 logger = logging.getLogger(__name__)
@@ -539,7 +539,7 @@ def create_app(
         report = streamable_report(name)
         params = coerce_params(report, request.query_params)
         hosts = parse_nodes(request.query_params.get("node"))
-        gradual = progressive and report.name.startswith("bgp_rib") and params.get("scope") == "all"
+        gradual = progressive and full_table_read(report, params)
         return lambda: store.table(report, inv_filter, params, hosts, progressive=gradual, load=load if gradual else None)
 
     def progress_of(request: Request) -> Callable[[], Dict[str, Any]]:
