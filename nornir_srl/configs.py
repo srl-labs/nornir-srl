@@ -100,22 +100,76 @@ def _digest(value: Any, salt: str) -> str:
     return hashlib.sha256((salt + raw).encode("utf-8")).hexdigest()[:8]
 
 
+#: A list key in a path: ``[name=admin]``, ``[prefix=10.0.0.0/8]``.
+_PREDICATE = re.compile(r"\[[^\]]*\]")
+
+
+def leaf_name(key: Any) -> str:
+    """The leaf a key or path names: ``srl_nokia-aaa:user[name=x]/password`` is ``password``.
+
+    A Get below the root answers keyed by the path it was asked for, with
+    module prefixes and list keys, rather than by the leaf's own name.
+    """
+    parts = [p for p in _PREDICATE.sub("", str(key)).split("/") if p]
+    return strip_module(parts[-1]) if parts else ""
+
+
 def redact(tree: Any, salt: str = "", name: str = "") -> Any:
     """*tree* with every secret leaf's value replaced by a digest of it.
 
     *salt* is mixed into the digest, so the digests of one store say nothing
     about the secrets of another, and a weak password cannot be looked up in
-    a table of digested ones.
+    a table of digested ones. *name* is the leaf *tree* is the value of; a
+    key that names no leaf, such as the ``/`` a Get of one leaf answers
+    with, keeps it.
     """
     if isinstance(tree, dict):
-        return {key: redact(value, salt, key) for key, value in tree.items()}
+        return {key: redact(value, salt, leaf_name(key) or name) for key, value in tree.items()}
     if isinstance(tree, list):
-        if name and SECRET_LEAF.search(name) and all(not isinstance(v, (dict, list)) for v in tree):
+        # An SNMP community is one leaf; a leaf-list of them is BGP's.
+        if (
+            name
+            and SECRET_LEAF.search(name)
+            and name.lower() != "community"
+            and all(not isinstance(v, (dict, list)) for v in tree)
+        ):
             return [REDACTED.format(_digest(v, salt)) for v in tree]
-        return [redact(value, salt) for value in tree]
+        return [redact(value, salt, name if _unnamed(value) else "") for value in tree]
     if name and SECRET_LEAF.search(name) and tree is not None:
         return REDACTED.format(_digest(tree, salt))
+    if isinstance(tree, str) and "\n" in tree:
+        return redact_text(tree, salt)
     return tree
+
+
+def _unnamed(value: Any) -> bool:
+    """A payload keyed by nothing but ``/``, which is about the leaf asked for."""
+    return isinstance(value, dict) and bool(value) and all(not leaf_name(k) for k in value)
+
+
+#: A secret leaf as CLI text prints it, value last on its line:
+#: ``password $y$...`` or ``authentication-key "$aes1$..."``.
+_SECRET_TEXT = re.compile(
+    r"(?<![\w-])("
+    r"(?:password|hashed-password|secret|key|private-key|pre-shared-key|psk|"
+    r"authentication-key|auth-key|auth-password|priv-password|privacy-password|"
+    r"shared-secret|community|token|client-secret|md5-key|"
+    r"[\w-]+-password|[\w-]+-secret|[\w-]+-psk)"
+    r"[ \t]+)"
+    r"(\"(?:[^\"\\\n]|\\.)*\"|[^\s\"]+)[ \t]*$",
+    re.IGNORECASE | re.MULTILINE,
+)
+
+
+def redact_text(text: str, salt: str = "") -> str:
+    """CLI output with every secret leaf's value replaced by a digest of it.
+
+    ``info`` prints one leaf per line with its value last, so only a value
+    that ends its line is taken: ``key`` in the middle of a sentence is not.
+    """
+    return _SECRET_TEXT.sub(
+        lambda m: m.group(1) + REDACTED.format(_digest(m.group(2).strip('"'), salt)), text
+    )
 
 
 def _clean(tree: Any) -> Any:
@@ -415,6 +469,8 @@ __all__ = [
     "flatten",
     "list_keys",
     "normalize",
+    "leaf_name",
     "redact",
+    "redact_text",
     "strip_module",
 ]
