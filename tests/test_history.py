@@ -194,6 +194,34 @@ def test_a_redacted_secret_still_reads_as_changed_when_it_changed():
     assert configs.redact({"password": "a"}, salt="t")["password"] != one
 
 
+def test_only_a_module_prefix_is_stripped_from_a_value():
+    tree = configs.normalize(
+        [
+            {
+                "/": {
+                    "srl_nokia-system:system": {
+                        "description": "site:west",
+                        "mac": "aa:bb:cc:dd:ee:ff",
+                        "type": "srl_nokia-aaa-types:local",
+                    }
+                }
+            }
+        ]
+    )
+    assert tree["system"] == {"description": "site:west", "mac": "aa:bb:cc:dd:ee:ff", "type": "local"}
+
+
+def test_a_secret_is_digested_as_the_node_sent_it():
+    def password(value):
+        tree = configs.normalize([{"/": {"system": {"aaa": {"password": value}}}}], salt="s")
+        return tree["system"]["aaa"]["password"]
+
+    assert password("alpha:secret") != password("beta:secret")
+    # Under a path-shaped key too, as a Get below the root answers.
+    path = [{"srl_nokia-system:system/aaa/password": "alpha:secret"}]
+    assert configs.normalize(path, salt="s")["system"]["aaa"]["password"] == password("alpha:secret")
+
+
 def test_a_secret_is_found_under_the_path_a_get_answers_with():
     # A Get below the root keys its answer by the path, prefixes and all.
     tree = configs.redact(

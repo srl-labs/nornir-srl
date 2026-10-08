@@ -48,9 +48,15 @@ REDACTED = "<redacted {}>"
 #: Keys that are annotations rather than configuration.
 _ANNOTATION = re.compile(r"^_annotate")
 
-#: A module prefix on a name or an identity value: ``srl_nokia-system:system``,
-#: ``srl_nokia-aaa-types:local``.
-_MODULE = re.compile(r"^[A-Za-z][\w.-]*:(?=[^/:])")
+#: A module prefix on a node name: ``srl_nokia-system:system``. A YANG
+#: identifier cannot hold a colon, so in a name any identifier before one is
+#: the module it comes from, whoever wrote that module.
+_NAME_MODULE = re.compile(r"^[A-Za-z_][\w.-]*:(?=[A-Za-z_])")
+
+#: A module prefix on an identity value: ``srl_nokia-aaa-types:local``. A
+#: value can be any string - ``site:west``, a MAC, a password - so only the
+#: modules SR Linux answers with are taken for a prefix.
+_VALUE_MODULE = re.compile(r"^(?:srl_nokia|openconfig|ietf|iana)-[\w.-]*:(?=[A-Za-z_])")
 
 #: The names SR Linux keys its lists by, most common first. A list is keyed by
 #: the first of these its entries all carry, then the next, until the entries
@@ -91,8 +97,17 @@ KNOWN_KEYS: Mapping[str, Tuple[str, ...]] = {
 
 
 def strip_module(name: str) -> str:
-    """``srl_nokia-system:system`` is ``system``."""
-    return _MODULE.sub("", name)
+    """A node name without its module: ``srl_nokia-system:system`` is ``system``."""
+    return _NAME_MODULE.sub("", name)
+
+
+def strip_value_module(value: str) -> str:
+    """An identity value without its module: ``srl_nokia-aaa-types:local`` is ``local``.
+
+    Anything else is left as it is: ``site:west`` and ``aa:bb:cc:dd:ee:ff``
+    are values, not identities.
+    """
+    return _VALUE_MODULE.sub("", value)
 
 
 def _digest(value: Any, salt: str) -> str:
@@ -196,7 +211,7 @@ def _clean(tree: Any) -> Any:
     if isinstance(tree, list):
         return [_clean(value) for value in tree]
     if isinstance(tree, str):
-        return strip_module(tree)
+        return strip_value_module(tree)
     return tree
 
 
@@ -205,9 +220,13 @@ def normalize(response: Any, salt: str = "") -> Dict[str, Any]:
 
     Takes the response as the connection returns it - a list of payloads,
     each keyed by the path it answers - or a tree already unwrapped.
+
+    Secrets are redacted first, from the values exactly as the node sent
+    them: cleaning a value before it is digested could make two different
+    secrets read as the same one.
     """
     tree: Dict[str, Any] = {}
-    payloads = response if isinstance(response, list) else [response]
+    payloads = redact(response if isinstance(response, list) else [response], salt)
     for payload in payloads:
         if not isinstance(payload, dict):
             continue
@@ -218,7 +237,7 @@ def normalize(response: Any, salt: str = "") -> Dict[str, Any]:
                 tree = _merge(tree, _clean(value))
             else:
                 tree = _merge(tree, _clean({key: value}))
-    return redact(tree, salt)
+    return tree
 
 
 def _merge(base: Dict[str, Any], extra: Dict[str, Any]) -> Dict[str, Any]:
@@ -473,4 +492,5 @@ __all__ = [
     "redact",
     "redact_text",
     "strip_module",
+    "strip_value_module",
 ]
