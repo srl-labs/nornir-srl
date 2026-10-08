@@ -1042,13 +1042,20 @@ def _lldp_ports(state: FabricState) -> Set[Tuple[str, str]]:
     return {(node, itf.name) for node, itf, _neighbor in state.sub_items("lldp", "neighbors")}
 
 
-def _neighbor_index(state: FabricState) -> Dict[Tuple[str, str], List[Tuple[str, str, str]]]:
-    """(node, address) -> every (interface, MAC, origin) ARP or ND binds it to."""
-    index: Dict[Tuple[str, str], List[Tuple[str, str, str]]] = {}
+def _neighbor_index(state: FabricState) -> Dict[Tuple[str, str, str], List[Tuple[str, str, str]]]:
+    """(node, network-instance, address) -> every (interface, MAC, origin) ARP or ND binds it to.
+
+    Keyed by instance because the same address can live in two VRFs: a
+    binding on tenant-b's interface says nothing about tenant-a's host. An
+    irb is in both its mac-vrf and its ip-vrf, so it is found from either.
+    """
+    index: Dict[Tuple[str, str, str], List[Tuple[str, str, str]]] = {}
     for node, cache, entry, _report in _arp_bindings(state):
         address = _address(entry.address)
-        if address is not None:
-            index.setdefault((node, str(address)), []).append(
+        if address is None:
+            continue
+        for ni in cache.nis:
+            index.setdefault((node, ni, str(address)), []).append(
                 (cache.interface, entry.mac, text(entry.origin))
             )
     return index
@@ -1072,17 +1079,22 @@ def _starting_nodes(state: FabricState, source: str, ni: str) -> List[str]:
     # EVPN to every leaf carrying the irb, so a binding learned that way only
     # counts where the host's MAC is on a port of the node's own - the sides
     # of its segment - rather than on every leaf in the fabric. Failing any
-    # binding, a connected route covering it.
+    # binding, a connected route covering it. Only bindings on an interface
+    # of the instance asked about count: the same address in another VRF is
+    # another host.
     own_macs = {
-        (node, _mac(entry.address))
-        for node, _table, entry in state.sub_items("mac", "entries")
+        (node, table.ni, _mac(entry.address))
+        for node, table, entry in state.sub_items("mac", "entries")
         if entry.local
     }
     starts = []
-    for node, _cache, entry, _report in _arp_bindings(state):
-        if _address(entry.address) != address or node in starts:
+    for node, cache, entry, _report in _arp_bindings(state):
+        if _address(entry.address) != address or node in starts or ni not in cache.nis:
             continue
-        if text(entry.origin) != "evpn" or (node, _mac(entry.mac)) in own_macs:
+        # The irb's other instance is the mac-vrf the host's MAC is learned in.
+        if text(entry.origin) != "evpn" or any(
+            (node, bridge, _mac(entry.mac)) in own_macs for bridge in cache.nis
+        ):
             starts.append(node)
     if starts:
         return starts
@@ -1309,7 +1321,14 @@ def lens_path(
                 for interface in attached:
                     hops.append(Hop(**last, outcome="local-ip", egress=interface))
                 continue
-            bound = neighbors.get((node, str(target)), [])
+            # The binding has to be on the interface the route delivers out of,
+            # in this instance: anywhere else it is some other host's.
+            ports = {interface for interface in attached if interface}
+            bound = [
+                (interface, mac, origin)
+                for interface, mac, origin in neighbors.get((node, instance, str(target)), [])
+                if not ports or interface in ports
+            ]
             for interface, mac, origin in bound:
                 hops.append(
                     Hop(**last, outcome="neighbor", egress=interface, mac=mac, origin=origin)
@@ -1333,9 +1352,11 @@ def lens_path(
                 # that is not in the inventory is a switch the walk cannot
                 # follow, not a place the packet is delivered to.
                 gateway = _address(next_hop.address)
+                # A leaked route leaves through a port of the instance it came
+                # from, and the gateway is resolved there.
                 bound = [
                     (mac, origin)
-                    for interface, mac, origin in neighbors.get((node, str(gateway)), [])
+                    for interface, mac, origin in neighbors.get((node, out.ni or instance, str(gateway)), [])
                     if interface == subinterface
                 ] if gateway is not None and (node, parent(subinterface)) not in lldp_ports else []
                 for mac, origin in bound:

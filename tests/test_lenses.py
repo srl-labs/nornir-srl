@@ -677,6 +677,76 @@ def test_path_stops_where_a_next_hop_resolves_to_nothing():
     assert (hop.outcome, hop.egress) == ("unresolved", "")
 
 
+def _overlapping_tenants() -> FabricState:
+    """Two VRFs on one leaf reusing 10.0.0.0/24, with a host at .5 in each.
+
+    tenant-a has its subnet on irb0.1 and tenant-b on irb0.2; ARP binds
+    10.0.0.5 on both, to different hosts.
+    """
+    state = FabricState()
+    state.hostnames = {"leaf1": "leaf1"}
+    subnet = "10.0.0.0/24"
+    state.reports = {
+        "ipv4_rib": {"leaf1": [
+            RouteTable("tenant-a", (_route(subnet, "local", _via("", Egress("interface", "irb0.1"))),)),
+            RouteTable("tenant-b", (_route(subnet, "local", _via("", Egress("interface", "irb0.2"))),)),
+        ]},
+        "ipv6_rib": {"leaf1": []},
+        "lldp": {"leaf1": []},
+        "arp": {"leaf1": [
+            NeighborCache("irb0.1", ("tenant-a", "macvrf-a"), (NeighborEntry("10.0.0.5", "AA:AA:AA:AA:AA:AA", "dynamic"),)),
+            NeighborCache("irb0.2", ("tenant-b", "macvrf-b"), (NeighborEntry("10.0.0.5", "BB:BB:BB:BB:BB:BB", "dynamic"),)),
+        ]},
+        "nd": {},
+        "mac": {},
+    }
+    return state
+
+
+def test_path_confirms_the_neighbour_only_in_its_own_instance():
+    state = _overlapping_tenants()
+    last = lens_path(state, source="leaf1", destination="10.0.0.5", ni="tenant-a")[-1]
+    assert (last.outcome, last.egress, last.mac) == ("neighbor", "irb0.1", "AA:AA:AA:AA:AA:AA")
+    # Without tenant-a's binding, tenant-b's host does not stand in for it.
+    state.reports["arp"]["leaf1"] = state.reports["arp"]["leaf1"][1:]
+    last = lens_path(state, source="leaf1", destination="10.0.0.5", ni="tenant-a")[-1]
+    assert last.outcome == "no-neighbor"
+
+
+def test_path_confirms_the_neighbour_only_on_the_delivering_interface():
+    state = _overlapping_tenants()
+    # The same binding, but on a port of tenant-a the route does not deliver out of.
+    state.reports["arp"]["leaf1"] = [
+        NeighborCache("ethernet-1/9.0", ("tenant-a",), (NeighborEntry("10.0.0.5", "CC:CC:CC:CC:CC:CC", "dynamic"),)),
+    ]
+    last = lens_path(state, source="leaf1", destination="10.0.0.5", ni="tenant-a")[-1]
+    assert last.outcome == "no-neighbor"
+
+
+def test_path_starts_only_where_the_source_is_bound_in_its_instance():
+    state = _overlapping_tenants()
+    state.hostnames["leaf2"] = "leaf2"
+    state.reports["ipv4_rib"]["leaf2"] = [
+        RouteTable("tenant-a", (_route("10.0.0.0/24", "local", _via("", Egress("interface", "irb0.1"))),)),
+    ]
+    # leaf2 has 10.0.0.5 only in tenant-b: it is not where tenant-a's host is.
+    state.reports["arp"]["leaf2"] = [
+        NeighborCache("irb0.2", ("tenant-b",), (NeighborEntry("10.0.0.5", "BB:BB:BB:BB:BB:BB", "dynamic"),)),
+    ]
+    hops = lens_path(state, source="10.0.0.5", destination="10.0.0.5", ni="tenant-a")
+    assert {h.node for h in hops if h.hop == 1} == {"leaf1"}
+
+
+def test_a_leaked_route_resolves_its_gateway_in_the_instance_it_came_from():
+    state = _leaf_with_a_ce()
+    route = state.reports["ipv4_rib"]["leaf5"][0].routes[0]
+    nh = route.next_hops[0]
+    leaked = replace(route, next_hops=(replace(nh, egress=(replace(nh.egress[0], ni="ipvrf-1"),)),))
+    state.reports["ipv4_rib"]["leaf5"].append(RouteTable("ipvrf-2", (leaked,)))
+    hop = lens_path(state, source="leaf5", destination="6.6.6.1", ni="ipvrf-2")[-1]
+    assert (hop.outcome, hop.gateway) == ("handed-off", "10.1.4.16")
+
+
 def _dci_over_mpls() -> FabricState:
     """A leaf, a DC gateway and a WAN gateway: VXLAN to the first, LDP to the second.
 
