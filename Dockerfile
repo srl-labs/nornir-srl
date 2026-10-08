@@ -18,8 +18,8 @@ ARG VERSION
 ENV SETUPTOOLS_SCM_PRETEND_VERSION=${VERSION}
 
 # The versions uv.lock pins, not the newest ones: an unpinned install picks
-# up whatever was released last, and a scrapli release has broken
-# nornir-scrapli on import before.
+# up whatever was released last, and a new release of a dependency can
+# break fcli on import.
 RUN uv export --frozen --no-dev --no-emit-project --no-hashes -o /tmp/requirements.txt && \
     uv pip install --system -r /tmp/requirements.txt && \
     uv pip install --system --no-deps . && \
