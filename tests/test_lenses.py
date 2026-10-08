@@ -628,6 +628,55 @@ def test_path_walks_an_ipv6_destination_over_an_ipv4_underlay():
     ]
 
 
+def _parsed_rib(routes: List[dict], nhgs: List[dict], nhs: List[dict]) -> List[RouteTable]:
+    """Route tables as the RIB getter builds them from SR Linux's own payloads."""
+    from nornir_srl.connections.routing import _route_tables
+
+    def ni(table: dict) -> List[dict]:
+        return [{"network-instance": [{"name": "default", "route-table": table}]}]
+
+    return _route_tables(
+        "ipv4-unicast",
+        ni({"ipv4-unicast": {"route": routes}}),
+        ni({"next-hop": nhs}),
+        ni({"next-hop-group": nhgs}),
+    )
+
+
+def _one_node(tables: List[RouteTable]) -> FabricState:
+    state = FabricState()
+    state.hostnames = {"leaf1": "leaf1"}
+    state.reports = {"ipv4_rib": {"leaf1": tables}, "ipv6_rib": {}, "lldp": {"leaf1": []}, "arp": {}, "nd": {}}
+    return state
+
+
+def test_path_stops_at_a_discard_route_rather_than_delivering():
+    tables = _parsed_rib(
+        [{"ipv4-prefix": "203.0.113.0/24", "route-type": "static", "active": True, "next-hop-group": 7}],
+        [{"index": 7, "next-hop": [{"id": 0, "next-hop": 9}]}],
+        [{"index": 9, "type": "discard"}],
+    )
+    (hop,) = lens_path(_one_node(tables), source="leaf1", destination="203.0.113.5")
+    assert (hop.outcome, hop.route_type) == ("discard", "static")
+    assert "discard" in PATH.row(hop)["Detail"]
+
+
+def test_path_stops_where_a_next_hop_resolves_to_nothing():
+    # An indirect next-hop whose resolving route the tables do not hold.
+    tables = _parsed_rib(
+        [{"ipv4-prefix": "198.51.100.0/24", "route-type": "bgp", "active": True, "next-hop-group": 7}],
+        [{"index": 7, "next-hop": [{"id": 0, "next-hop": 9}]}],
+        [{"index": 9, "type": "indirect", "ip-address": "10.9.9.9",
+          "indirect": {"resolving-route": {"ip-prefix": "10.9.0.0/16"}}}],
+    )
+    (hop,) = lens_path(_one_node(tables), source="leaf1", destination="198.51.100.1")
+    assert (hop.outcome, hop.egress) == ("unresolved", "10.9.0.0/16")
+    # And with no next-hop at all, there is nothing to say where it went.
+    bare = _parsed_rib([{"ipv4-prefix": "198.51.100.0/24", "route-type": "bgp", "active": True}], [], [])
+    (hop,) = lens_path(_one_node(bare), source="leaf1", destination="198.51.100.1")
+    assert (hop.outcome, hop.egress) == ("unresolved", "")
+
+
 def _dci_over_mpls() -> FabricState:
     """A leaf, a DC gateway and a WAN gateway: VXLAN to the first, LDP to the second.
 
@@ -1029,7 +1078,7 @@ def test_every_hop_outcome_has_a_detail():
 
     documented = {
         "forwarded", "dead-end", "handed-off", "tunnel", "endpoint-reached", "leaked", "delivered",
-        "local-ip", "neighbor", "no-neighbor", "no-route", "loop", "too-long",
+        "local-ip", "neighbor", "no-neighbor", "discard", "unresolved", "no-route", "loop", "too-long",
     }
     assert set(_HOP_DETAIL) == documented
 

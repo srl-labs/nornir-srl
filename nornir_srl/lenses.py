@@ -179,10 +179,13 @@ class Hop:
     #: packet is decapsulated and looked up again in :attr:`resumes_in`.
     #: ``leaked``: the route matched was leaked from :attr:`resumes_in`, whose
     #: next-hops forward it; the walk goes on there.
-    #: ``delivered``: the destination is attached here. ``local-ip``: it is
-    #: this node's own address. ``neighbor``/``no-neighbor``: whether ARP or
-    #: ND has the delivered address. ``no-route``, ``loop``, ``too-long``:
-    #: where a walk gives up.
+    #: ``delivered``: the destination is attached here, as the route's type
+    #: says. ``local-ip``: it is this node's own address.
+    #: ``neighbor``/``no-neighbor``: whether ARP or ND has the delivered
+    #: address. ``discard``: the route drops the packet. ``unresolved``: the
+    #: route's next-hops lead to no port or tunnel the tables can follow,
+    #: :attr:`egress` the prefix they stopped at if any. ``no-route``,
+    #: ``loop``, ``too-long``: where a walk gives up.
     outcome: str
     #: The route the lookup matched, as the route table has it.
     prefix: str = ""
@@ -474,6 +477,10 @@ def coerce_lens_params(lens: LensSpec, raw: Mapping[str, Any]) -> Dict[str, Any]
 #: Route types that terminate a walk because the destination is attached to the
 #: node that holds them rather than reachable through it.
 _ATTACHED = ("local", "host", "direct", "arp-nd", "static-local")
+
+#: Next-hop types that drop the packet: a static or aggregate route to a
+#: blackhole.
+_DISCARD = ("discard", "blackhole", "reject")
 
 
 def _address(value: Any) -> Optional[Any]:
@@ -1261,11 +1268,20 @@ def lens_path(
                 )
             continue
 
+        # A route that leaves nowhere is not thereby attached: only its type
+        # says the destination is here. Otherwise its next-hops either drop
+        # the packet on purpose - a static or aggregate discard - or resolve
+        # to nothing the tables can follow.
+        if not leaves and kind not in _ATTACHED:
+            dropped = bool(route.next_hops) and all(text(nh.type) in _DISCARD for nh in route.next_hops)
+            hops.append(Hop(**here, **matched, outcome="discard" if dropped else "unresolved"))
+            continue
+
         # Anything else the route leaves through is looked up against LLDP by
         # its port; a prefix the chain stopped at, or a tunnel of another
         # kind, has no neighbour and ends the walk saying so.
         egress = [hop.label for hop in leaves]
-        if kind in _ATTACHED or not egress:
+        if kind in _ATTACHED:
             # An attached route has one interface, or none at all when the
             # destination is the node itself.
             attached = egress or [""]
@@ -1303,6 +1319,11 @@ def lens_path(
             continue
 
         for next_hop, out in ((nh, out) for nh in route.next_hops for out in nh.egress):
+            if out.kind != "interface":
+                # The chain stopped at a prefix, or at a tunnel with no
+                # endpoint to chase: there is no port to find a neighbour on.
+                hops.append(Hop(**here, **matched, outcome="unresolved", egress=out.label))
+                continue
             subinterface = out.label
             peer = peers.get((node, parent(subinterface)))
             if peer is None:
@@ -1360,6 +1381,12 @@ _HOP_DETAIL: Dict[str, Callable[[Hop], str]] = {
     "local-ip": lambda h: f"locally configured on {h.egress or 'this node'}",
     "neighbor": lambda h: f"{h.mac} on {h.egress}, {h.origin}",
     "no-neighbor": lambda h: f"no ARP/ND entry for {h.address} on this node",
+    "discard": lambda h: f"dropped here by a {h.route_type} discard route",
+    "unresolved": lambda h: (
+        f"next-hop resolves no further than {h.egress}"
+        if h.egress
+        else "next-hop resolves to no interface or tunnel"
+    ),
     "no-route": lambda h: f"nothing in {h.ni} matches {h.address}",
     "loop": lambda h: f"already visited on this path ({' -> '.join(h.visited)})",
     "too-long": lambda h: f"still not delivered after {MAX_HOPS} hops",
@@ -1413,6 +1440,8 @@ _HOP_STATE = {
     "handed-off": _UP,
     "endpoint-reached": _UP,
     "dead-end": _DOWN,
+    "discard": _DOWN,
+    "unresolved": _DOWN,
     "no-route": _DOWN,
     "no-neighbor": _DOWN,
     "loop": _DOWN,

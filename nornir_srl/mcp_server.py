@@ -1551,8 +1551,8 @@ def trace_path(
     to the underlay towards its endpoint and resumes in the VRF at the far end,
     so a DCI path traces VXLAN to the gateway, MPLS across, and VXLAN again.
 
-    Use this for 'why does A not reach B': the hop whose outcome is 'no-route'
-    or 'dead-end' is where the path stops.
+    Use this for 'why does A not reach B': the hop whose outcome is 'no-route',
+    'discard', 'unresolved' or 'dead-end' is where the path stops.
 
     Returns {"records": [...]}, one record per lookup, ordered by hop. Several
     records share a hop number when the walk fans out over ECMP. Each has:
@@ -1571,7 +1571,10 @@ def trace_path(
             forward it; the walk goes on in that instance on the same node),
             'delivered' (the destination is attached here), 'local-ip' (it is
             this node's own address), 'neighbor' or 'no-neighbor' (whether
-            ARP/ND has the delivered address), 'no-route', 'loop' or 'too-long'.
+            ARP/ND has the delivered address), 'discard' (a discard route
+            drops it), 'unresolved' (the next-hop leads to no port or tunnel;
+            egress is the prefix it stopped at, if any), 'no-route', 'loop' or
+            'too-long'.
         prefix, route_type, next_hops: the route that matched.
         egress: the subinterface, or 'vxlan:<vtep>' over the overlay.
         peer, peer_port: the node on the other end of that cable.
