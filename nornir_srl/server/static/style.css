@@ -3055,6 +3055,76 @@ button.pill-jump:hover {
   stroke-dasharray: 5 3;
 }
 
+.path-box-group {
+  cursor: default;
+  outline: none;
+}
+
+.path-box-group:hover .path-box,
+.path-box-group:focus .path-box {
+  fill: var(--bg);
+}
+
+.path-tooltip {
+  position: fixed;
+  z-index: 50;
+  pointer-events: none;
+  max-width: min(440px, calc(100vw - 16px));
+  background: var(--panel);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 8px 10px;
+  font-size: 12px;
+  box-shadow: var(--md-elevation-2, none);
+}
+
+.path-tooltip-head {
+  font-weight: 600;
+  margin-bottom: 4px;
+  overflow-wrap: anywhere;
+}
+
+.path-tooltip-fact + .path-tooltip-fact {
+  margin-top: 6px;
+  padding-top: 6px;
+  border-top: 1px solid var(--border);
+}
+
+.path-tooltip-heading {
+  color: var(--muted);
+  font-weight: 600;
+  margin-bottom: 2px;
+}
+
+.path-tooltip-fact dl {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 2px 10px;
+  margin: 0;
+}
+
+.path-tooltip-fact dt {
+  color: var(--muted);
+}
+
+.path-tooltip-fact dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.path-tooltip-up .path-tooltip-heading {
+  color: var(--ok);
+}
+
+.path-tooltip-down .path-tooltip-heading {
+  color: var(--err);
+}
+
+.path-tooltip-line {
+  color: var(--muted);
+}
+
 .path-box-title {
   fill: var(--text);
   font-size: 13px;

@@ -6921,7 +6921,11 @@
 
   /* ---------------------------------------------------------- path graph */
 
-  const PATH_BOX = { w: 168, h: 46, colGap: 96, rowGap: 22, top: 30, left: 12 };
+  const PATH_BOX = { w: 168, h: 46, line: 14, colGap: 96, rowGap: 22, top: 30, left: 12 };
+
+  // A box is as tall as its lines: title, subtitle, then one each for what a
+  // subtitle would have trimmed - the mac-vrf a source is in, its segment.
+  const pathBoxHeight = (node) => PATH_BOX.h + (node.lines || []).length * PATH_BOX.line;
 
   function pathSvg(name, attrs, text) {
     const node = document.createElementNS("http://www.w3.org/2000/svg", name);
@@ -6958,21 +6962,23 @@
       return;
     }
 
-    // Layout: columns by hop, rows in the order the server listed them.
+    // Layout: columns by hop, boxes stacked in the order the server listed them.
     const hops = [...new Set(graph.nodes.map((n) => n.hop))].sort((a, b) => a - b);
     const column = new Map(hops.map((hop, index) => [hop, index]));
-    const rowsOf = new Map();
+    const filled = new Map();
     const place = new Map();
     for (const node of graph.nodes) {
-      const row = rowsOf.get(node.hop) || 0;
-      rowsOf.set(node.hop, row + 1);
+      const y = filled.get(node.hop) || PATH_BOX.top;
+      const h = pathBoxHeight(node);
+      filled.set(node.hop, y + h + PATH_BOX.rowGap);
       place.set(node.id, {
         x: PATH_BOX.left + column.get(node.hop) * (PATH_BOX.w + PATH_BOX.colGap),
-        y: PATH_BOX.top + row * (PATH_BOX.h + PATH_BOX.rowGap),
+        y,
+        h,
       });
     }
     const width = PATH_BOX.left * 2 + hops.length * (PATH_BOX.w + PATH_BOX.colGap) - PATH_BOX.colGap;
-    const height = PATH_BOX.top + Math.max(...rowsOf.values()) * (PATH_BOX.h + PATH_BOX.rowGap);
+    const height = Math.max(...filled.values());
 
     const summary = document.createElement("div");
     summary.className = "path-graph-summary";
@@ -7030,9 +7036,9 @@
       const index = labelled.get(edge.from) || 0;
       labelled.set(edge.from, index + 1);
       const x1 = from.x + PATH_BOX.w;
-      const y1 = from.y + PATH_BOX.h / 2;
+      const y1 = from.y + from.h / 2;
       const x2 = to.x;
-      const y2 = to.y + PATH_BOX.h / 2;
+      const y2 = to.y + to.h / 2;
       const bend = Math.max(30, (x2 - x1) / 2);
       const d = `M${x1},${y1} C${x1 + bend},${y1} ${x2 - bend},${y2} ${x2},${y2}`;
       const kind = edge.state === "up" || edge.state === "down" ? edge.state : "";
@@ -7062,25 +7068,93 @@
       }
     }
 
+    const tip = document.createElement("div");
+    tip.className = "path-tooltip";
+    tip.hidden = true;
     for (const node of graph.nodes) {
       const at = place.get(node.id);
-      const group = pathSvg("g", { transform: `translate(${at.x},${at.y})` });
-      const title = pathSvg("title", {}, [node.title, node.subtitle, ...(node.details || [])].filter(Boolean).join("\n"));
+      const lines = node.lines || [];
+      const group = pathSvg("g", {
+        transform: `translate(${at.x},${at.y})`,
+        class: "path-box-group",
+        tabindex: 0,
+        "aria-label": [node.title, node.subtitle, ...lines, ...(node.details || [])].filter(Boolean).join(", "),
+      });
       group.append(
-        title,
         pathSvg("rect", {
           width: PATH_BOX.w,
-          height: PATH_BOX.h,
+          height: at.h,
           class: `path-box ${node.state ? "path-box-" + node.state : ""}`.trim(),
         }),
-        pathSvg("text", { x: 10, y: node.subtitle ? 19 : 28, class: "path-box-title" }, pathTrimHead(node.title, 22)),
+        pathSvg("text", { x: 10, y: node.subtitle || lines.length ? 19 : 28, class: "path-box-title" }, pathTrimHead(node.title, 22)),
       );
       if (node.subtitle) {
         group.append(pathSvg("text", { x: 10, y: 35, class: "path-box-sub" }, pathTrim(node.subtitle, 27)));
       }
+      lines.forEach((line, index) => {
+        group.append(
+          pathSvg("text", { x: 10, y: 35 + (index + 1) * PATH_BOX.line, class: "path-box-sub" }, pathTrim(line, 27))
+        );
+      });
+      const show = (x, y) => {
+        tip.replaceChildren(pathTooltipContent(node));
+        tip.hidden = false;
+        // Beside the pointer, kept inside the window.
+        const box = tip.getBoundingClientRect();
+        tip.style.left = `${Math.max(8, Math.min(x + 14, window.innerWidth - box.width - 8))}px`;
+        tip.style.top = `${Math.max(8, Math.min(y + 14, window.innerHeight - box.height - 8))}px`;
+      };
+      group.addEventListener("mousemove", (event) => show(event.clientX, event.clientY));
+      group.addEventListener("mouseleave", () => (tip.hidden = true));
+      group.addEventListener("focus", () => {
+        const box = group.getBoundingClientRect();
+        show(box.right - 14, box.top);
+      });
+      group.addEventListener("blur", () => (tip.hidden = true));
       svg.append(group);
     }
-    dom.pathGraphView.append(svg);
+    dom.pathGraphView.append(svg, tip);
+  }
+
+  // Everything known about a box: each lookup it stands for, with every
+  // field its card has, and the sentences that say what the walk did.
+  function pathTooltipContent(node) {
+    const root = document.createDocumentFragment();
+    const head = document.createElement("div");
+    head.className = "path-tooltip-head";
+    head.textContent = [node.title, node.subtitle].filter(Boolean).join(" · ");
+    root.append(head);
+    const facts = node.facts || [];
+    for (const fact of facts) {
+      const section = document.createElement("div");
+      section.className = `path-tooltip-fact ${fact.state ? "path-tooltip-" + fact.state : ""}`.trim();
+      if (facts.length > 1 || fact.heading !== head.textContent) {
+        const heading = document.createElement("div");
+        heading.className = "path-tooltip-heading";
+        heading.textContent = fact.heading;
+        section.append(heading);
+      }
+      const list = document.createElement("dl");
+      for (const detail of fact.details) {
+        const dt = document.createElement("dt");
+        dt.textContent = detail.label;
+        const dd = document.createElement("dd");
+        dd.textContent = detail.value;
+        list.append(dt, dd);
+      }
+      section.append(list);
+      root.append(section);
+    }
+    // A stop drawn by the browser alone has no lookups, only what ended it.
+    if (!facts.length) {
+      for (const line of node.details || []) {
+        const p = document.createElement("div");
+        p.className = "path-tooltip-line";
+        p.textContent = line;
+        root.append(p);
+      }
+    }
+    return root;
   }
 
   function renderBody() {

@@ -1550,6 +1550,10 @@ def trace_path(
     happened to take. A lookup in a VRF that resolves onto a tunnel hands off
     to the underlay towards its endpoint and resumes in the VRF at the far end,
     so a DCI path traces VXLAN to the gateway, MPLS across, and VXLAN again.
+    A MAC destination is walked through the bridge tables instead: a MAC behind
+    an ethernet-segment is aliased over every VTEP of that segment, one tunnel
+    each. A source address (IP or MAC) adds a hop-0 'ingress' record naming
+    the port and ethernet-segment its MAC is learned on.
 
     Use this for 'why does A not reach B': the hop whose outcome is 'no-route',
     'discard', 'unresolved' or 'dead-end' is where the path stops.
@@ -1558,7 +1562,9 @@ def trace_path(
     records share a hop number when the walk fans out over ECMP. Each has:
         hop, node, ni, address: where the lookup was done and what was looked
             up - the destination, or the VTEP being chased through the underlay.
-        outcome: 'forwarded' (out of egress to peer, where the walk goes on),
+        outcome: 'ingress' (hop 0: the source's MAC is learned on ingress, in
+            bridge_ni, over the segment esi), 'forwarded' (out of egress to
+            peer, where the walk goes on),
             'dead-end' (no LLDP neighbour on egress, so it cannot),
             'handed-off' (no LLDP neighbour on egress, but ARP/ND there
             resolves the next-hop: the packet leaves the fabric to gateway at
@@ -1569,7 +1575,8 @@ def trace_path(
             is decapsulated and looked up in resumes_in, the VRF there),
             'leaked' (the route was leaked from resumes_in, whose next-hops
             forward it; the walk goes on in that instance on the same node),
-            'delivered' (the destination is attached here), 'local-ip' (it is
+            'delivered' (the destination is attached here, or a MAC destination
+            is learned on egress, a port of this node), 'local-ip' (it is
             this node's own address), 'neighbor' or 'no-neighbor' (whether
             ARP/ND has the delivered address), 'discard' (a discard route
             drops it), 'unresolved' (the next-hop leads to no port or tunnel;
@@ -1578,15 +1585,20 @@ def trace_path(
         prefix, route_type, next_hops: the route that matched.
         egress: the subinterface, or 'vxlan:<vtep>' over the overlay.
         peer, peer_port: the node on the other end of that cable.
-        tunnel, endpoint, resumes_in, mac, origin, visited: filled for the
-            outcomes named.
+        esi, segments: the ethernet-segment the source enters on (ingress), a
+            MAC destination is aliased over (tunnel, one per VTEP of the
+            segment) or is delivered on (delivered).
+        tunnel, endpoint, resumes_in, mac, origin, visited, ingress, bridge_ni:
+            filled for the outcomes named.
     Plus "not_collected" when a node's report could not be read.
 
     Args:
-        source: The node to start from, or an address attached to one.
-        destination: The address being forwarded towards.
+        source: The node to start from, or an IP or MAC address attached to one.
+        destination: The IP address being routed, or the MAC being bridged,
+            towards.
         ni: Network instance to look the destination up in. Defaults to 'default'
-            (the underlay); name the IP-VRF for a tenant address.
+            (the underlay); name the IP-VRF for a tenant address, or the mac-vrf
+            for a MAC (with 'default', the source's own or any that has it).
         inv_filter: Inventory filter as comma-separated key=value pairs. A filter
             that excludes a node the path goes through will truncate the walk there.
     """

@@ -164,23 +164,31 @@ class Hop:
     hop: int
     node: str
     ni: str
-    #: The address looked up here: the destination, or the tunnel endpoint
-    #: the walk is chasing through the underlay on behalf of a VRF.
+    #: The address looked up here: the destination - an IP, or a MAC looked
+    #: up in a bridge table - or the tunnel endpoint the walk is chasing
+    #: through the underlay on behalf of a VRF or mac-vrf. ``ingress``: the
+    #: source address the walk starts from.
     address: str
     #: What the walk did with the lookup.
+    #: ``ingress``: hop 0, where a source address enters the fabric - the
+    #: port its MAC is learned on, :attr:`ingress`, and the segment that port
+    #: belongs to. Not a lookup: the walk starts on the node after it.
     #: ``forwarded``: out of :attr:`egress` to :attr:`peer`, where it goes on.
     #: ``dead-end``: out of an interface with no LLDP neighbour, so it cannot.
     #: ``handed-off``: out of an interface with no LLDP neighbour, to a
     #: next-hop ARP or ND resolves there - a host or router beyond the fabric,
     #: :attr:`gateway` at :attr:`mac`. The walk ends, but not blind.
     #: ``tunnel``: resolved to a tunnel - VXLAN to a VTEP, LDP or SR to a
-    #: far-end PE - and goes on in the underlay towards :attr:`endpoint`.
+    #: far-end PE - and goes on in the underlay towards :attr:`endpoint`. A
+    #: MAC behind an ethernet-segment is one tunnel per VTEP of the segment,
+    #: each naming it in :attr:`esi`: that is aliasing.
     #: ``endpoint-reached``: the underlay delivered the tunnel endpoint; the
     #: packet is decapsulated and looked up again in :attr:`resumes_in`.
     #: ``leaked``: the route matched was leaked from :attr:`resumes_in`, whose
     #: next-hops forward it; the walk goes on there.
     #: ``delivered``: the destination is attached here, as the route's type
-    #: says. ``local-ip``: it is this node's own address.
+    #: says, or a MAC is learned on this node's own port, :attr:`egress`.
+    #: ``local-ip``: it is this node's own address.
     #: ``neighbor``/``no-neighbor``: whether ARP or ND has the delivered
     #: address. ``discard``: the route drops the packet. ``unresolved``: the
     #: route's next-hops lead to no port or tunnel the tables can follow,
@@ -215,6 +223,17 @@ class Hop:
     gateway: str = ""
     #: ``loop``: the steps already taken, as ``node/network-instance``.
     visited: Tuple[str, ...] = ()
+    #: ``ingress``: the subinterface the source MAC is learned on, and the
+    #: mac-vrf whose bridge table it is learned in - the one behind the irb
+    #: of a VRF. Empty on a routed port, which has no bridge table.
+    ingress: str = ""
+    bridge_ni: str = ""
+    #: The ethernet-segment on the way: ``ingress`` the one the source is
+    #: learned on; ``tunnel`` the one a MAC sits behind, which the tunnel is
+    #: one VTEP of; ``delivered`` the one a MAC is learned on here. With what
+    #: the segment is called on the nodes that have it configured.
+    esi: str = ""
+    segments: Tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -1061,6 +1080,58 @@ def _neighbor_index(state: FabricState) -> Dict[Tuple[str, str, str], List[Tuple
     return index
 
 
+def _mac_index(state: FabricState) -> Dict[Tuple[str, str, str], Any]:
+    """(node, bridge table, MAC) -> the bridge-table entry for it."""
+    return {
+        (node, table.ni, _mac(entry.address)): entry
+        for node, table, entry in state.sub_items("mac", "entries")
+    }
+
+
+def _bridges(state: FabricState, node: str, ni: str) -> List[str]:
+    """The bridge tables *ni* reaches on *node*.
+
+    A mac-vrf is its own; an ip-vrf reaches the mac-vrfs it shares an irb
+    with. ``default`` has none of its own and stands for every bridge table
+    on the node, so that a MAC can be traced without naming its mac-vrf.
+    """
+    instances = [inst for n, inst in state.items("ni") if n == node]
+    tables = {t.ni for n, t in state.items("mac") if n == node}
+    tables |= {inst.name for inst in instances if text(inst.type) == "mac-vrf"}
+    if ni in tables:
+        return [ni]
+    if ni == "default":
+        return sorted(tables)
+    irbs = {i.name for inst in instances if inst.name == ni for i in inst.interfaces if i.name.startswith("irb")}
+    return sorted(
+        inst.name
+        for inst in instances
+        if inst.name in tables and irbs & {i.name for i in inst.interfaces}
+    )
+
+
+def _es_vteps(state: FabricState) -> Dict[Tuple[str, str, str], Tuple[str, ...]]:
+    """(node, vxlan-interface, ESI) -> the VTEPs the bridge table sends that segment's MACs to.
+
+    What the node made of the segment's AD-per-ES routes: every VTEP that
+    advertised one, which is the set a MAC behind the segment is aliased over.
+    """
+    return {
+        (node, dest.overlay, dest.esi): dest.vteps
+        for node, tunnel in state.items("es_dest")
+        for dest in tunnel.destinations
+        if dest.esi
+    }
+
+
+def _segment(
+    ports: Mapping[Tuple[str, str], EthernetSegment], node: str, port: str
+) -> Dict[str, Any]:
+    """The ethernet-segment a node's subinterface is on, as a Hop's fields."""
+    segment = ports.get((node, parent(port)))
+    return dict(esi=segment.esi, segments=(segment.name,)) if segment else {}
+
+
 def _starting_nodes(state: FabricState, source: str, ni: str) -> List[str]:
     """Where a walk begins: a named node, or whoever knows the source address."""
     known = state.nodes("ipv4_rib") or state.nodes("lldp")
@@ -1068,6 +1139,26 @@ def _starting_nodes(state: FabricState, source: str, ni: str) -> List[str]:
     resolved = resolve(source, index)
     if resolved:
         return [resolved]
+
+    # A MAC starts the walk wherever it is learned on a port of the node's
+    # own, in a bridge table the instance reaches: on both sides of an
+    # all-active segment, on one side otherwise.
+    mac = _mac(source)
+    if mac:
+        reach = {node: set(_bridges(state, node, ni)) for node in state.nodes("mac")}
+        starts = sorted(
+            {
+                node
+                for node, table, entry in state.sub_items("mac", "entries")
+                if entry.local and _mac(entry.address) == mac and table.ni in reach.get(node, ())
+            }
+        )
+        if not starts:
+            raise ValueError(
+                f"no node has {mac} learned on a port of its own in network-instance '{ni}'; "
+                "name the node to start from instead"
+            )
+        return starts
 
     address = _address(source)
     if address is None:
@@ -1110,6 +1201,61 @@ def _starting_nodes(state: FabricState, source: str, ni: str) -> List[str]:
     return starts
 
 
+def _ingress(
+    state: FabricState,
+    macs: Mapping[Tuple[str, str, str], Any],
+    ports: Mapping[Tuple[str, str], EthernetSegment],
+    source: str,
+    ni: str,
+    nodes: Iterable[str],
+) -> List[Hop]:
+    """Where a source address enters the fabric on each node a walk starts from.
+
+    A MAC is looked for as it is; an IP through the ARP or ND binding that
+    names it in the instance, whose MAC the irb's mac-vrf has learned on a
+    port - or, on a routed port, the port the binding is on. That port says
+    which ethernet-segment the source is attached over. A named node has no
+    source address, and a node the walk starts on for a connected route alone
+    has no binding to say where it is.
+    """
+    mac, address = _mac(source), _address(source)
+    if not mac and address is None:
+        return []
+    hops = []
+    for node in nodes:
+        # (MAC, the bridge tables to find it in, the port a binding is on)
+        candidates: List[Tuple[str, Sequence[str], str]] = []
+        if mac:
+            candidates.append((mac, _bridges(state, node, ni), ""))
+        else:
+            candidates.extend(
+                (_mac(entry.mac), cache.nis, cache.interface)
+                for bound_node, cache, entry, _report in _arp_bindings(state)
+                if bound_node == node and ni in cache.nis and _address(entry.address) == address
+            )
+        found = None
+        for bound, tables, interface in candidates:
+            local = next(
+                (
+                    (table, macs[(node, table, bound)])
+                    for table in tables
+                    if (node, table, bound) in macs and macs[(node, table, bound)].local
+                ),
+                None,
+            )
+            if local:
+                table, entry = local
+                port = str(entry.interface or "")
+                found = dict(mac=bound, ingress=port, bridge_ni=table, **_segment(ports, node, port))
+                break
+            # A routed port has no bridge table: the binding's own port is it.
+            if interface and not interface.startswith("irb") and found is None:
+                found = dict(mac=bound, ingress=interface, **_segment(ports, node, interface))
+        if found:
+            hops.append(Hop(hop=0, node=node, ni=ni, address=mac or str(address), outcome="ingress", **found))
+    return hops
+
+
 #: One lookup still to do: the node and network-instance to do it in, the
 #: address to look up, the hop it is on, the steps taken to get there, and -
 #: when it is an underlay leg chasing a tunnel endpoint on behalf of a VRF -
@@ -1126,23 +1272,33 @@ def _resume_instance(state: FabricState, node: str, origin_node: str, origin_ni:
     node, but a gateway stitching two datacenters need not: what ties the two
     together is the route-target the origin's instance exports and the far
     end's imports. Failing both, the VRF that has a route to the address.
+
+    A MAC lands in a mac-vrf the same way, and failing both in the one whose
+    bridge table has it.
     """
     instances = {inst.name: inst for n, inst in state.items("ni") if n == node}
     if origin_ni in instances or not instances:
         return origin_ni
     origin = next((inst for n, inst in state.items("ni") if n == origin_node and inst.name == origin_ni), None)
     exported = {rt for inst in (origin.instances if origin else ()) for rt in inst.export_rts}
-    vrfs = [inst for inst in instances.values() if text(inst.type) == "ip-vrf"]
+    bridged = isinstance(address, str)
+    wanted = "mac-vrf" if bridged else "ip-vrf"
+    vrfs = [inst for inst in instances.values() if text(inst.type) == wanted]
     by_target = [
         inst
         for inst in vrfs
         if exported & {rt for bgp in inst.instances for rt in bgp.import_rts}
     ]
     candidates = by_target or vrfs
+    macs = _mac_index(state) if bridged else {}
     with_route = [
         inst
         for inst in candidates
-        if _lpm(_routes(state, _rib_report(address), node, inst.name), address) is not None
+        if (
+            (node, inst.name, address) in macs
+            if bridged
+            else _lpm(_routes(state, _rib_report(address), node, inst.name), address) is not None
+        )
     ]
     chosen = with_route or candidates
     return chosen[0].name if chosen else origin_ni
@@ -1177,18 +1333,48 @@ def lens_path(
 
     The final hop of a delivered destination includes the ARP or ND entry for
     it, confirming the host is reachable, or noting when no binding exists.
+
+    A MAC destination is looked up in the bridge table instead: in *ni* if
+    it is a mac-vrf, else in the mac-vrf the source is learned in or the one
+    behind the instance's irb that has it. An entry learned on a port
+    delivers it there; one learned from a VTEP is a VXLAN tunnel to it; one
+    whose EVPN route named a non-zero ethernet-segment is aliased over every
+    VTEP the segment's AD-per-ES routes came from, as the bridge table's
+    segment destinations have them - one tunnel per VTEP, each naming the
+    segment.
+
+    A source address - an IP, through its ARP or ND binding, or a MAC - adds
+    a hop 0 on each node it starts from, saying which port its MAC is learned
+    on and which ethernet-segment that port belongs to.
     """
-    target = _address(destination)
+    target: Any = _address(destination)
     if target is None:
-        raise ValueError(f"'{destination}' is not an IP address")
+        target = _mac(destination)
+    if not target:
+        raise ValueError(f"'{destination}' is neither an IP nor a MAC address")
+    bridged = isinstance(target, str)
     peers = _lldp_peers(state)
     lldp_ports = _lldp_ports(state)
     neighbors = _neighbor_index(state)
-    hops: List[Hop] = []
+    macs = _mac_index(state)
+    ports = _port_segments(state)
+    segment_names = _es_names(state)
+    es_vteps = _es_vteps(state)
 
-    pending: List[_Pending] = [
-        (node, ni, target, 1, (), None) for node in _starting_nodes(state, source, ni)
-    ]
+    starts = _starting_nodes(state, source, ni)
+    hops: List[Hop] = _ingress(state, macs, ports, source, ni, starts)
+    pending: List[_Pending] = []
+    for node in starts:
+        if not bridged:
+            pending.append((node, ni, target, 1, (), None))
+            continue
+        # A MAC is looked up in the source's own bridge table where there is
+        # one, else in whichever the instance reaches that has it.
+        reach = _bridges(state, node, ni)
+        own = [h.bridge_ni for h in hops if h.node == node and h.bridge_ni in reach]
+        having = [table for table in reach if (node, table, target) in macs]
+        for table in own[:1] or having or reach or [ni]:
+            pending.append((node, table, target, 1, (), None))
     # ECMP branches fan out and converge again: every spine leads to the same
     # gateway, every gateway to the same far end. A lookup already made on
     # another branch is one answer, reported where it was first reached.
@@ -1215,6 +1401,59 @@ def lens_path(
         if lookup in made:
             continue
         made.add(lookup)
+
+        # A MAC is looked up in the bridge table rather than a route table.
+        if isinstance(address, str):
+            entry = macs.get((node, instance, address))
+            if entry is None:
+                hops.append(Hop(**here, outcome="no-route"))
+                continue
+            matched = dict(prefix=address, route_type=text(entry.type))
+            if entry.local:
+                port = str(entry.interface or "")
+                hops.append(Hop(**here, **matched, outcome="delivered", egress=port, **_segment(ports, node, port)))
+                continue
+            # Learned from one VTEP or far-end PE, or behind a segment: every
+            # VTEP the segment's AD-per-ES routes came from, as this bridge
+            # table resolved them.
+            behind: Dict[str, Any] = {}
+            if entry.far_end:
+                endpoints, kind, vni = [entry.far_end], "mpls", None
+            elif entry.vtep:
+                endpoints, kind, vni = [entry.vtep], "vxlan", entry.vni
+            else:
+                endpoints, kind, vni = list(es_vteps.get((node, entry.overlay, entry.esi), ())), "vxlan", entry.vni
+                behind = dict(esi=entry.esi, segments=segment_names.get(entry.esi, ()))
+            endpoints = [e for e in endpoints if _address(e) is not None]
+            if not endpoints:
+                hops.append(
+                    Hop(**here, **matched, outcome="unresolved", egress=f"esi:{entry.esi}" if entry.esi else "", **behind)
+                )
+                continue
+            for endpoint in endpoints:
+                hops.append(
+                    Hop(
+                        **here,
+                        **matched,
+                        outcome="tunnel",
+                        egress=f"{kind}:{endpoint}",
+                        tunnel=kind,
+                        endpoint=endpoint,
+                        vni=vni,
+                        **behind,
+                    )
+                )
+                pending.append(
+                    (
+                        node,
+                        "default",
+                        _address(endpoint),
+                        hop + 1,
+                        seen + (step,),
+                        resume if resume is not None else (node, instance, address),
+                    )
+                )
+            continue
 
         # Looked up in the RIB of the address at hand, not the destination's:
         # an IPv6 tenant carried to an IPv4 VTEP walks the IPv4 underlay.
@@ -1387,6 +1626,9 @@ def lens_path(
 #: even where it is empty, so that a new outcome cannot render as nothing by
 #: accident.
 _HOP_DETAIL: Dict[str, Callable[[Hop], str]] = {
+    "ingress": lambda h: (
+        f"{h.mac} learned on {h.ingress}" + (f" in {h.bridge_ni}" if h.bridge_ni else "") + _segment_tail(h)
+    ),
     "forwarded": lambda h: "",
     "dead-end": lambda h: (
         f"no LLDP neighbour on {parent(h.egress)}, the path stops being traceable here"
@@ -1395,16 +1637,22 @@ _HOP_DETAIL: Dict[str, Callable[[Hop], str]] = {
         f"no LLDP neighbour on {parent(h.egress)}, handed to {h.gateway} at {h.mac} "
         f"({_resolution(h.gateway)}, {h.origin})"
     ),
-    "tunnel": lambda h: f"over {_tunnel_name(h)} to {h.endpoint}, continuing in default",
+    "tunnel": lambda h: (
+        f"over {_tunnel_name(h)} to {h.endpoint}"
+        + (f", aliased over {_segment_text(h)}" if h.esi else "")
+        + ", continuing in default"
+    ),
     "endpoint-reached": lambda h: f"tunnel endpoint reached, continuing in {h.resumes_in}",
     "leaked": lambda h: f"leaked from {h.resumes_in}, continuing there",
-    "delivered": lambda h: f"delivered here, {h.route_type} on {h.egress or 'this node'}",
+    "delivered": lambda h: f"delivered here, {h.route_type} on {h.egress or 'this node'}" + _segment_tail(h),
     "local-ip": lambda h: f"locally configured on {h.egress or 'this node'}",
     "neighbor": lambda h: f"{h.mac} on {h.egress}, {h.origin}",
     "no-neighbor": lambda h: f"no ARP/ND entry for {h.address} on this node",
     "discard": lambda h: f"dropped here by a {h.route_type} discard route",
     "unresolved": lambda h: (
-        f"next-hop resolves no further than {h.egress}"
+        f"no VTEP of {_segment_text(h)} in the bridge table's segment destinations"
+        if h.esi
+        else f"next-hop resolves no further than {h.egress}"
         if h.egress
         else "next-hop resolves to no interface or tunnel"
     ),
@@ -1412,6 +1660,17 @@ _HOP_DETAIL: Dict[str, Callable[[Hop], str]] = {
     "loop": lambda h: f"already visited on this path ({' -> '.join(h.visited)})",
     "too-long": lambda h: f"still not delivered after {MAX_HOPS} hops",
 }
+
+def _segment_text(h: Hop) -> str:
+    """``segment ES-01 (00:01:...)``, or the ESI alone where no node names it."""
+    names = ", ".join(h.segments)
+    return f"segment {names} ({h.esi})" if names else f"segment {h.esi}"
+
+
+def _segment_tail(h: Hop) -> str:
+    """The ethernet-segment of a hop, as the tail of a Detail."""
+    return f", {_segment_text(h)}" if h.esi else ""
+
 
 def _tunnel_name(h: Hop) -> str:
     """``vxlan vni 1``, or just the tunnel type where it carries no VNI."""
@@ -1438,7 +1697,7 @@ def _resolution(address: str) -> str:
 
 #: Outcomes that are about the delivered address rather than a route, so the
 #: Prefix column shows the address the walk was confirming.
-_LAST_MILE = ("local-ip", "neighbor", "no-neighbor")
+_LAST_MILE = ("local-ip", "neighbor", "no-neighbor", "ingress")
 
 
 PATH_COLUMNS: Tuple[Column, ...] = (
@@ -1449,12 +1708,14 @@ PATH_COLUMNS: Tuple[Column, ...] = (
     Column("Next-hop", lambda h: _joined(h.next_hops) or h.mac),
     Column("Egress", _hop_egress),
     Column("Peer", lambda h: _hop_peer(h)),
+    Column("ES", lambda h: ", ".join(h.segments) or h.esi),
     Column("Detail", lambda h: _HOP_DETAIL[h.outcome](h)),
 )
 
 #: What each outcome says about the walk: reaching or being delivered is
 #: good, a hop that only goes on says nothing yet, and a stop is a fault.
 _HOP_STATE = {
+    "ingress": _UP,
     "delivered": _UP,
     "local-ip": _UP,
     "neighbor": _UP,
@@ -1478,8 +1739,15 @@ def _hop_item(h: Hop) -> Item:
         details.append(Detail("Next-hop", tuple(h.next_hops)))
     if h.mac:
         details.append(Detail("MAC", f"{h.mac} ({h.origin})" if h.origin else h.mac))
+    if h.ingress:
+        details.append(Detail("Learned on", h.ingress))
+    if h.bridge_ni:
+        details.append(Detail("Bridge table", h.bridge_ni))
     if h.egress:
         details.append(Detail("Egress", h.egress))
+    if h.esi:
+        details.append(Detail("ESI", h.esi))
+        details.append(Detail("Segment", tuple(h.segments) or "not local", "" if h.segments else _WARN))
     if h.peer:
         details.append(Detail("Peer", f"{h.peer} {h.peer_port}".strip()))
     if h.gateway:
@@ -1512,9 +1780,9 @@ def graph_path(hops: List[Hop]) -> Dict[str, Any]:
     """
     if not hops:
         return {"nodes": [], "edges": [], "destination": ""}
-    # The first hop looked up the destination; the underlay legs look up
-    # tunnel endpoints on its behalf.
-    destination = hops[0].address
+    # The first lookup is of the destination; the underlay legs look up
+    # tunnel endpoints on its behalf, and an ingress names the source.
+    destination = next((h.address for h in hops if h.outcome != "ingress"), hops[0].address)
     boxes: Dict[Tuple[int, str, str, str], Dict[str, Any]] = {}
     for h in hops:
         key = (h.hop, h.node, h.ni, h.address)
@@ -1532,11 +1800,27 @@ def graph_path(hops: List[Hop]) -> Dict[str, Any]:
                 "state": "",
                 "outcomes": [],
                 "details": [],
+                # Under the subtitle, one per line: what a box would trim.
+                "lines": [],
+                # Everything known about each lookup the box stands for, the
+                # fields a card shows, for the box's hover.
+                "facts": [],
             }
         box["outcomes"].append(h.outcome)
+        fact = _hop_fact(h)
+        if fact not in box["facts"]:
+            box["facts"].append(fact)
         box["state"] = _worst([box["state"], _HOP_STATE.get(h.outcome, "")])
         line = _HOP_DETAIL[h.outcome](h)
-        if h.outcome == "neighbor":
+        # The mac-vrf a source is learned in and the segment on the way each
+        # get a line of their own, rather than trimmed off a subtitle.
+        extra = [f"mac-vrf {h.bridge_ni}" if h.outcome == "ingress" and h.bridge_ni else ""]
+        extra.append(f"ES {', '.join(h.segments) or h.esi}" if h.esi else "")
+        box["lines"].extend(x for x in extra if x and x not in box["lines"])
+        if h.outcome == "ingress":
+            box["title"] = h.node
+            box["subtitle"] = f"{h.address} on {h.ingress}"
+        elif h.outcome == "neighbor":
             box["subtitle"] = f"{h.mac} on {h.egress}"
         elif h.outcome == "local-ip":
             box["subtitle"] = f"own address on {h.egress}" if h.egress else "own address"
@@ -1561,7 +1845,11 @@ def graph_path(hops: List[Hop]) -> Dict[str, Any]:
     stops: List[Dict[str, Any]] = []
     for h in hops:
         source = _box_id(h.hop, h.node, h.ni, h.address)
-        if h.outcome == "forwarded":
+        if h.outcome == "ingress":
+            # Into the node's first lookup, in whichever instance it was made.
+            first = sorted(key for key in boxes if key[0] == 1 and key[1] == h.node)
+            to, label = (_box_id(*first[0]) if first else None), h.ingress
+        elif h.outcome == "forwarded":
             to, label = successor(h, h.peer, h.ni, h.address), h.egress
         elif h.outcome == "tunnel":
             to, label = successor(h, h.node, "default", h.endpoint), _hop_egress(h)
@@ -1625,6 +1913,22 @@ def graph_path(hops: List[Hop]) -> Dict[str, Any]:
     }
 
 
+def _hop_fact(h: Hop) -> Dict[str, Any]:
+    """One lookup as its card has it - a heading and its fields - in plain text."""
+
+    def plain(value: Any) -> str:
+        if isinstance(value, tuple):
+            return ", ".join(v[0] if isinstance(v, tuple) else str(v) for v in value)
+        return str(value)
+
+    item = _hop_item(h)
+    return {
+        "heading": item.title,
+        "state": item.state,
+        "details": [{"label": d.label, "value": plain(d.value)} for d in item.details],
+    }
+
+
 def _box_id(hop: int, node: str, ni: str, address: str) -> str:
     return f"{hop}:{node}/{ni}@{address}"
 
@@ -1640,7 +1944,7 @@ def tree_path(hops: List[Hop]) -> List[Card]:
             outcomes[h.outcome] = outcomes.get(h.outcome, 0) + 1
         cards.append(
             Card(
-                title=f"Hop {number}",
+                title=f"Hop {number}" if number else "Ingress",
                 subtitle=", ".join(f"{n} {outcome}" for outcome, n in outcomes.items()),
                 icon="🧭",
                 state=_worst(e.state for e in entries),
@@ -2277,11 +2581,16 @@ LENSES: Tuple[LensSpec, ...] = (
         description=(
             "Walks the route tables hop by hop from a node or address towards a "
             "destination, following every ECMP branch and every tunnel: VXLAN to "
-            "the VTEP, MPLS to the far-end gateway, and back into the VRF there."
+            "the VTEP, MPLS to the far-end gateway, and back into the VRF there. "
+            "A MAC destination is walked through the bridge tables, aliased over "
+            "every VTEP of the ethernet-segment it sits behind; a source address "
+            "says which port and ethernet-segment it enters on."
         ),
         # ``ni`` says which VRF a tunnel lands in at its far end; ``mac`` which
-        # leaves a source address is attached to, rather than merely known on.
-        requires=("ni", "ipv4_rib", "ipv6_rib", "lldp", "arp", "nd", "mac"),
+        # leaves a source address is attached to, rather than merely known on,
+        # and where a MAC destination is; ``es`` which segment a port is on;
+        # ``es_dest`` which VTEPs a MAC behind a segment is aliased over.
+        requires=("ni", "ipv4_rib", "ipv6_rib", "lldp", "arp", "nd", "mac", "es", "es_dest"),
         columns=PATH_COLUMNS,
         run=lens_path,
         tree=tree_path,
@@ -2290,16 +2599,16 @@ LENSES: Tuple[LensSpec, ...] = (
             ParamSpec(
                 name="source",
                 label="From",
-                placeholder="leaf1 or 10.0.1.51",
-                help="The node or attached address the walk starts from",
+                placeholder="leaf1, 10.0.1.51 or a MAC",
+                help="The node, or the attached IP or MAC address, the walk starts from",
                 required=True,
             ),
             ParamSpec(
                 name="destination",
                 label="To",
-                placeholder="10.0.2.51",
-                help="The address being forwarded towards",
-                kind="address",
+                placeholder="10.0.2.51 or a MAC",
+                help="The IP address being routed, or the MAC being bridged, towards",
+                kind="host",
                 required=True,
             ),
             ParamSpec(

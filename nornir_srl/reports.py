@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import inspect
 import ipaddress
+import re
 from dataclasses import dataclass, replace
 from typing import Any, Callable, Dict, FrozenSet, List, Mapping, Optional, Sequence, Tuple, Union
 
@@ -191,7 +192,8 @@ class ParamSpec:
     label: str
     placeholder: str = ""
     help: str = ""
-    #: ``text``; ``address`` for one that has to parse as an IP address; ``ni``
+    #: ``text``; ``address`` for one that has to parse as an IP address;
+    #: ``host`` for an IP address or a MAC, written as a bridge table does; ``ni``
     #: for the name of a network-instance, which a surface offers from the
     #: ones the fabric has - its placeholder being the one taken when none is
     #: chosen. ``config-node`` for a node whose configurations the server
@@ -238,6 +240,15 @@ class ParamSpec:
                 raise ValueError(
                     f"{self.label}: '{text}' is not an IP address"
                 ) from None
+        if self.kind == "host":
+            try:
+                return str(ipaddress.ip_address(text))
+            except ValueError:
+                pass
+            octets = text.upper().replace("-", ":").split(":")
+            if len(octets) == 6 and all(re.fullmatch(r"[0-9A-F]{1,2}", o) for o in octets):
+                return ":".join(o.zfill(2) for o in octets)
+            raise ValueError(f"{self.label}: '{text}' is neither an IP nor a MAC address")
         if self.kind == "commit":
             if not text.isdigit():
                 raise ValueError(f"{self.label}: '{text}' is not a commit id")

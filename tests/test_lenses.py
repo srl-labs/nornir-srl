@@ -49,6 +49,8 @@ from nornir_srl.records import (
     BgpVpnInstance,
     BridgeTable,
     Egress,
+    EsDestination,
+    EsDestinations,
     EthernetSegment,
     LldpInterface,
     LldpNeighbor,
@@ -439,7 +441,7 @@ def test_path_reports_a_destination_nothing_routes_to(state: FabricState):
 
 
 def test_path_rejects_a_destination_that_is_not_an_address(state: FabricState):
-    with pytest.raises(ValueError, match="not an IP address"):
+    with pytest.raises(ValueError, match="neither an IP nor a MAC address"):
         lens_path(state, source=LEAF, destination="somewhere")
 
 
@@ -452,6 +454,146 @@ def test_path_starts_from_an_attached_address(state: FabricState):
     """A source given as an address starts wherever that address is attached."""
     hops = lens_path(state, source="100.64.1.16", destination="192.168.255.4")
     assert _at_hop(hops, 1)[0].node == LEAF
+
+
+def test_path_says_which_segment_a_source_address_enters_on(state: FabricState):
+    """10.0.1.2 is 00:C1:AB:00:01:21 by ARP, learned on lag1 of ES-01."""
+    (ingress,) = _at_hop(lens_path(state, source="10.0.1.2", destination="10.0.2.3", ni="ipvrf-1"), 0)
+    assert (ingress.outcome, ingress.node, ingress.mac) == ("ingress", LEAF, "00:C1:AB:00:01:21")
+    assert (ingress.ingress, ingress.bridge_ni) == ("lag1.100", "subnet-1")
+    assert (ingress.esi, ingress.segments) == ("00:01:01:00:00:00:66:00:01:01", ("ES-01",))
+    row = PATH.row(ingress)
+    assert (row["Hop"], row["Type"], row["ES"]) == (0, "ingress", "ES-01")
+    assert row["Detail"] == (
+        "00:C1:AB:00:01:21 learned on lag1.100 in subnet-1, segment ES-01 (00:01:01:00:00:00:66:00:01:01)"
+    )
+    # Named by its MAC, it enters on the same port.
+    (by_mac,) = _at_hop(lens_path(state, source="00:c1:ab:00:01:21", destination="10.0.2.3", ni="ipvrf-1"), 0)
+    assert (by_mac.ingress, by_mac.esi) == (ingress.ingress, ingress.esi)
+
+
+def test_path_aliases_a_mac_behind_a_segment_over_every_vtep_of_it(state: FabricState):
+    """The RT-2 for 00:C1:AB:00:03:43 named a segment; its AD-per-ES routes two VTEPs."""
+    hops = lens_path(state, source="10.0.1.2", destination="00:C1:AB:00:03:43", ni="ipvrf-1")
+    overlay = _at_hop(hops, 1)
+    assert {(h.ni, h.outcome, h.endpoint) for h in overlay} == {
+        ("subnet-1", "tunnel", "192.168.255.3"),
+        ("subnet-1", "tunnel", "192.168.255.4"),
+    }
+    assert {h.esi for h in overlay} == {"00:01:03:00:00:00:66:00:01:03"}
+    # Each VTEP is then chased through the underlay.
+    assert {h.address for h in _at_hop(hops, 2)} == {"192.168.255.3", "192.168.255.4"}
+    assert "aliased over segment 00:01:03:00:00:00:66:00:01:03" in PATH.row(overlay[0])["Detail"]
+
+
+def _segment_fabric(es_dest: bool = True) -> FabricState:
+    """leaf1 bridging towards a host on leaf2 and leaf3's shared segment mh-1.
+
+    leaf1 learned 00:00:00:00:00:BB over EVPN behind mh-1, and resolved the
+    segment to both leaves' VTEPs; each of them learned it on lag1.1, a port
+    of mh-1. The source 00:00:00:00:00:AA is on leaf1's own segment mh-2.
+    """
+    mh1, mh2 = "00:11:11:11:11:11:11:11:11:11", "00:22:22:22:22:22:22:22:22:22"
+    host = "00:00:00:00:00:BB"
+    state = FabricState()
+    state.hostnames = {n: n for n in ("leaf1", "leaf2", "leaf3")}
+    state.reports = {
+        "ipv4_rib": {
+            "leaf1": [RouteTable("default", (
+                _route("192.0.2.2/32", "bgp", _via("10.0.0.2", Egress("interface", "ethernet-1/49.0"))),
+                _route("192.0.2.3/32", "bgp", _via("10.0.0.3", Egress("interface", "ethernet-1/50.0"))),
+            ))],
+            "leaf2": [RouteTable("default", (_route("192.0.2.2/32", "host", _via("", Egress("interface", "system0.0"))),))],
+            "leaf3": [RouteTable("default", (_route("192.0.2.3/32", "host", _via("", Egress("interface", "system0.0"))),))],
+        },
+        "ipv6_rib": {},
+        "lldp": {
+            "leaf1": [
+                LldpInterface("ethernet-1/49", (LldpNeighbor("leaf2", "ethernet-1/1"),)),
+                LldpInterface("ethernet-1/50", (LldpNeighbor("leaf3", "ethernet-1/1"),)),
+            ],
+        },
+        "arp": {},
+        "nd": {},
+        "mac": {
+            "leaf1": [BridgeTable("macvrf-1", (
+                MacEntry.read("00:00:00:00:00:AA", "lag2.1", "learnt"),
+                MacEntry.read(host, f"vxlan-interface:vxlan1.1 esi:{mh1}", "evpn"),
+            ))],
+            "leaf2": [BridgeTable("macvrf-1", (MacEntry.read(host, "lag1.1", "learnt"),))],
+            "leaf3": [BridgeTable("macvrf-1", (MacEntry.read(host, "lag1.1", "learnt"),))],
+        },
+        "es": {
+            "leaf1": [EthernetSegment("mh-2", mh2, "", "all-active", "up", interfaces=("lag2",))],
+            "leaf2": [EthernetSegment("mh-1", mh1, "", "all-active", "up", interfaces=("lag1",))],
+            "leaf3": [EthernetSegment("mh-1", mh1, "", "all-active", "up", interfaces=("lag1",))],
+        },
+        "es_dest": {
+            "leaf1": [EsDestinations("vxlan1", (EsDestination(mh1, "vxlan1.1", ("192.0.2.2", "192.0.2.3")),) if es_dest else ())],
+        },
+    }
+    return state
+
+
+def test_path_bridges_a_mac_over_its_segment_to_every_leaf_that_has_it():
+    hops = lens_path(_segment_fabric(), source="00:00:00:00:00:AA", destination="00:00:00:00:00:BB", ni="macvrf-1")
+    assert [(h.hop, h.node, h.ni, h.outcome, h.endpoint or h.egress) for h in hops] == [
+        (0, "leaf1", "macvrf-1", "ingress", ""),
+        (1, "leaf1", "macvrf-1", "tunnel", "192.0.2.2"),
+        (1, "leaf1", "macvrf-1", "tunnel", "192.0.2.3"),
+        (2, "leaf1", "default", "forwarded", "ethernet-1/49.0"),
+        (2, "leaf1", "default", "forwarded", "ethernet-1/50.0"),
+        (3, "leaf2", "default", "endpoint-reached", "system0.0"),
+        (3, "leaf3", "default", "endpoint-reached", "system0.0"),
+        (4, "leaf2", "macvrf-1", "delivered", "lag1.1"),
+        (4, "leaf3", "macvrf-1", "delivered", "lag1.1"),
+    ]
+    ingress, *_rest = hops
+    assert (ingress.ingress, ingress.segments) == ("lag2.1", ("mh-2",))
+    # The segment is named on the way out, and where it is delivered.
+    assert {h.segments for h in hops if h.outcome in ("tunnel", "delivered")} == {("mh-1",)}
+    assert PATH.row(hops[-1])["Detail"] == (
+        "delivered here, learnt on lag1.1, segment mh-1 (00:11:11:11:11:11:11:11:11:11)"
+    )
+
+
+def test_path_looks_a_mac_up_in_the_source_bridge_table_when_none_is_named():
+    hops = lens_path(_segment_fabric(), source="00:00:00:00:00:AA", destination="00:00:00:00:00:BB")
+    assert {h.ni for h in _at_hop(hops, 1)} == {"macvrf-1"}
+    assert [h.outcome for h in _at_hop(hops, 4)] == ["delivered", "delivered"]
+
+
+def test_path_stops_at_a_segment_the_bridge_table_has_no_vtep_for():
+    hops = lens_path(_segment_fabric(es_dest=False), source="leaf1", destination="00:00:00:00:00:BB", ni="macvrf-1")
+    (hop,) = hops
+    assert (hop.outcome, hop.egress, hop.segments) == ("unresolved", "esi:00:11:11:11:11:11:11:11:11:11", ("mh-1",))
+    assert "no VTEP of segment mh-1 (00:11:11:11:11:11:11:11:11:11)" in PATH.row(hop)["Detail"]
+
+
+def test_path_graph_draws_the_ingress_into_the_first_lookup():
+    graph = graph_path(lens_path(_segment_fabric(), source="00:00:00:00:00:AA", destination="00:00:00:00:00:BB"))
+    assert graph["destination"] == "00:00:00:00:00:BB"
+    (ingress,) = [n for n in graph["nodes"] if n["hop"] == 0]
+    # The mac-vrf and the segment each get a line, rather than being trimmed off.
+    assert ingress["subtitle"] == "00:00:00:00:00:AA on lag2.1"
+    assert ingress["lines"] == ["mac-vrf macvrf-1", "ES mh-2"]
+    # Hovering it shows every field its card has.
+    (fact,) = ingress["facts"]
+    fields = {d["label"]: d["value"] for d in fact["details"]}
+    assert fields["Outcome"] == "ingress"
+    assert (fields["Learned on"], fields["Bridge table"], fields["Segment"]) == ("lag2.1", "macvrf-1", "mh-2")
+    assert fields["ESI"] == "00:22:22:22:22:22:22:22:22:22"
+    # A box standing for several lookups - the two aliased tunnels - has one
+    # fact for each, and the segment once.
+    (overlay,) = [n for n in graph["nodes"] if n["hop"] == 1]
+    assert [f["details"][0]["value"] for f in overlay["facts"]] == ["tunnel", "tunnel"]
+    assert {d["value"] for f in overlay["facts"] for d in f["details"] if d["label"] == "Tunnel"} == {
+        "vxlan to 192.0.2.2",
+        "vxlan to 192.0.2.3",
+    }
+    assert overlay["lines"] == ["ES mh-1"]
+    (edge,) = [e for e in graph["edges"] if e["from"] == ingress["id"]]
+    assert edge["to"] == "1:leaf1/macvrf-1@00:00:00:00:00:BB" and edge["label"] == "lag2.1"
 
 
 def _via(address: str, *egress: Egress) -> RouteNextHop:
@@ -1147,7 +1289,7 @@ def test_every_hop_outcome_has_a_detail():
     from nornir_srl.lenses import _HOP_DETAIL  # noqa: PLC0415 - the map is the test
 
     documented = {
-        "forwarded", "dead-end", "handed-off", "tunnel", "endpoint-reached", "leaked", "delivered",
+        "ingress", "forwarded", "dead-end", "handed-off", "tunnel", "endpoint-reached", "leaked", "delivered",
         "local-ip", "neighbor", "no-neighbor", "discard", "unresolved", "no-route", "loop", "too-long",
     }
     assert set(_HOP_DETAIL) == documented
@@ -1335,8 +1477,12 @@ def test_a_lens_refuses_to_be_asked_nothing():
         "source": "leaf1",
         "destination": "10.0.0.1",
     }
-    with pytest.raises(ValueError, match="not an IP address"):
+    with pytest.raises(ValueError, match="neither an IP nor a MAC address"):
         coerce_lens_params(get_lens("path"), {"source": "leaf1", "destination": "nowhere"})
+    # A MAC is a destination too, written the way the bridge table has it.
+    assert coerce_lens_params(get_lens("path"), {"source": "leaf1", "destination": "aa-bb-cc-0-1-2"})[
+        "destination"
+    ] == "AA:BB:CC:00:01:02"
 
 
 # --------------------------------------------------------------------------- #
