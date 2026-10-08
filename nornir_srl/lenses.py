@@ -1162,7 +1162,6 @@ def lens_path(
     target = _address(destination)
     if target is None:
         raise ValueError(f"'{destination}' is not an IP address")
-    report = _rib_report(target)
     peers = _lldp_peers(state)
     lldp_ports = _lldp_ports(state)
     neighbors = _neighbor_index(state)
@@ -1198,7 +1197,9 @@ def lens_path(
             continue
         made.add(lookup)
 
-        route = _lpm(_routes(state, report, node, instance), address)
+        # Looked up in the RIB of the address at hand, not the destination's:
+        # an IPv6 tenant carried to an IPv4 VTEP walks the IPv4 underlay.
+        route = _lpm(_routes(state, _rib_report(address), node, instance), address)
         if route is None:
             hops.append(Hop(**here, outcome="no-route"))
             continue

@@ -600,6 +600,34 @@ def test_path_continues_in_vrf_after_vtep_is_reached():
     assert last.address == "10.200.2.23"
 
 
+def test_path_walks_an_ipv6_destination_over_an_ipv4_underlay():
+    """The VTEP is looked up in the IPv4 RIB, the destination in the IPv6 one."""
+    state = FabricState()
+    state.hostnames = {"leaf1": "leaf1", "dcgw1": "dcgw1"}
+    state.reports = {
+        "ipv4_rib": {
+            "leaf1": [RouteTable("default", (_route("192.168.255.2/32", "bgp", _via("", Egress("interface", "ethernet-1/1.0"))),))],
+            "dcgw1": [RouteTable("default", (_route("192.168.255.2/32", "host", _via("", Egress("interface", "system0.0"))),))],
+        },
+        "ipv6_rib": {
+            "leaf1": [RouteTable("ipvrf-1", (_route("2001:db8:2::/64", "bgp-evpn", _via("192.168.255.2", Egress("tunnel", "192.168.255.2/32", tunnel="vxlan"))),))],
+            "dcgw1": [RouteTable("ipvrf-1", (_route("2001:db8:2::/64", "local", _via("", Egress("interface", "irb0.2"))),))],
+        },
+        "ni": {"dcgw1": [NetworkInstance("ipvrf-1", "ip-vrf", "up")]},
+        "lldp": {"leaf1": [LldpInterface("ethernet-1/1", (LldpNeighbor("dcgw1", "ethernet-1/1"),))], "dcgw1": []},
+        "arp": {},
+        "nd": {},
+    }
+    hops = lens_path(state, source="leaf1", destination="2001:db8:2::23", ni="ipvrf-1")
+    assert [(h.hop, h.node, h.ni, h.outcome) for h in hops] == [
+        (1, "leaf1", "ipvrf-1", "tunnel"),
+        (2, "leaf1", "default", "forwarded"),
+        (3, "dcgw1", "default", "endpoint-reached"),
+        (4, "dcgw1", "ipvrf-1", "delivered"),
+        (5, "dcgw1", "ipvrf-1", "no-neighbor"),
+    ]
+
+
 def _dci_over_mpls() -> FabricState:
     """A leaf, a DC gateway and a WAN gateway: VXLAN to the first, LDP to the second.
 
