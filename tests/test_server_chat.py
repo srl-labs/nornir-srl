@@ -830,6 +830,45 @@ def test_node_config_drops_provenance_annotations(store):
     assert bgp["group"] == [{"name": "spines"}]
 
 
+def test_node_config_never_hands_the_model_a_secret(store):
+    fabric_store, _devices = store
+    fabric_store.node_get = lambda node, path, datatype="state": [
+        {
+            "srl_nokia-network-instance:network-instance/protocols/bgp": {
+                "autonomous-system": 101,
+                "group": [{"name": "spines", "authentication": {"keychain": "k1"}}],
+                "neighbor": [{"peer-address": "10.0.0.1", "authentication-key": "$aes1$hush"}],
+            }
+        }
+    ]
+    chat = ChatService(fabric_store, client_factory=lambda: None)
+    text = chat.execute_tool("node_config", {"node": "leaf1", "area": "bgp"})
+    assert "hush" not in text
+    payload = json.loads(text)
+    bgp = payload["config"]["/network-instance[name=default]/protocols/bgp"][0]
+    neighbor = next(iter(bgp.values()))["neighbor"][0]
+    assert neighbor["authentication-key"].startswith("<redacted ")
+    assert neighbor["peer-address"] == "10.0.0.1"
+    assert "redacted" in payload["secrets"]
+
+
+def test_node_get_and_node_cli_never_hand_the_model_a_secret(store):
+    fabric_store, _devices = store
+    fabric_store.node_get = lambda node, path, datatype="state": [{"/": "$y$j9T$hush"}]
+    chat = ChatService(
+        fabric_store,
+        client_factory=lambda: None,
+        jsonrpc_call=lambda *args: [{"user": [{"name": "admin", "password": "$y$hush"}]}],
+    )
+    leaf = chat.execute_tool(
+        "node_get",
+        {"node": "leaf1", "path": "/system/aaa/authentication/admin-user/password", "datatype": "config"},
+    )
+    assert "hush" not in leaf and "<redacted " in leaf
+    cli = chat.execute_tool("node_cli", {"node": "leaf1", "command": "info system aaa"})
+    assert "hush" not in cli and "<redacted " in cli
+
+
 def test_node_config_keeps_what_it_could_read(store):
     fabric_store, _devices = store
 

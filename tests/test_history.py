@@ -194,6 +194,57 @@ def test_a_redacted_secret_still_reads_as_changed_when_it_changed():
     assert configs.redact({"password": "a"}, salt="t")["password"] != one
 
 
+def test_only_a_module_prefix_is_stripped_from_a_value():
+    tree = configs.normalize(
+        [
+            {
+                "/": {
+                    "srl_nokia-system:system": {
+                        "description": "site:west",
+                        "mac": "aa:bb:cc:dd:ee:ff",
+                        "type": "srl_nokia-aaa-types:local",
+                    }
+                }
+            }
+        ]
+    )
+    assert tree["system"] == {"description": "site:west", "mac": "aa:bb:cc:dd:ee:ff", "type": "local"}
+
+
+def test_a_secret_is_digested_as_the_node_sent_it():
+    def password(value):
+        tree = configs.normalize([{"/": {"system": {"aaa": {"password": value}}}}], salt="s")
+        return tree["system"]["aaa"]["password"]
+
+    assert password("alpha:secret") != password("beta:secret")
+    # Under a path-shaped key too, as a Get below the root answers.
+    path = [{"srl_nokia-system:system/aaa/password": "alpha:secret"}]
+    assert configs.normalize(path, salt="s")["system"]["aaa"]["password"] == password("alpha:secret")
+
+
+def test_a_secret_is_found_under_the_path_a_get_answers_with():
+    # A Get below the root keys its answer by the path, prefixes and all.
+    tree = configs.redact(
+        [{"srl_nokia-system:system/aaa/authentication/user[name=admin]/password": "$y$x"}]
+    )
+    assert next(iter(tree[0].values())).startswith("<redacted ")
+    # A Get of the leaf itself answers as '/': the path asked for names it.
+    assert configs.redact([{"/": "$y$x"}], name="password")[0]["/"].startswith("<redacted ")
+    assert configs.leaf_name("/system/tls/server-profile[name=a/b]/key") == "key"
+    # An SNMP community is a secret; the BGP communities on a route are not.
+    assert configs.redact({"community": "public"})["community"].startswith("<redacted ")
+    assert configs.redact({"community": ["65000:1"]})["community"] == ["65000:1"]
+
+
+def test_a_secret_in_cli_text_is_redacted():
+    text = 'user admin {\n    password "$y$j9T$abc"\n    role [ admin ]\n}\nset / system snmp community public\n'
+    redacted = configs.redact_text(text, salt="s")
+    assert "$y$" not in redacted and "public" not in redacted
+    assert "role [ admin ]" in redacted
+    # A key that is not the last word on its line is prose, not a leaf.
+    assert configs.redact_text("key not found on this node") == "key not found on this node"
+
+
 def test_a_configuration_reads_as_the_set_lines_sr_linux_prints():
     lines = configs.flatten(configs.normalize(RAW_CONFIG))
     assert "set / interface ethernet-1/2 description \"to spine1\"" in lines

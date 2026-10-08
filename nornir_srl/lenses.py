@@ -179,10 +179,13 @@ class Hop:
     #: packet is decapsulated and looked up again in :attr:`resumes_in`.
     #: ``leaked``: the route matched was leaked from :attr:`resumes_in`, whose
     #: next-hops forward it; the walk goes on there.
-    #: ``delivered``: the destination is attached here. ``local-ip``: it is
-    #: this node's own address. ``neighbor``/``no-neighbor``: whether ARP or
-    #: ND has the delivered address. ``no-route``, ``loop``, ``too-long``:
-    #: where a walk gives up.
+    #: ``delivered``: the destination is attached here, as the route's type
+    #: says. ``local-ip``: it is this node's own address.
+    #: ``neighbor``/``no-neighbor``: whether ARP or ND has the delivered
+    #: address. ``discard``: the route drops the packet. ``unresolved``: the
+    #: route's next-hops lead to no port or tunnel the tables can follow,
+    #: :attr:`egress` the prefix they stopped at if any. ``no-route``,
+    #: ``loop``, ``too-long``: where a walk gives up.
     outcome: str
     #: The route the lookup matched, as the route table has it.
     prefix: str = ""
@@ -474,6 +477,10 @@ def coerce_lens_params(lens: LensSpec, raw: Mapping[str, Any]) -> Dict[str, Any]
 #: Route types that terminate a walk because the destination is attached to the
 #: node that holds them rather than reachable through it.
 _ATTACHED = ("local", "host", "direct", "arp-nd", "static-local")
+
+#: Next-hop types that drop the packet: a static or aggregate route to a
+#: blackhole.
+_DISCARD = ("discard", "blackhole", "reject")
 
 
 def _address(value: Any) -> Optional[Any]:
@@ -1035,13 +1042,20 @@ def _lldp_ports(state: FabricState) -> Set[Tuple[str, str]]:
     return {(node, itf.name) for node, itf, _neighbor in state.sub_items("lldp", "neighbors")}
 
 
-def _neighbor_index(state: FabricState) -> Dict[Tuple[str, str], List[Tuple[str, str, str]]]:
-    """(node, address) -> every (interface, MAC, origin) ARP or ND binds it to."""
-    index: Dict[Tuple[str, str], List[Tuple[str, str, str]]] = {}
+def _neighbor_index(state: FabricState) -> Dict[Tuple[str, str, str], List[Tuple[str, str, str]]]:
+    """(node, network-instance, address) -> every (interface, MAC, origin) ARP or ND binds it to.
+
+    Keyed by instance because the same address can live in two VRFs: a
+    binding on tenant-b's interface says nothing about tenant-a's host. An
+    irb is in both its mac-vrf and its ip-vrf, so it is found from either.
+    """
+    index: Dict[Tuple[str, str, str], List[Tuple[str, str, str]]] = {}
     for node, cache, entry, _report in _arp_bindings(state):
         address = _address(entry.address)
-        if address is not None:
-            index.setdefault((node, str(address)), []).append(
+        if address is None:
+            continue
+        for ni in cache.nis:
+            index.setdefault((node, ni, str(address)), []).append(
                 (cache.interface, entry.mac, text(entry.origin))
             )
     return index
@@ -1065,17 +1079,22 @@ def _starting_nodes(state: FabricState, source: str, ni: str) -> List[str]:
     # EVPN to every leaf carrying the irb, so a binding learned that way only
     # counts where the host's MAC is on a port of the node's own - the sides
     # of its segment - rather than on every leaf in the fabric. Failing any
-    # binding, a connected route covering it.
+    # binding, a connected route covering it. Only bindings on an interface
+    # of the instance asked about count: the same address in another VRF is
+    # another host.
     own_macs = {
-        (node, _mac(entry.address))
-        for node, _table, entry in state.sub_items("mac", "entries")
+        (node, table.ni, _mac(entry.address))
+        for node, table, entry in state.sub_items("mac", "entries")
         if entry.local
     }
     starts = []
-    for node, _cache, entry, _report in _arp_bindings(state):
-        if _address(entry.address) != address or node in starts:
+    for node, cache, entry, _report in _arp_bindings(state):
+        if _address(entry.address) != address or node in starts or ni not in cache.nis:
             continue
-        if text(entry.origin) != "evpn" or (node, _mac(entry.mac)) in own_macs:
+        # The irb's other instance is the mac-vrf the host's MAC is learned in.
+        if text(entry.origin) != "evpn" or any(
+            (node, bridge, _mac(entry.mac)) in own_macs for bridge in cache.nis
+        ):
             starts.append(node)
     if starts:
         return starts
@@ -1162,7 +1181,6 @@ def lens_path(
     target = _address(destination)
     if target is None:
         raise ValueError(f"'{destination}' is not an IP address")
-    report = _rib_report(target)
     peers = _lldp_peers(state)
     lldp_ports = _lldp_ports(state)
     neighbors = _neighbor_index(state)
@@ -1198,7 +1216,9 @@ def lens_path(
             continue
         made.add(lookup)
 
-        route = _lpm(_routes(state, report, node, instance), address)
+        # Looked up in the RIB of the address at hand, not the destination's:
+        # an IPv6 tenant carried to an IPv4 VTEP walks the IPv4 underlay.
+        route = _lpm(_routes(state, _rib_report(address), node, instance), address)
         if route is None:
             hops.append(Hop(**here, outcome="no-route"))
             continue
@@ -1260,11 +1280,20 @@ def lens_path(
                 )
             continue
 
+        # A route that leaves nowhere is not thereby attached: only its type
+        # says the destination is here. Otherwise its next-hops either drop
+        # the packet on purpose - a static or aggregate discard - or resolve
+        # to nothing the tables can follow.
+        if not leaves and kind not in _ATTACHED:
+            dropped = bool(route.next_hops) and all(text(nh.type) in _DISCARD for nh in route.next_hops)
+            hops.append(Hop(**here, **matched, outcome="discard" if dropped else "unresolved"))
+            continue
+
         # Anything else the route leaves through is looked up against LLDP by
         # its port; a prefix the chain stopped at, or a tunnel of another
         # kind, has no neighbour and ends the walk saying so.
         egress = [hop.label for hop in leaves]
-        if kind in _ATTACHED or not egress:
+        if kind in _ATTACHED:
             # An attached route has one interface, or none at all when the
             # destination is the node itself.
             attached = egress or [""]
@@ -1292,7 +1321,14 @@ def lens_path(
                 for interface in attached:
                     hops.append(Hop(**last, outcome="local-ip", egress=interface))
                 continue
-            bound = neighbors.get((node, str(target)), [])
+            # The binding has to be on the interface the route delivers out of,
+            # in this instance: anywhere else it is some other host's.
+            ports = {interface for interface in attached if interface}
+            bound = [
+                (interface, mac, origin)
+                for interface, mac, origin in neighbors.get((node, instance, str(target)), [])
+                if not ports or interface in ports
+            ]
             for interface, mac, origin in bound:
                 hops.append(
                     Hop(**last, outcome="neighbor", egress=interface, mac=mac, origin=origin)
@@ -1302,6 +1338,11 @@ def lens_path(
             continue
 
         for next_hop, out in ((nh, out) for nh in route.next_hops for out in nh.egress):
+            if out.kind != "interface":
+                # The chain stopped at a prefix, or at a tunnel with no
+                # endpoint to chase: there is no port to find a neighbour on.
+                hops.append(Hop(**here, **matched, outcome="unresolved", egress=out.label))
+                continue
             subinterface = out.label
             peer = peers.get((node, parent(subinterface)))
             if peer is None:
@@ -1311,9 +1352,11 @@ def lens_path(
                 # that is not in the inventory is a switch the walk cannot
                 # follow, not a place the packet is delivered to.
                 gateway = _address(next_hop.address)
+                # A leaked route leaves through a port of the instance it came
+                # from, and the gateway is resolved there.
                 bound = [
                     (mac, origin)
-                    for interface, mac, origin in neighbors.get((node, str(gateway)), [])
+                    for interface, mac, origin in neighbors.get((node, out.ni or instance, str(gateway)), [])
                     if interface == subinterface
                 ] if gateway is not None and (node, parent(subinterface)) not in lldp_ports else []
                 for mac, origin in bound:
@@ -1359,6 +1402,12 @@ _HOP_DETAIL: Dict[str, Callable[[Hop], str]] = {
     "local-ip": lambda h: f"locally configured on {h.egress or 'this node'}",
     "neighbor": lambda h: f"{h.mac} on {h.egress}, {h.origin}",
     "no-neighbor": lambda h: f"no ARP/ND entry for {h.address} on this node",
+    "discard": lambda h: f"dropped here by a {h.route_type} discard route",
+    "unresolved": lambda h: (
+        f"next-hop resolves no further than {h.egress}"
+        if h.egress
+        else "next-hop resolves to no interface or tunnel"
+    ),
     "no-route": lambda h: f"nothing in {h.ni} matches {h.address}",
     "loop": lambda h: f"already visited on this path ({' -> '.join(h.visited)})",
     "too-long": lambda h: f"still not delivered after {MAX_HOPS} hops",
@@ -1412,6 +1461,8 @@ _HOP_STATE = {
     "handed-off": _UP,
     "endpoint-reached": _UP,
     "dead-end": _DOWN,
+    "discard": _DOWN,
+    "unresolved": _DOWN,
     "no-route": _DOWN,
     "no-neighbor": _DOWN,
     "loop": _DOWN,

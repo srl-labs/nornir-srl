@@ -12,12 +12,14 @@ from __future__ import annotations
 import json
 import logging
 import os
+import secrets
 import time
 from typing import Any, AsyncIterator, Callable, Dict, List, Optional, Tuple
 
 import anyio
 
 from ..connections.routing import BGP_RIB_ROUTE_FAM_ALIASES
+from ..configs import leaf_name, redact
 from ..connections.srlinux import CONNECTION_NAME
 from ..lenses import LensSpec, coerce_lens_params, lenses_for
 from ..reports import SERVER, ReportSpec, get_report, reports_for
@@ -74,6 +76,13 @@ NO_ANSWER = (
     "You have no tools left. Answer now in at most 200 words, directly from "
     "the tool output you already have. Lead with the answer, keep reasoning to "
     "a minimum, and say what you could not determine."
+)
+
+#: Told to the model with configuration, so it reports a redacted value as
+#: such rather than as a password that is literally "<redacted ...>".
+REDACTED_NOTE = (
+    "passwords, keys and communities are shown as '<redacted digest>': equal "
+    "digests mean equal values, and the value itself is never available"
 )
 
 _SKIP_TABLE = frozenset({"overview", "topology", "activity"})
@@ -512,6 +521,33 @@ class ChatService:
         self._tools = tool_specs()
         #: (when, node, message) once a node refuses JSON-RPC outright.
         self._jsonrpc_down: Optional[Tuple[float, str, str]] = None
+        #: Digests secrets when the server keeps no history to share one with.
+        self._own_salt = secrets.token_hex(16)
+
+    def _salt(self) -> str:
+        """What secrets are digested with before the model sees them.
+
+        The history's salt when there is one, so a password reads as the same
+        digest here as in config_diff; never a fixed one, so a digest cannot
+        be looked up in a table of weak passwords.
+        """
+        history = getattr(self.store, "history", None)
+        if history is not None:
+            try:
+                return history.salt()
+            except Exception:  # noqa: BLE001 - a failing disk is not a leak
+                logger.warning("could not read the history salt; using the chat's own")
+        return self._own_salt
+
+    def _redact(self, payload: Any, path: str = "") -> Any:
+        """*payload* with every secret leaf replaced by a digest of it.
+
+        Whatever a tool reads from a node - its configuration, its state, the
+        output of a CLI command - goes to a third-party model, and password
+        hashes, keys and SNMP communities are not the model's to see. *path*
+        is what was asked for, in case the answer is that one leaf.
+        """
+        return redact(payload, self._salt(), leaf_name(path))
 
     def enabled(self) -> bool:
         if self.client_factory is not None:
@@ -588,7 +624,8 @@ class ChatService:
 
     def execute_tool(self, name: str, arguments: Dict[str, Any]) -> str:
         if name == "list_nodes":
-            return dumps_truncated(self.store.inventory())
+            # Labels are host data, which an inventory may put credentials in.
+            return dumps_truncated(self._redact(self.store.inventory()))
         if name == "show_topology":
             return dumps_truncated(
                 self.store.topology(parse_kv(arguments.get("inv_filter")))
@@ -686,7 +723,9 @@ class ChatService:
             return json.dumps({"error": str(exc)})
         except Exception as exc:  # noqa: BLE001 - returned to the model
             return json.dumps({"error": str(exc)})
-        return dumps_truncated({"node": node, "command": command, "result": result})
+        return dumps_truncated(
+            {"node": node, "command": command, "result": self._redact(result)}
+        )
 
     @staticmethod
     def _strip_annotations(value: Any) -> Tuple[Any, bool]:
@@ -744,7 +783,7 @@ class ChatService:
             if self._is_unset(result):
                 unset.append(path)
                 continue
-            config[path], hit = self._strip_annotations(result)
+            config[path], hit = self._strip_annotations(self._redact(result, path))
             annotated = annotated or hit
         if not config and errors:
             return json.dumps({"error": "; ".join(errors.values())})
@@ -762,6 +801,7 @@ class ChatService:
             payload["errors"] = errors
         if annotated:
             payload["note"] = "_annotate provenance comments removed"
+        payload["secrets"] = REDACTED_NOTE
         return dumps_truncated(payload)
 
     def _node_get(self, node: str, path: str, datatype: str) -> str:
@@ -775,7 +815,13 @@ class ChatService:
         except Exception as exc:  # noqa: BLE001 - returned to the model
             return json.dumps({"error": str(exc)})
         return dumps_truncated(
-            {"node": node, "path": path, "datatype": datatype, "result": payload}
+            {
+                "node": node,
+                "path": path,
+                "datatype": datatype,
+                "result": self._redact(payload, path),
+                "secrets": REDACTED_NOTE,
+            }
         )
 
     async def _answer_anyway(
