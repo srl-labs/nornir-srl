@@ -898,9 +898,8 @@ def endpoints(
     host lives behind - where its MAC was learned, the routed port for a
     routed neighbour, or this node's side of the segment for a host its ES
     peer learned), ip_vrf and mac_vrf (an irb's bridge domain), learned
-    ('local' or 'remote') and vtep (remote only: the VTEP or far-end PE it
-    sits behind). esi and es name the ethernet-segment the host is behind:
-    its port's, or the one a remote entry points at. lldp lists
+    ('local', or 'remote' for a host the ES peer learned). esi and es name
+    the ethernet-segment the host is behind. lldp lists
     the system-names LLDP hears on the host's port (a LAG's members, or this
     node's side of the segment): what the host calls itself, where it runs LLDP.
 

@@ -196,7 +196,7 @@ def test_a_host_its_segment_peer_learned_is_named_on_this_side_of_the_segment():
     (host,) = device.get_endpoints()["endpoints"]
     assert (host.learned, host.es, host.lldp) == ("remote", "ES-1", ("host1",))
     # It lives behind this node's side of the segment as well.
-    assert (host.subinterface, host.vtep) == ("lag1.1", "")
+    assert host.subinterface == "lag1.1"
 
 
 def test_an_endpoint_reads_as_one_row():
@@ -205,13 +205,13 @@ def test_an_endpoint_reads_as_one_row():
         macs=(MacEntry.read("AA:BB:CC:00:00:05", "lag1.100", "learnt"),),
     )
     (row,) = ENDPOINTS_TABLE.rows(host)
-    assert {k: row.values[k] for k in ("IP", "L3-interface", "Subinterface", "IP-VRF", "MAC-VRF", "VTEP", "ES")} == {
+    assert "VTEP" not in row.values
+    assert {k: row.values[k] for k in ("IP", "L3-interface", "Subinterface", "IP-VRF", "MAC-VRF", "ES")} == {
         "IP": "10.0.0.5",
         "L3-interface": "irb0.1",
         "IP-VRF": "ipvrf-1",
         "MAC-VRF": "macvrf-1",
         "Subinterface": "lag1.100",
-        "VTEP": "",
         "ES": "ES-1",
     }
 

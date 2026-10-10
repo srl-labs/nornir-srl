@@ -15,7 +15,7 @@ A single unified registry (`nornir_srl/lenses.py`) powers the CLI commands, MCP 
 | --- | --- | --- | --- | --- |
 | **Incidents** | `incidents` | `fabric_incidents` | Yes | Groups every check's findings by root cause - a link, a node, a BGP session, the underlay, or one cause repeated across the fabric - so a broken cable reads as one incident rather than a dozen findings. See [Health](health.md). |
 | **Changes** | - | - (server only) | Yes | What changed and when, from the server's timeline, or with `since=baseline` the drift from the baseline, narrowed by kind (`bgp`, `config`, `finding`, ...) and severity. See [Health](health.md). |
-| **Where** | `where <mac\|ip>` | `locate_address` | Yes | Pinpoints which nodes own an address, which learned it via EVPN/VXLAN, and highlights duplicate IP/MAC conflicts. A MAC learned locally on several leaves over the same ethernet-segment is reported as multihomed, with the segment named, not as a duplicate. An IP resolved through ARP/ND on an irb is followed into the mac-vrf behind it: the subinterface the MAC was learned on and its ethernet-segment, or the VTEP or segment it sits behind. An IP that is a BGP-learned host route (/32 or /128) is reported on each node that installed it, with the route type and its next-hops. In the web UI each finding links to the reports it was made of - IRB, ARP/ND, MAC, ES and the IP-RIB lookup - filtered to that node. |
+| **Where** | `where <mac\|ip>` | `locate_address` | Yes | Pinpoints which nodes own an address, which learned it via EVPN/VXLAN, and highlights duplicate IP/MAC conflicts. A MAC learned locally on several leaves over the same ethernet-segment is reported as multihomed, with the segment named, not as a duplicate. An IP resolved through ARP/ND on an irb is followed into the mac-vrf behind it: the subinterface the MAC was learned on and its ethernet-segment, or the VTEP or segment it sits behind. An IP that is a BGP-learned host route (/32 or /128) is reported on each node that installed it, with the route type and its next-hops. In the web UI each finding links to the reports it was made of - IRB, ARP/ND, MAC, ES and the IP-RIB lookup - filtered to that node. For every host at once rather than one address, see the [Endpoints](#where-and-the-endpoints-report) report. |
 | **Path** | `path <from> <to> [--ni <vrf>]` | `trace_path` | Yes | Traces route lookups hop by hop across route tables, following all ECMP branches through VXLAN, LDP, or SR-MPLS tunnels to the destination ARP/ND. A MAC destination is traced through the bridge tables, aliased over every VTEP of the ethernet-segment it sits behind. A source IP or MAC adds an ingress hop naming the port and ethernet-segment it enters on. |
 | **Service** | `service <name>` | `service_detail` | Yes | Consolidates all nodes participating in a network-instance (MAC-VRF or IP-VRF), displaying EVI, VNI, RTs, interfaces, and active MAC counts side by side. |
 | **Config Diff** | - | - (`config_diff` tool reads the same history) | Yes | What one commit changed in a node's configuration, as SR Linux set lines with secrets redacted, from the configurations the server keeps after every commit. Every commit on the Changes timeline links to it. See [History](history.md). |
@@ -46,6 +46,25 @@ Unlike active probing tools (such as traceroute), `path` computes forwarding tra
 * **Recursive tunnel resolution**: When a VRF route resolves to an overlay tunnel (such as a VXLAN VTEP or an MPLS gateway via LDP or SR-MPLS), the tracer hands the walk over to the underlay route table towards the tunnel endpoint. Upon reaching the remote endpoint, lookup resumes within the destination VRF (matching by name or imported route-target).
 * **Ethernet segments**: A source given as an address (an IP, resolved to its MAC through ARP/ND, or a MAC) starts with a hop 0 per ingress node, naming the port its MAC is learned on and that port's ethernet-segment. A MAC destination is looked up in the bridge table: when the EVPN type-2 route it was learned from carried a non-zero ESI, the walk is aliased over every VTEP the segment's AD-per-ES (type-1) routes came from, as the bridge table's segment destinations (`es-dest`) have them - one tunnel per VTEP, each naming the segment - and is delivered on the far leaves' segment ports.
 * **Clear termination**: The walk completes when reaching an ARP/ND cache entry for the destination or a local interface. If forwarding fails (e.g. missing route or missing LLDP neighbor on an egress port), the path explicitly halts and reports the failure reason.
+
+---
+
+## Where and the Endpoints report
+
+The **Endpoints** report (`fcli endpoints`, MCP `endpoints`, under *Services* in the web UI) lists every host attached to each node: its IP and MAC, the L3 interface its ARP/ND entry is on, the access subinterface it lives behind, its IP-VRF and MAC-VRF, its ethernet-segment and the name LLDP hears from it. A host that only bridges is listed by its MAC alone. Management ports, links between fabric nodes and hosts another node learned over EVPN are left out, so each host appears where it is attached - on both nodes of a multihomed segment. See [Reports](reports.md).
+
+Both read a host's place from the bridge table the same way: one function decides the port and ethernet-segment a MAC was learned on, or the VTEP or segment it sits behind, so the report and the lens cannot place a host differently. They answer different questions:
+
+| | Endpoints | Where |
+| --- | --- | --- |
+| Asks | Which hosts does each node have? | Who knows about this one address? |
+| Scope | Every host, each on the node it is attached to | One IP or MAC, on every node that knows it |
+| Remote sightings | Left out | Shown: which nodes learned it over EVPN, behind which VTEP or segment |
+| Conflicts | - | A MAC learned locally on several nodes: multihomed on one segment, or a duplicate |
+| Beyond ARP/ND and MAC | LLDP name of the host | Configured addresses (gateways, loopbacks) and BGP host routes |
+| Live | Streamed, filterable, comparable against a snapshot | Run on demand |
+
+In the web UI, every IP and MAC in the Endpoints table links to Where for that address: from a host on one node to everything the fabric knows about it.
 
 ---
 

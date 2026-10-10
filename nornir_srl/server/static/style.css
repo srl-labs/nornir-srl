@@ -2774,6 +2774,7 @@ button.pill-jump:hover {
 .chat-chip {
   display: inline-flex;
   align-items: center;
+  max-width: 100%;
   gap: 6px;
   font-family: var(--font-mono);
   font-size: 11px;
@@ -2785,8 +2786,15 @@ button.pill-jump:hover {
 }
 
 .chat-chip .dot {
+  flex: none;
   width: 6px;
   height: 6px;
+}
+
+/* The bubble lets text break anywhere; in a long chip that would squeeze the
+   duration to one character a line. The label wraps instead. */
+.chat-chip-label {
+  min-width: 0;
 }
 
 .chat-chip.running .dot {
@@ -2808,6 +2816,8 @@ button.pill-jump:hover {
 }
 
 .chat-chip-meta {
+  flex: none;
+  white-space: nowrap;
   opacity: 0.7;
 }
 

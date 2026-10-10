@@ -654,7 +654,6 @@ ENDPOINTS_TABLE = Table(
         Column("IP-VRF", "ip_vrf"),
         Column("MAC-VRF", "mac_vrf"),
         Column("Learned", "learned"),
-        Column("VTEP", "vtep"),
         Column("LLDP-Nbr", lambda e: _joined(e.lldp)),
         Column("ES", "es"),
         Column("ESI", "esi"),

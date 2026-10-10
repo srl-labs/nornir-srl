@@ -8531,6 +8531,7 @@
     const dot = document.createElement("span");
     dot.className = "dot";
     const label = document.createElement("span");
+    label.className = "chat-chip-label";
     label.textContent = chipLabel(call.name || "tool", call.args);
     const meta = document.createElement("span");
     meta.className = "chat-chip-meta";

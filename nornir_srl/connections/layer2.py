@@ -1549,7 +1549,7 @@ class Layer2Mixin:
                     for sub, nis in bound_to.items()
                     if fields.get("mac_vrf") in nis and parent(sub) in segment.interfaces
                 ]
-                place = {"learned": "remote", "vtep": placement.via, "subinterface": ", ".join(sorted(behind))}
+                place = {"learned": "remote", "subinterface": ", ".join(sorted(behind))}
             if segment is not None:
                 place["esi"] = segment.esi
                 place["es"] = segment.name

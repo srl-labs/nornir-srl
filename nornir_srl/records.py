@@ -609,11 +609,10 @@ class Endpoint:
     #: An irb's bridging instance, whose bridge table placed the MAC.
     mac_vrf: str = ""
     #: ``local``: learned on :attr:`subinterface`, a port of this node.
-    #: ``remote``: learned over the overlay, behind :attr:`vtep` - a VTEP, or
-    #: over MPLS a far-end PE - or behind the segment :attr:`esi` alone.
-    #: Empty where the bridge table has no entry for the MAC.
+    #: ``remote``: learned by another node of the segment :attr:`esi`, which
+    #: this node is on too - a host behind another node's VTEP is not this
+    #: node's endpoint. Empty where the bridge table has no entry for the MAC.
     learned: str = ""
-    vtep: str = ""
     #: The ethernet-segment the host is behind: the one its port is in, or the
     #: one a remote entry names. :attr:`es` is its name on this node, where
     #: this node has it configured.
