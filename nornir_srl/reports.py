@@ -37,6 +37,7 @@ import re
 from dataclasses import dataclass, replace
 from typing import Any, Callable, Dict, FrozenSet, List, Mapping, Optional, Sequence, Tuple, Union
 
+from .aliases import inventory_index
 from .connections.layer2 import ES_DEST_PATH, VXLAN_DEST_PATH, VXLAN_VNI_PATH
 from .connections.routing import BGP_RIB_KEYS, BGP_RIB_ROUTE_FAM_ALIASES
 from .connections.routing import _BGP_RIB_FAMILY as _BGP_RIB_FAMILY_OF
@@ -324,6 +325,12 @@ class ReportSpec:
     #: False for a report a surface reaches from another one rather than
     #: offers on its own: a peer's received routes, from the BGP peers table.
     listed: bool = True
+    #: True where what a node reports depends on which of its neighbours are
+    #: nodes of the fabric: a surface then hands the getter ``fabric``, the
+    #: :func:`~nornir_srl.aliases.inventory_index` of the whole inventory -
+    #: not of the nodes a filter selected, whose neighbours are no less part
+    #: of the fabric.
+    needs_fabric: bool = False
 
     @property
     def tool_name(self) -> str:
@@ -353,6 +360,14 @@ class ReportSpec:
             # it can be: without keys, a change reads as an add and a remove.
             "key_columns": list(self.key_columns),
         }
+
+
+def fabric_args(report: ReportSpec, hosts: Mapping[str, Any]) -> Dict[str, Any]:
+    """What a surface adds to *report*'s getter call: the fabric, where it needs it.
+
+    *hosts* is the whole inventory, whatever the report runs on.
+    """
+    return {"fabric": inventory_index(hosts)} if report.needs_fabric else {}
 
 
 def coerce_params(report: ReportSpec, raw: Mapping[str, Any]) -> Dict[str, Any]:
@@ -625,6 +640,23 @@ ARP_TABLE = Table(
         Column("MAC", "mac"),
         Column("Type", "origin"),
         Column("expiry", lambda e: countdown(e.expires_in)),
+    ),
+)
+
+ENDPOINTS_TABLE = Table(
+    columns=(
+        Column("IP", "address"),
+        Column("MAC", "mac"),
+        Column("Type", "origin"),
+        Column("State", "state"),
+        Column("Subinterface", "subinterface"),
+        Column("IP-VRF", "ip_vrf"),
+        Column("MAC-VRF", "mac_vrf"),
+        Column("Learned", "learned"),
+        Column("Learned-on", "learned_on"),
+        Column("LLDP-Nbr", lambda e: _joined(e.lldp)),
+        Column("ES", "es"),
+        Column("ESI", "esi"),
     ),
 )
 
@@ -1786,6 +1818,23 @@ REPORTS: List[ReportSpec] = [
         surfaces=STREAMING,
         sample_interval=20,
         subscribe=_SERVICE_SUBSCRIPTIONS,
+    ),
+    ReportSpec(
+        name="endpoints",
+        table=ENDPOINTS_TABLE,
+        resource="endpoints",
+        key_columns=("Node", "Subinterface", "IP"),
+        title="Endpoints",
+        description="Hosts ARP and ND have entries for: IP and MAC, the sub-interface "
+        "they were resolved on, its IP-VRF and MAC-VRF, and from the bridge table the "
+        "access sub-interface or VTEP they were learned on and their ethernet-segment. "
+        "Management ports, links to other nodes of the fabric, and hosts learned over "
+        "EVPN that are not behind an ethernet-segment of the node are left out.",
+        getter=lambda d, fabric=None: d.get_endpoints(fabric=fabric),
+        category="Services",
+        mcp_name="endpoints",
+        sample_interval=10,
+        needs_fabric=True,
     ),
     ReportSpec(
         name="mac",

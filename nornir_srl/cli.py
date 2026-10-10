@@ -31,7 +31,7 @@ from .fabric import collect_fabric_state as collect_lens_state
 from .history import DEFAULT_RETENTION_DAYS
 from .lenses import LensSpec, get_lens
 from .records import as_dict
-from .reports import ReportSpec, get_report
+from .reports import ReportSpec, fabric_args, get_report
 from .rows import NodeRows, Row, Table as ReportTable, cell, clean_columns, extract, pass_filter
 from .utils.logging_config import setup_logging
 from . import __version__
@@ -500,6 +500,9 @@ def main(
         ", ".join(sorted(target.inventory.hosts)),
     )
     ctx.obj["target"] = target
+    # The whole inventory, for the reports that ask which neighbours are
+    # the fabric's whatever the filter selected.
+    ctx.obj["fabric"] = fabric
     ctx.obj["i_filter"] = resolved_filter
     ctx.obj["box_type"] = box_type.upper() if box_type else None
     ctx.obj["output"] = output
@@ -547,7 +550,9 @@ def run_query(
     )
     started = time.perf_counter()
     result = target.run(
-        task=_task_for(spec, params), name=spec.resource, raise_on_error=False
+        task=_task_for(spec, {**params, **fabric_args(spec, ctx.obj["fabric"].inventory.hosts)}),
+        name=spec.resource,
+        raise_on_error=False,
     )
     logger.debug(
         "report '%s' finished in %.3fs, %d/%d node(s) failed: %s",
@@ -1191,6 +1196,15 @@ def nd(
 ) -> None:
     """Displays IPv6 Neighbors"""
     run_report(ctx, "nd", field_filter)
+
+
+@app.command()
+def endpoints(
+    ctx: typer.Context,
+    field_filter: Optional[List[str]] = FIELD_FILTER,
+) -> None:
+    """Displays the hosts ARP/ND know, with their VRFs, access port and ES"""
+    run_report(ctx, "endpoints", field_filter)
 
 
 @app.command()

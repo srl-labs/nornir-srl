@@ -43,7 +43,7 @@ from .connections.helpers import clean_structured_key
 from .fabric import collect_fabric_state as collect_lens_state
 from .lenses import get_lens
 from .records import as_dict
-from .reports import ReportSpec, get_report
+from .reports import ReportSpec, fabric_args, get_report
 from .rows import extract
 
 logger = logging.getLogger(__name__)
@@ -158,11 +158,13 @@ def _error_row(_node: str, exception: Optional[BaseException]) -> Dict[str, Any]
 def _query(spec: ReportSpec, inv_filter: Optional[Dict[str, str]], **params: Any):
     """Run a report's getter across the filtered inventory."""
 
+    nornir = get_nornir()
+    args = {**params, **fabric_args(spec, nornir.inventory.hosts)}
+
     def task_func(task: Task) -> Result:
         device = task.host.get_connection(CONNECTION_NAME, task.nornir.config)
-        return Result(host=task.host, result=spec.getter(device, **params))
+        return Result(host=task.host, result=spec.getter(device, **args))
 
-    nornir = get_nornir()
     target = nornir.filter(**inv_filter) if inv_filter else nornir
     return target.run(task=task_func, name=spec.resource, raise_on_error=False)
 
@@ -871,6 +873,42 @@ def ipv6_neighbors(
             (e.g. 'state=up'). Values are case-insensitive regexes.
     """
     return _run_report("nd", inv_filter, field_filter)
+
+
+@mcp.tool()
+def endpoints(
+    inv_filter: Optional[str] = None,
+    field_filter: Optional[str] = None,
+) -> str:
+    """Get the hosts ARP and ND have entries for, placed in their services.
+
+    Neighbours on out-of-band ports (mgmt0), and on links to other nodes of
+    the inventory (a spine's neighbours, a leaf's uplinks), are left out, and
+    so are hosts learned over EVPN unless they are behind an ethernet-segment
+    this node has too (a multihomed host its ES peer learned).
+
+    Returns one object per ARP or ND entry per node: address, mac, origin
+    (dynamic/static/evpn...), state (ND only), subinterface (the irb or routed
+    port the entry is on), ip_vrf and mac_vrf (an irb's bridge domain), and -
+    from that mac-vrf's bridge table - learned ('local' or 'remote') and
+    learned_on: the access sub-interface the MAC was learned on, or the VTEP
+    or far-end PE it sits behind. esi and es name the ethernet-segment the
+    host is behind: its port's, or the one a remote entry points at (es is
+    empty where this node does not have that segment configured). lldp lists
+    the system-names LLDP hears on the host's port (a LAG's members, or this
+    node's side of the segment): what the host calls itself, where it runs LLDP.
+
+    Use this to answer 'which port and segment is this host on' for every
+    host at once; use locate_address for one address across the fabric.
+
+    Args:
+        inv_filter: Inventory filter as comma-separated key=value pairs (e.g. 'role=leaf,site=dc1').
+            Supports wildcards. Matches against node labels from the topology file; use
+            'show_topology' to see available keys. Omit to target all nodes.
+        field_filter: Field filter as comma-separated key=value pairs to filter output rows
+            (e.g. 'learned=remote'). Values are case-insensitive regexes.
+    """
+    return _run_report("endpoints", inv_filter, field_filter)
 
 
 @mcp.tool()

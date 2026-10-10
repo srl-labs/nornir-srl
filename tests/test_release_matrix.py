@@ -25,11 +25,12 @@ from typing import Dict, Iterator, List, Set, Tuple
 
 import pytest
 
-from nornir_srl.reports import BGP_RECEIVED_TABLE, REPORTS_BY_NAME
+from nornir_srl.reports import BGP_RECEIVED_TABLE, ENDPOINTS_TABLE, REPORTS_BY_NAME
 from tests.system.capture import SKIP
 from tests.system.replay import (
     Recording,
     ReplayDevice,
+    ReplayError,
     comparable_rows,
     deterministic_clock,
     recording_paths,
@@ -131,8 +132,10 @@ def test_fixtures_exist() -> None:
 #: the recordings before 26.7.2 were taken; 26.7.2 replays it, the older
 #: releases exercise it on a fake device until they are recorded again.
 #: ``config_commits`` reads the commit log, checked by hand on 25.3.2 and
-#: 26.7.2 but not yet in any recording.
-NOT_YET_RECORDED = frozenset({"bgp_advertised_routes", "config_commits"})
+#: 26.7.2 but not yet in any recording. ``endpoints`` joins the tables the
+#: ``arp``, ``nd``, ``mac`` and ``es`` recordings hold, and is replayed from
+#: theirs below.
+NOT_YET_RECORDED = frozenset({"bgp_advertised_routes", "config_commits", "endpoints"})
 
 
 def test_fixtures_cover_the_report_registry() -> None:
@@ -270,3 +273,54 @@ def test_received_routes_replay_from_the_bgp_rib_recordings(path: str) -> None:
     assert {rib.family for rib in mine} == {family}
     rows = [row for rib in mine for row in BGP_RECEIVED_TABLE.rows(rib)]
     assert rows and all(row.values["peer"] == peer for row in rows)
+
+
+@pytest.mark.parametrize("path", [str(p) for p in recording_paths()])
+def test_endpoints_replay_from_the_neighbor_and_bridge_recordings(path: str) -> None:
+    """Every ARP and ND entry is an endpoint, placed by the bridge table and the segments.
+
+    The report makes the gets of the ``arp``, ``nd``, ``mac``, ``es``, ``lldp`` and ``lag``
+    reports, plus the network-instance types, which the recordings taken
+    before the instance Get was narrowed hold as part of the whole tree.
+    """
+    recording = _recording(path)
+    calls = [
+        call
+        for name in ("arp", "nd", "mac", "es", "lldp", "lag")
+        if name in recording.reports
+        for call in recording.reports[name].calls
+    ]
+    device = ReplayDevice(calls, recording.capabilities)
+    try:
+        with deterministic_clock(recording.captured_at, recording.ifstats_interval, skip_sleep=True):
+            endpoints = REPORTS_BY_NAME["endpoints"].getter(device)["endpoints"]
+    except ReplayError as exc:
+        pytest.skip(f"{recording.release}/{recording.node} holds no {exc.path}")
+
+    neighbors = {
+        (cache.interface, entry.address): entry
+        for name in ("arp", "nd")
+        for cache in recording.run(name).get(name) or []
+        if not cache.interface.startswith("mgmt")
+        for entry in cache.entries
+    }
+    kept = {(e.subinterface, e.address) for e in endpoints}
+    assert len(kept) == len(endpoints) and kept <= set(neighbors)
+    # What is left out is another node's host, learned over EVPN.
+    assert all(neighbors[key].origin == "evpn" for key in set(neighbors) - kept)
+    assert not any(e.subinterface.startswith("mgmt") for e in endpoints)
+    rows = [row.values for e in endpoints for row in ENDPOINTS_TABLE.rows(e)]
+    assert all(row["IP-VRF"] for row in rows)
+    if recording.role == "leaf":
+        # Hosts behind an irb: the bridge table has them, on an access port of
+        # a segment or behind one over the overlay.
+        bridged = [e for e in endpoints if e.mac_vrf]
+        assert bridged and all(e.subinterface.startswith("irb") for e in bridged)
+        local = [e for e in bridged if e.learned == "local"]
+        assert local and all(not e.learned_on.startswith("irb") for e in local)
+        assert any(e.es and e.esi for e in local)
+        # A host another node learned stays only behind a segment of this one.
+        assert all(e.es for e in bridged if e.learned == "remote")
+    else:
+        # A spine routes: every neighbour is on the port its entry is on.
+        assert all(e.learned_on == e.subinterface and not e.mac_vrf for e in endpoints)

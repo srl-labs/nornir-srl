@@ -25,7 +25,7 @@ from ..history import DEFAULT_RETENTION_DAYS, HistoryStore
 from ..connections.layer2 import stamp_underlay_sites
 from ..lenses import LensSpec
 from ..records import as_dict
-from ..reports import ReportSpec, SubscriptionSpec, get_report, reading_reports, subscription_mode
+from ..reports import ReportSpec, SubscriptionSpec, fabric_args, get_report, reading_reports, subscription_mode
 from ..rows import cell, clean_columns, flatten, merge_fields, sub_item_keys
 from .devices import CachedDevice, DirectDevice, RecordingDevice
 from .readings import NOT_RECORDED, Recorder, TapDevice, TapDirectDevice
@@ -878,7 +878,7 @@ class FabricStore:
             return response
 
         recorder = RecordingDevice(stream.device, read, lookup)
-        report.getter(recorder, **(params or {}))
+        report.getter(recorder, **(params or {}), **fabric_args(report, self.nornir.inventory.hosts))
         interval = self.sample_interval or report.sample_interval
         return [
             SubscriptionSpec(path=path, datatype=datatype, mode=subscription_mode(path), sample_interval=interval)
@@ -1177,7 +1177,7 @@ class FabricStore:
                 if recorder is None or report.name in NOT_RECORDED
                 else TapDevice(stream, recorder.for_report(name, report.name, getattr(stream.device, "capabilities", None)))
             )
-            result = report.getter(device, **(params or {}))
+            result = report.getter(device, **(params or {}), **fabric_args(report, self.nornir.inventory.hosts))
         except Exception as exc:  # noqa: BLE001 - reported per node in the UI
             logger.debug(
                 "%s: report '%s' failed: %s", name, report.name, exc, exc_info=exc

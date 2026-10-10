@@ -518,7 +518,7 @@ def test_the_mcp_server_emits_records_for_a_report_that_has_them(monkeypatch):
 
 CONVERTED = (
     "mac", "ni", "vxlan", "es", "bgp_peers", "ipv4_rib", "ipv6_rib", "bgp_rib",
-    "subif", "ifstats", "lldp", "arp", "nd",
+    "subif", "ifstats", "lldp", "arp", "nd", "endpoints",
     "sys_info", "lag", "static_routes", "tunnel_table", "irb", "es_dest",
     "bfd", "isis", "ospf", "resources", "components", "transceivers",
     "bgp_received_routes", "bgp_advertised_routes", "config_commits",

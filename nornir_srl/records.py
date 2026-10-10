@@ -572,6 +572,50 @@ class NeighborCache:
 
 
 # --------------------------------------------------------------------------- #
+# endpoints: the hosts ARP and ND know, and where they sit
+# --------------------------------------------------------------------------- #
+
+
+@dataclass(frozen=True)
+class Endpoint:
+    """One host an ARP or ND entry binds, placed in the services of its node.
+
+    The binding names the subinterface it was resolved on. For an irb that is
+    the gateway, not the host: the bridge table of the irb's mac-vrf says
+    which access subinterface the host's MAC was learned on - and so which
+    ethernet-segment it is behind - or which VTEP or far-end PE it sits behind
+    when it was learned over the overlay.
+    """
+
+    address: str
+    mac: str
+    #: ``dynamic``, ``static``, ``evpn``...
+    origin: str = ""
+    #: ND only: ``reachable``, ``stale``...
+    state: str = ""
+    #: The subinterface the ARP or ND entry is on: an irb, or a routed port.
+    subinterface: str = ""
+    #: The routing instance of that subinterface: an ip-vrf, or ``default``.
+    ip_vrf: str = ""
+    #: An irb's bridging instance, whose bridge table placed the MAC.
+    mac_vrf: str = ""
+    #: ``local``: learned on :attr:`learned_on`, a port of this node.
+    #: ``remote``: learned over the overlay, behind :attr:`learned_on` - a
+    #: VTEP or far-end PE - or behind the segment :attr:`esi` alone. Empty
+    #: where the bridge table has no entry for the MAC.
+    learned: str = ""
+    learned_on: str = ""
+    #: The ethernet-segment the host is behind: the one its port is in, or the
+    #: one a remote entry names. :attr:`es` is its name on this node, where
+    #: this node has it configured.
+    esi: str = ""
+    es: str = ""
+    #: The system-names LLDP hears on the port the host is on - on a LAG, on
+    #: its members - where the host runs LLDP.
+    lldp: Tuple[str, ...] = ()
+
+
+# --------------------------------------------------------------------------- #
 # bgp_peers: sessions and their address families
 # --------------------------------------------------------------------------- #
 
@@ -1070,6 +1114,7 @@ __all__ = [
     "Egress",
     "EsDestination",
     "EsDestinations",
+    "Endpoint",
     "EthernetSegment",
     "Family",
     "HostRouteRule",

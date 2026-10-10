@@ -10,7 +10,7 @@ drawing and the checks disagree about which links exist.
 
 from __future__ import annotations
 
-from typing import Dict, Iterable, Optional, Sequence, Set
+from typing import Any, Dict, Iterable, Mapping, Optional, Sequence, Set
 
 
 def tail(name: str) -> str:
@@ -48,8 +48,13 @@ def alias_index(nodes: Iterable[Sequence[str]]) -> Dict[str, str]:
     return index
 
 
-def resolve(advertised: str, index: Dict[str, str]) -> Optional[str]:
+def resolve(advertised: str, index: Mapping[str, str]) -> Optional[str]:
     """The inventory name of an advertised system-name, if we have that node."""
     text = advertised.strip().lower()
     short = text.split(".")[0]
     return index.get(text) or index.get(short) or index.get(tail(short))
+
+
+def inventory_index(hosts: Mapping[str, Any]) -> Dict[str, str]:
+    """:func:`alias_index` of a Nornir inventory's hosts: every name each answers to."""
+    return alias_index([(name, getattr(host, "hostname", "") or "") for name, host in hosts.items()])
