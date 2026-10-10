@@ -887,14 +887,20 @@ def endpoints(
     so are hosts learned over EVPN unless they are behind an ethernet-segment
     this node has too (a multihomed host its ES peer learned).
 
-    Returns one object per ARP or ND entry per node: address, mac, origin
-    (dynamic/static/evpn...), state (ND only), subinterface (the irb or routed
-    port the entry is on), ip_vrf and mac_vrf (an irb's bridge domain), and -
-    from that mac-vrf's bridge table - learned ('local' or 'remote') and
-    learned_on: the access sub-interface the MAC was learned on, or the VTEP
-    or far-end PE it sits behind. esi and es name the ethernet-segment the
-    host is behind: its port's, or the one a remote entry points at (es is
-    empty where this node does not have that segment configured). lldp lists
+    A host that only bridges - a MAC a mac-vrf learned that no ARP or ND entry
+    names - is an object of its own, with an empty address, l3_interface and
+    ip_vrf. Use locate_address on an address or MAC to see every node that
+    knows it, including the ones left out here.
+
+    Returns one object per host per node: address, mac, origin
+    (dynamic/static/evpn...), state (ND only), l3_interface (the irb or routed
+    port the ARP/ND entry is on), subinterface (the access sub-interface the
+    host lives behind - where its MAC was learned, the routed port for a
+    routed neighbour, or this node's side of the segment for a host its ES
+    peer learned), ip_vrf and mac_vrf (an irb's bridge domain), learned
+    ('local' or 'remote') and vtep (remote only: the VTEP or far-end PE it
+    sits behind). esi and es name the ethernet-segment the host is behind:
+    its port's, or the one a remote entry points at. lldp lists
     the system-names LLDP hears on the host's port (a LAG's members, or this
     node's side of the segment): what the host calls itself, where it runs LLDP.
 

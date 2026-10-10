@@ -58,7 +58,7 @@ from typing import (
 )
 
 from .aliases import resolve
-from .fabric import FabricState, out_of_band, parent, text
+from .fabric import FabricState, out_of_band, parent, place_mac, port_segments, text
 from .checks import (
     service_disagreements,
     service_facts,
@@ -556,20 +556,17 @@ def _es_names(state: FabricState) -> Dict[str, Tuple[str, ...]]:
     return {esi: tuple(sorted(found)) for esi, found in names.items()}
 
 
-def _port_segments(state: FabricState) -> Dict[Tuple[str, str], EthernetSegment]:
-    """(node, port) -> the ethernet-segment that port belongs to on that node."""
-    return {
-        (node, port): segment
-        for node, segment in state.items("es")
-        if segment.esi
-        for port in segment.interfaces
-        if port
-    }
+def _port_segments(state: FabricState) -> Dict[str, Dict[str, EthernetSegment]]:
+    """node -> port -> the ethernet-segment that port belongs to on that node."""
+    by_node: Dict[str, List[EthernetSegment]] = {}
+    for node, segment in state.items("es"):
+        by_node.setdefault(node, []).append(segment)
+    return {node: port_segments(segments) for node, segments in by_node.items()}
 
 
 def _mac_behind(
     state: FabricState,
-    ports: Mapping[Tuple[str, str], EthernetSegment],
+    ports: Mapping[str, Mapping[str, EthernetSegment]],
     segments: Mapping[str, Tuple[str, ...]],
     node: str,
     nis: Iterable[str],
@@ -587,20 +584,19 @@ def _mac_behind(
     for table_node, table, entry in state.sub_items("mac", "entries"):
         if table_node != node or table.ni not in wanted or _mac(entry.address) != mac:
             continue
-        if entry.local:
-            port = str(entry.interface or "")
-            segment = ports.get((node, parent(port)))
+        placement = place_mac(entry, ports.get(node, {}))
+        if placement.local:
             return dict(
                 bridge_ni=table.ni,
-                learned_on=port,
-                esi=segment.esi if segment else "",
-                segments=(segment.name,) if segment else (),
+                learned_on=placement.via,
+                esi=placement.esi,
+                segments=(placement.segment.name,) if placement.segment else (),
             )
         return dict(
             bridge_ni=table.ni,
-            vtep=entry.vtep or entry.far_end,
-            esi=entry.esi,
-            segments=segments.get(entry.esi, ()) if entry.esi else (),
+            vtep=placement.via,
+            esi=placement.esi,
+            segments=segments.get(placement.esi, ()) if placement.esi else (),
         )
     return {}
 
@@ -747,20 +743,19 @@ def _locate(state: FabricState, target: str) -> List[Sighting]:
     for node, table, entry in state.sub_items("mac", "entries"):
         if _mac(entry.address) != mac:
             continue
-        if entry.local:
+        placement = place_mac(entry, ports.get(node, {}))
+        if placement.local:
             local.setdefault(table.ni, []).append(len(sightings))
-            # A bridge table names the subinterface; a segment names its port.
-            segment = ports.get((node, parent(str(entry.interface or ""))))
             sightings.append(
                 Sighting(
                     node,
                     table.ni,
                     "local",
                     mac,
-                    interface=entry.interface,
+                    interface=placement.via,
                     origin=text(entry.type),
-                    esi=segment.esi if segment else "",
-                    segments=(segment.name,) if segment else (),
+                    esi=placement.esi,
+                    segments=(placement.segment.name,) if placement.segment else (),
                 )
             )
             continue
@@ -771,12 +766,12 @@ def _locate(state: FabricState, target: str) -> List[Sighting]:
                 "remote",
                 mac,
                 # Over MPLS there is no VTEP: the far-end PE is what it sits behind.
-                vtep=entry.vtep or entry.far_end,
-                esi=entry.esi,
+                vtep=placement.via,
+                esi=placement.esi,
                 origin=text(entry.type),
                 overlay=entry.overlay or ("mpls" if entry.far_end else ""),
                 vni=entry.vni if entry.vni is not None else entry.label,
-                segments=segments.get(entry.esi, ()) if entry.esi else (),
+                segments=segments.get(placement.esi, ()) if placement.esi else (),
             )
         )
 
@@ -1125,10 +1120,10 @@ def _es_vteps(state: FabricState) -> Dict[Tuple[str, str, str], Tuple[str, ...]]
 
 
 def _segment(
-    ports: Mapping[Tuple[str, str], EthernetSegment], node: str, port: str
+    ports: Mapping[str, Mapping[str, EthernetSegment]], node: str, port: str
 ) -> Dict[str, Any]:
     """The ethernet-segment a node's subinterface is on, as a Hop's fields."""
-    segment = ports.get((node, parent(port)))
+    segment = ports.get(node, {}).get(parent(port))
     return dict(esi=segment.esi, segments=(segment.name,)) if segment else {}
 
 

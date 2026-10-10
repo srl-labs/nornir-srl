@@ -6,7 +6,7 @@ cases that fabric does not have.
 
 from __future__ import annotations
 
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from nornir_srl.aliases import alias_index
 from nornir_srl.records import (
@@ -34,11 +34,22 @@ class Tables(MixinDevice):
         arp: List[NeighborCache],
         macs: List[BridgeTable],
         segments: List[EthernetSegment],
-        lldp: Dict[str, str] = {},
+        lldp: Optional[Dict[str, str]] = None,
+        bound: Optional[Dict[str, List[str]]] = None,
     ) -> None:
         self.arp, self.macs, self.segments = arp, macs, segments
         #: port -> the system-name LLDP hears on it.
-        self.lldp = lldp
+        self.lldp = lldp or {}
+        #: network-instance -> the subinterfaces bound to it.
+        self.bound = bound or {}
+
+    def get(self, paths: List[str], datatype: Optional[str] = "config", strip_mod: Optional[bool] = True) -> List[Dict[str, Any]]:
+        # The one Get the report makes itself: which subinterfaces each
+        # instance has.
+        assert paths == ["/network-instance[name=*]/interface"], paths
+        return [{"network-instance": [
+            {"name": ni, "interface": [{"name": sub} for sub in subs]} for ni, subs in self.bound.items()
+        ]}]
 
     def get_lldp_sum(self, interface: str = "*") -> Dict[str, Any]:
         return {"lldp_nbrs": [LldpInterface(port, (LldpNeighbor(name, "ethernet-1/1"),)) for port, name in self.lldp.items()]}
@@ -78,8 +89,8 @@ def test_a_host_behind_an_irb_is_placed_on_its_access_port_and_segment():
         # The bridge table spells the MAC in capitals.
         macs=(MacEntry.read("AA:BB:CC:00:00:05", "lag1.100", "learnt"),),
     )
-    assert (host.ip_vrf, host.mac_vrf, host.subinterface) == ("ipvrf-1", "macvrf-1", "irb0.1")
-    assert (host.learned, host.learned_on, host.es, host.esi) == ("local", "lag1.100", "ES-1", ES1.esi)
+    assert (host.ip_vrf, host.mac_vrf, host.l3_interface) == ("ipvrf-1", "macvrf-1", "irb0.1")
+    assert (host.learned, host.subinterface, host.es, host.esi) == ("local", "lag1.100", "ES-1", ES1.esi)
 
 
 def test_a_remote_host_is_only_an_endpoint_behind_a_segment_of_this_node():
@@ -105,7 +116,7 @@ def test_a_host_the_bridge_table_does_not_have_is_left_unplaced():
         # Learned over EVPN and nowhere in the bridge table: not this node's.
         NeighborEntry("10.0.0.10", "AA:BB:CC:00:00:0A", "evpn"),
     )
-    assert (host.address, host.mac_vrf, host.learned, host.learned_on, host.es) == ("10.0.0.8", "macvrf-1", "", "", "")
+    assert (host.address, host.mac_vrf, host.learned, host.subinterface, host.es) == ("10.0.0.8", "macvrf-1", "", "", "")
 
 
 def test_a_neighbour_on_a_routed_port_is_on_that_port_and_its_segment():
@@ -114,7 +125,10 @@ def test_a_neighbour_on_a_routed_port_is_on_that_port_and_its_segment():
         nis=("default",),
         interface="ethernet-1/3.0",
     )
-    assert (host.ip_vrf, host.mac_vrf, host.learned_on, host.es) == ("default", "", "ethernet-1/3.0", "ES-2")
+    # A routed neighbour lives behind the L3 interface itself.
+    assert (host.ip_vrf, host.mac_vrf, host.l3_interface, host.subinterface, host.es) == (
+        "default", "", "ethernet-1/3.0", "ethernet-1/3.0", "ES-2"
+    )
 
 
 def test_a_neighbour_on_the_management_port_is_not_an_endpoint():
@@ -176,9 +190,13 @@ def test_a_host_its_segment_peer_learned_is_named_on_this_side_of_the_segment():
         [BridgeTable("macvrf-1", (MacEntry.read("AA:BB:CC:00:00:07", f"vxlan-interface:vxlan1.1 esi:{ES1.esi}", "evpn"),))],
         [ES1],
         {"ethernet-1/20": "host1"},
+        # lag1 is in two bridge domains; the host is in macvrf-1's.
+        {"macvrf-1": ["irb0.1", "lag1.1"], "macvrf-2": ["lag1.2"], "ipvrf-1": ["irb0.1"]},
     )
     (host,) = device.get_endpoints()["endpoints"]
     assert (host.learned, host.es, host.lldp) == ("remote", "ES-1", ("host1",))
+    # It lives behind this node's side of the segment as well.
+    assert (host.subinterface, host.vtep) == ("lag1.1", "")
 
 
 def test_an_endpoint_reads_as_one_row():
@@ -187,11 +205,50 @@ def test_an_endpoint_reads_as_one_row():
         macs=(MacEntry.read("AA:BB:CC:00:00:05", "lag1.100", "learnt"),),
     )
     (row,) = ENDPOINTS_TABLE.rows(host)
-    assert {k: row.values[k] for k in ("IP", "Subinterface", "IP-VRF", "MAC-VRF", "Learned-on", "ES")} == {
+    assert {k: row.values[k] for k in ("IP", "L3-interface", "Subinterface", "IP-VRF", "MAC-VRF", "VTEP", "ES")} == {
         "IP": "10.0.0.5",
-        "Subinterface": "irb0.1",
+        "L3-interface": "irb0.1",
         "IP-VRF": "ipvrf-1",
         "MAC-VRF": "macvrf-1",
-        "Learned-on": "lag1.100",
+        "Subinterface": "lag1.100",
+        "VTEP": "",
         "ES": "ES-1",
     }
+
+
+def test_a_host_that_only_bridges_is_an_endpoint_by_its_mac():
+    device = Tables(
+        # 10.0.0.5 is bound; its MAC is not listed a second time.
+        [NeighborCache("irb0.1", IRB, (NeighborEntry("10.0.0.5", "AA:BB:CC:00:00:05", "dynamic"),))],
+        [
+            BridgeTable("macvrf-1", (
+                MacEntry.read("AA:BB:CC:00:00:05", "lag1.1", "learnt"),
+                # The irb's own MAC is the gateway, not a host.
+                MacEntry.read("00:00:5E:00:01:01", "irb-interface", "irb-interface-anycast"),
+            )),
+            # A bridge domain with no irb at all: its hosts have no address.
+            BridgeTable("macvrf-2", (
+                MacEntry.read("AA:BB:CC:00:00:20", "ethernet-1/3.20", "learnt"),
+                # Behind a segment this node has: its host too.
+                MacEntry.read("AA:BB:CC:00:00:21", f"vxlan-interface:vxlan1.2 esi:{ES1.esi}", "evpn"),
+                # Behind another node's VTEP: not its host.
+                MacEntry.read("AA:BB:CC:00:00:22", "vxlan-interface:vxlan1.2 vtep:192.0.2.9 vni:2", "evpn"),
+                # On a link to another node of the fabric: not a host.
+                MacEntry.read("AA:BB:CC:00:00:23", "ethernet-1/49.20", "learnt"),
+            )),
+        ],
+        [ES1, ES2],
+        {"ethernet-1/3": "host20", "ethernet-1/49": "spine1"},
+    )
+    endpoints = device.get_endpoints(fabric=FABRIC)["endpoints"]
+    assert [(e.address, e.mac) for e in endpoints] == [
+        ("10.0.0.5", "AA:BB:CC:00:00:05"),
+        ("", "AA:BB:CC:00:00:20"),
+        ("", "AA:BB:CC:00:00:21"),
+    ]
+    bridging, peer = endpoints[1:]
+    assert (bridging.mac_vrf, bridging.ip_vrf, bridging.l3_interface) == ("macvrf-2", "", "")
+    assert (bridging.learned, bridging.subinterface, bridging.es, bridging.lldp) == (
+        "local", "ethernet-1/3.20", "ES-2", ("host20",)
+    )
+    assert (peer.learned, peer.es) == ("remote", "ES-1")

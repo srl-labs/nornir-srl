@@ -304,23 +304,27 @@ def test_endpoints_replay_from_the_neighbor_and_bridge_recordings(path: str) -> 
         if not cache.interface.startswith("mgmt")
         for entry in cache.entries
     }
-    kept = {(e.subinterface, e.address) for e in endpoints}
+    # A host that only bridges has no binding; the rest are bindings.
+    bridging = [e for e in endpoints if not e.address]
+    endpoints = [e for e in endpoints if e.address]
+    assert all(e.mac and e.mac_vrf and e.learned and not e.l3_interface for e in bridging)
+    kept = {(e.l3_interface, e.address) for e in endpoints}
     assert len(kept) == len(endpoints) and kept <= set(neighbors)
     # What is left out is another node's host, learned over EVPN.
     assert all(neighbors[key].origin == "evpn" for key in set(neighbors) - kept)
-    assert not any(e.subinterface.startswith("mgmt") for e in endpoints)
+    assert not any(e.l3_interface.startswith("mgmt") for e in endpoints)
     rows = [row.values for e in endpoints for row in ENDPOINTS_TABLE.rows(e)]
     assert all(row["IP-VRF"] for row in rows)
     if recording.role == "leaf":
         # Hosts behind an irb: the bridge table has them, on an access port of
         # a segment or behind one over the overlay.
         bridged = [e for e in endpoints if e.mac_vrf]
-        assert bridged and all(e.subinterface.startswith("irb") for e in bridged)
+        assert bridged and all(e.l3_interface.startswith("irb") for e in bridged)
         local = [e for e in bridged if e.learned == "local"]
-        assert local and all(not e.learned_on.startswith("irb") for e in local)
+        assert local and all(e.subinterface and not e.subinterface.startswith("irb") for e in local)
         assert any(e.es and e.esi for e in local)
         # A host another node learned stays only behind a segment of this one.
         assert all(e.es for e in bridged if e.learned == "remote")
     else:
         # A spine routes: every neighbour is on the port its entry is on.
-        assert all(e.learned_on == e.subinterface and not e.mac_vrf for e in endpoints)
+        assert all(e.subinterface == e.l3_interface and not e.mac_vrf for e in endpoints)

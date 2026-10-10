@@ -580,31 +580,40 @@ class NeighborCache:
 class Endpoint:
     """One host an ARP or ND entry binds, placed in the services of its node.
 
-    The binding names the subinterface it was resolved on. For an irb that is
-    the gateway, not the host: the bridge table of the irb's mac-vrf says
+    The binding is on an L3 interface, :attr:`l3_interface`. For an irb that
+    is the gateway, not the host: the bridge table of the irb's mac-vrf says
     which access subinterface the host's MAC was learned on - and so which
     ethernet-segment it is behind - or which VTEP or far-end PE it sits behind
     when it was learned over the overlay.
+
+    A host that only bridges has no binding: it is a MAC a mac-vrf learned,
+    with no :attr:`address`, :attr:`l3_interface` or :attr:`ip_vrf`.
     """
 
-    address: str
-    mac: str
+    #: Empty for a host that only bridges.
+    address: str = ""
+    mac: str = ""
     #: ``dynamic``, ``static``, ``evpn``...
     origin: str = ""
     #: ND only: ``reachable``, ``stale``...
     state: str = ""
-    #: The subinterface the ARP or ND entry is on: an irb, or a routed port.
+    #: The L3 interface the ARP or ND entry is on: an irb, or a routed port.
+    l3_interface: str = ""
+    #: The subinterface the host lives behind: the access subinterface its MAC
+    #: was learned on, or for a neighbour on a routed port that port. For a
+    #: host its segment peer learned, this node's subinterface on that
+    #: segment in the host's mac-vrf.
     subinterface: str = ""
-    #: The routing instance of that subinterface: an ip-vrf, or ``default``.
+    #: The routing instance of the L3 interface: an ip-vrf, or ``default``.
     ip_vrf: str = ""
     #: An irb's bridging instance, whose bridge table placed the MAC.
     mac_vrf: str = ""
-    #: ``local``: learned on :attr:`learned_on`, a port of this node.
-    #: ``remote``: learned over the overlay, behind :attr:`learned_on` - a
-    #: VTEP or far-end PE - or behind the segment :attr:`esi` alone. Empty
-    #: where the bridge table has no entry for the MAC.
+    #: ``local``: learned on :attr:`subinterface`, a port of this node.
+    #: ``remote``: learned over the overlay, behind :attr:`vtep` - a VTEP, or
+    #: over MPLS a far-end PE - or behind the segment :attr:`esi` alone.
+    #: Empty where the bridge table has no entry for the MAC.
     learned: str = ""
-    learned_on: str = ""
+    vtep: str = ""
     #: The ethernet-segment the host is behind: the one its port is in, or the
     #: one a remote entry names. :attr:`es` is its name on this node, where
     #: this node has it configured.

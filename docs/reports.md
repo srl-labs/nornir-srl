@@ -23,7 +23,7 @@ One registry drives all three surfaces, so a report cannot drift between CLI, MC
 | Services | | yes | MAC-VRF and IP-VRF grouped by route-target |
 | Bridge Domains | | yes | MAC-VRFs with access ports, ethernet-segments and VXLAN overlays |
 | Routers | | yes | IP-VRFs with bound MAC-VRFs, virtual ethernet-segments and overlays |
-| Endpoints | `endpoints` | yes | Every ARP/ND entry of a host attached to the node - not on the management port or a link between fabric nodes, and not learned over EVPN unless behind one of its ethernet-segments - with its sub-interface, IP-VRF and MAC-VRF, and from the bridge table the access sub-interface or VTEP it was learned on, its ethernet-segment, and the LLDP neighbour name heard on that port |
+| Endpoints | `endpoints` | yes | Every host attached to the node - an ARP/ND entry, or for a host that only bridges a MAC its mac-vrf learned - not on the management port or a link between fabric nodes, and not learned over EVPN unless behind one of its ethernet-segments; with the L3 interface its ARP/ND entry is on, the access sub-interface it lives behind (the routed port for a routed neighbour), its IP-VRF and MAC-VRF, the VTEP of a remote one, its ethernet-segment, and the LLDP neighbour name heard on that port. In the browser an IP or MAC opens the Where lens for it |
 | MAC Table | `mac` | yes | Bridge-table MAC entries |
 | IRB Interfaces | `irb` | yes | IRB sub-interfaces and anycast gateways |
 | Ethernet Segments | `es` | yes | ESI, MH mode, DF state, EVI of a virtual ES |

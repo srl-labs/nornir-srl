@@ -4,7 +4,7 @@ import ipaddress
 from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 from ..aliases import resolve
-from ..fabric import out_of_band, text
+from ..fabric import Placement, out_of_band, parent, place_mac, port_segments, text
 from .down_reason import STANDBY_STATE, ParentReasons, parent_interface
 from .down_reason import clean_leaf as _clean_state
 from ..records import (
@@ -1481,7 +1481,11 @@ class Layer2Mixin:
         return heard
 
     def get_endpoints(self, fabric: Optional[Mapping[str, str]] = None) -> Dict[str, Any]:
-        """Every host ARP or ND has an entry for, placed in this node's services.
+        """Every host attached to this node, placed in its services.
+
+        A host is what an ARP or ND entry binds an address to, and - for one
+        that only bridges - a MAC a mac-vrf learned on a port of this node
+        that no binding covers; that one has a MAC and no address.
 
         Out-of-band ports - ``mgmt0`` - are left out: what is on them is the
         management network, not a host of the fabric. So, given *fabric*, are
@@ -1502,9 +1506,12 @@ class Layer2Mixin:
             for cache in self.get_arp()["arp"] + self.get_nd()["nd"]
             if not out_of_band(cache.interface)
         ]
-        if not any(cache.entries for cache in bindings):
+        tables = self.get_mac_table()["mac_table"]
+        if not any(cache.entries for cache in bindings) and not any(t.entries for t in tables):
             return {"endpoints": []}
         types = self._ni_types()
+        # subinterface -> the instances it is in, for a segment's side here.
+        bound_to = instances_by_interface(self.get)
         heard = self._heard()
         # The ports to another node of the fabric: what LLDP hears on them is
         # a node of the inventory.
@@ -1514,74 +1521,101 @@ class Layer2Mixin:
         # (mac-vrf, MAC) -> its bridge-table entry. A MAC is learned once per
         # bridge domain, so the pair is unique.
         macs: Dict[Tuple[str, str], MacEntry] = {
-            (table.ni, entry.address.upper()): entry
-            for table in self.get_mac_table()["mac_table"]
-            for entry in table.entries
+            (table.ni, entry.address.upper()): entry for table in tables for entry in table.entries
         }
         segments = self.get_es()["es"]
-        by_port = {port: es for es in segments if es.esi for port in es.interfaces if port}
+        by_port = port_segments(segments)
         by_esi = {es.esi: es for es in segments if es.esi}
 
+        def endpoint(placement: Optional[Placement], **fields: Any) -> Optional[Endpoint]:
+            """The host *placement* puts where it is, or None where it is not this node's."""
+            segment: Optional[EthernetSegment] = None
+            place: Dict[str, Any] = {}
+            if placement is not None and placement.local:
+                if parent(placement.via) in links:
+                    return None
+                segment = placement.segment
+                place = {"learned": "local", "subinterface": placement.via}
+            elif placement is not None:
+                # Another node's host, unless it is behind a segment this
+                # node is attached to as well.
+                segment = by_esi.get(placement.esi) if placement.esi else None
+                if segment is None:
+                    return None
+                # It lives behind this node's side of the segment too: the
+                # subinterface of the segment's port in the host's mac-vrf.
+                behind = [
+                    sub
+                    for sub, nis in bound_to.items()
+                    if fields.get("mac_vrf") in nis and parent(sub) in segment.interfaces
+                ]
+                place = {"learned": "remote", "vtep": placement.via, "subinterface": ", ".join(sorted(behind))}
+            if segment is not None:
+                place["esi"] = segment.esi
+                place["es"] = segment.name
+            # Who the host says it is: LLDP on the port it was learned on, or
+            # for one its segment peer learned, on this side of that segment.
+            ports = (
+                [parent(placement.via)]
+                if placement is not None and placement.local
+                else list(segment.interfaces) if segment is not None else []
+            )
+            lldp = tuple(dict.fromkeys(name for port in ports for name in heard.get(port, ())))
+            return Endpoint(lldp=lldp, **place, **fields)
+
         records = []
+        # The MACs a binding already names, so a bridging host is not listed
+        # twice.
+        bound = set()
         for cache in bindings:
             bridges = [ni for ni in cache.nis if types.get(ni) == "mac-vrf"]
             routers = [ni for ni in cache.nis if ni not in bridges]
             for entry in cache.entries:
                 mac = entry.mac.upper()
-                found = next(
-                    ((ni, macs[(ni, mac)]) for ni in bridges if (ni, mac) in macs), None
-                )
-                place: Dict[str, str] = {}
-                segment: Optional[EthernetSegment] = None
-                if found is None and not bridges:
+                found = next(((ni, macs[(ni, mac)]) for ni in bridges if (ni, mac) in macs), None)
+                if found is not None:
+                    bound.add((found[0], mac))
+                    placement: Optional[Placement] = place_mac(found[1], by_port)
+                elif not bridges:
                     # A routed port: the host is on the port the entry is on.
-                    place = {"learned": "local", "learned_on": cache.interface}
-                    segment = by_port.get(cache.interface.rsplit(".", 1)[0])
-                elif found is not None and found[1].local:
-                    port = found[1].interface
-                    place = {"learned": "local", "learned_on": port}
-                    segment = by_port.get(port.rsplit(".", 1)[0])
-                elif found is not None:
-                    remote = found[1]
-                    place = {"learned": "remote", "learned_on": remote.vtep or remote.far_end}
-                    esi = remote.esi
-                    place["esi"] = esi
-                    segment = by_esi.get(esi) if esi else None
-                if place.get("learned") == "local" and place["learned_on"].rsplit(".", 1)[0] in links:
+                    segment = by_port.get(parent(cache.interface))
+                    placement = Placement(True, cache.interface, segment.esi if segment else "", segment)
+                elif text(entry.origin) == "evpn":
+                    # An EVPN binding the bridge table does not place: it is
+                    # another node's.
                     continue
-                # A host another node learned is that node's endpoint, unless
-                # it is behind a segment this node is attached to as well. An
-                # EVPN binding the bridge table does not place is the same.
-                remote = place.get("learned") == "remote" or (
-                    not place and text(entry.origin) == "evpn"
+                else:
+                    placement = None
+                record = endpoint(
+                    placement,
+                    address=entry.address,
+                    mac=entry.mac,
+                    origin=entry.origin,
+                    state=entry.state,
+                    l3_interface=cache.interface,
+                    ip_vrf=", ".join(routers),
+                    mac_vrf=found[0] if found else ", ".join(bridges),
                 )
-                if remote and segment is None:
+                if record is not None:
+                    records.append(record)
+
+        # The hosts that only bridge: a MAC learned on a port of a mac-vrf
+        # that no binding names. An irb's own MAC is not a host.
+        for table in tables:
+            for entry in table.entries:
+                mac = entry.address.upper()
+                if (table.ni, mac) in bound or text(entry.type).startswith("irb"):
                     continue
-                if segment is not None:
-                    place["esi"] = segment.esi
-                    place["es"] = segment.name
-                # Who the host says it is: LLDP on the port it was learned on,
-                # or for one its segment peer learned, on this node's side of
-                # that segment.
-                ports = (
-                    [place["learned_on"].rsplit(".", 1)[0]]
-                    if place.get("learned") == "local"
-                    else list(segment.interfaces) if segment is not None else []
+                if entry.local and (not entry.interface or out_of_band(entry.interface)):
+                    continue
+                record = endpoint(
+                    place_mac(entry, by_port),
+                    mac=entry.address,
+                    origin=entry.type,
+                    mac_vrf=table.ni,
                 )
-                lldp = tuple(dict.fromkeys(name for port in ports for name in heard.get(port, ())))
-                records.append(
-                    Endpoint(
-                        address=entry.address,
-                        mac=entry.mac,
-                        origin=entry.origin,
-                        state=entry.state,
-                        subinterface=cache.interface,
-                        ip_vrf=", ".join(routers),
-                        mac_vrf=found[0] if found else ", ".join(bridges),
-                        lldp=lldp,
-                        **place,
-                    )
-                )
+                if record is not None:
+                    records.append(record)
         return {"endpoints": records}
 
     def get_services(self) -> Dict[str, Any]:

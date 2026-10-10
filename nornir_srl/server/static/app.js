@@ -4866,6 +4866,26 @@
     return cell;
   }
 
+  /**
+   * An Endpoints 'IP' or 'MAC' cell linked to the where lens for that address:
+   * every node that knows it, not only the one this row is about. Null for
+   * any other cell, or an empty one - a host that only bridges has no IP.
+   */
+  function endpointCell(column, value) {
+    const address = String(value ?? "").trim();
+    if ((column !== "IP" && column !== "MAC") || !address) return null;
+    const link = document.createElement("a");
+    link.className = "vrf-link";
+    link.href = "#";
+    link.textContent = address;
+    link.title = `Show every node that knows ${address}`;
+    link.addEventListener("click", (event) => {
+      event.preventDefault();
+      jumpToFilteredReport("where", [], [], {}, { target: address });
+    });
+    return link;
+  }
+
   function jumpToBgpPeer(nodeName, niName, peerAddress) {
     jumpToFilteredReport("bgp_peers", [niName], [nodeName], {
       peer: exactMatchPattern([peerAddress]),
@@ -7255,10 +7275,13 @@
       for (const column of columns) {
         const value = row[column] ?? "";
         const td = document.createElement("td");
-        const linked =
-          !state.diff && state.report && state.report.name === "bgp_peers"
+        const linked = state.diff || !state.report
+          ? null
+          : state.report.name === "bgp_peers"
             ? peerRoutesCell(row, column, value)
-            : null;
+            : state.report.name === "endpoints"
+              ? endpointCell(column, value)
+              : null;
         if (linked) td.append(linked);
         else td.textContent = value;
         if (tone && column === toned.column) td.classList.add("tone-cell");

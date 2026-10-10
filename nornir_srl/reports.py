@@ -649,11 +649,12 @@ ENDPOINTS_TABLE = Table(
         Column("MAC", "mac"),
         Column("Type", "origin"),
         Column("State", "state"),
+        Column("L3-interface", "l3_interface"),
         Column("Subinterface", "subinterface"),
         Column("IP-VRF", "ip_vrf"),
         Column("MAC-VRF", "mac_vrf"),
         Column("Learned", "learned"),
-        Column("Learned-on", "learned_on"),
+        Column("VTEP", "vtep"),
         Column("LLDP-Nbr", lambda e: _joined(e.lldp)),
         Column("ES", "es"),
         Column("ESI", "esi"),
@@ -1823,13 +1824,16 @@ REPORTS: List[ReportSpec] = [
         name="endpoints",
         table=ENDPOINTS_TABLE,
         resource="endpoints",
-        key_columns=("Node", "Subinterface", "IP"),
+        # A binding is its address on its L3 interface; a host that only
+        # bridges has neither, and its MAC in its mac-vrf tells it apart.
+        key_columns=("Node", "L3-interface", "MAC-VRF", "MAC", "IP"),
         title="Endpoints",
         description="Hosts ARP and ND have entries for: IP and MAC, the sub-interface "
         "they were resolved on, its IP-VRF and MAC-VRF, and from the bridge table the "
         "access sub-interface or VTEP they were learned on and their ethernet-segment. "
         "Management ports, links to other nodes of the fabric, and hosts learned over "
-        "EVPN that are not behind an ethernet-segment of the node are left out.",
+        "EVPN that are not behind an ethernet-segment of the node are left out. A host "
+        "that only bridges is listed by its MAC, with no IP.",
         getter=lambda d, fabric=None: d.get_endpoints(fabric=fabric),
         category="Services",
         mcp_name="endpoints",

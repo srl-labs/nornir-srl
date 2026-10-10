@@ -17,13 +17,15 @@ the state already, and builds a :class:`FabricState` out of its gNMI streams.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Dict, Iterator, List, Optional, Sequence, Set, Tuple
+from typing import TYPE_CHECKING, Any, Dict, Iterable, Iterator, List, Mapping, Optional, Sequence, Set, Tuple
 
 from .aliases import alias_index
 from .clab import CONTAINERLAB_GROUP
 
 if TYPE_CHECKING:  # pragma: no cover - import cycle at runtime, types only
     from nornir.core import Nornir
+
+    from .records import EthernetSegment, MacEntry
 
 #: Ports that carry management rather than fabric traffic. A management link is
 #: not part of the topology and its neighbour is usually not in the inventory.
@@ -126,6 +128,40 @@ def out_of_band(port: str) -> bool:
 def parent(subinterface: str) -> str:
     """``ethernet-1/1.0`` is a subinterface of ``ethernet-1/1``."""
     return subinterface.rsplit(".", 1)[0]
+
+
+def port_segments(segments: Iterable[EthernetSegment]) -> Dict[str, EthernetSegment]:
+    """port -> the ethernet-segment it belongs to, of one node's segments."""
+    return {port: es for es in segments if es.esi for port in es.interfaces if port}
+
+
+@dataclass(frozen=True)
+class Placement:
+    """Where a bridge-table entry puts a MAC, on the node that has the entry."""
+
+    #: Learned on a port of this node, rather than over the overlay.
+    local: bool
+    #: Local: the subinterface it was learned on. Remote: the VTEP, or over
+    #: MPLS the far-end PE, it sits behind - empty behind a segment alone.
+    via: str
+    #: Local: the ESI of the segment its port is in. Remote: the one it is
+    #: behind, if any.
+    esi: str = ""
+    #: Local: that segment, as this node has it configured.
+    segment: Optional[EthernetSegment] = None
+
+
+def place_mac(entry: MacEntry, segments: Mapping[str, EthernetSegment]) -> Placement:
+    """Where *entry* puts its MAC; *segments* is the node's :func:`port_segments`.
+
+    The one reading of a bridge-table entry the endpoints report and the
+    ``where`` lens both make, so the two cannot place a host differently.
+    """
+    if entry.local:
+        port = str(entry.interface or "")
+        segment = segments.get(parent(port))
+        return Placement(True, port, segment.esi if segment else "", segment)
+    return Placement(False, entry.vtep or entry.far_end, entry.esi)
 
 
 def index(subinterface: str) -> str:
