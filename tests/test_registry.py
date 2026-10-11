@@ -441,3 +441,23 @@ def test_cli_table_omits_the_port_state_the_cli_ifstats_never_reads():
         "ifstats", ["interface", "oper-state", "down-reason", "in-Kbps", "in-pps"]
     )
     assert columns == ["interface", "in-Kbps", "in-pps"]
+
+
+@pytest.mark.parametrize(
+    "output,expected",
+    [
+        (cli.OutputFormat.JSON, "[]"),
+        (cli.OutputFormat.YAML, "[]"),
+        (cli.OutputFormat.CSV, "Node,peer,state"),
+    ],
+)
+def test_nothing_found_is_still_the_structured_format_asked_for(capsys, output, expected):
+    """-o json|yaml|csv with no rows parses: no 'No data...' on stdout."""
+    cli.print_structured(["peer", "state"], [], output)
+    assert capsys.readouterr().out.strip() == expected
+
+
+@pytest.mark.parametrize("output", [cli.OutputFormat.JSON, cli.OutputFormat.YAML])
+def test_a_lens_that_found_nothing_prints_an_empty_list(capsys, output):
+    cli.print_records([], output)
+    assert capsys.readouterr().out.strip() == "[]"

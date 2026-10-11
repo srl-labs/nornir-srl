@@ -123,11 +123,11 @@ def print_structured(
     rows: List[Dict[str, Any]],
     output_format: OutputFormat,
 ) -> None:
-    """Print data in JSON, YAML, or CSV format."""
-    if not rows:
-        typer.echo("No data...")
-        return
+    """Print data in JSON, YAML, or CSV format.
 
+    Nothing found is still the format asked for - ``[]``, or a CSV header with
+    no rows - so whatever reads the output parses it either way.
+    """
     col_names = clean_columns(col_names)
     rows = [{clean_structured_key(k): v for k, v in row.items()} for row in rows]
 
@@ -704,11 +704,9 @@ def print_records(
 
     A record is what a lens found, with its lists as lists and its counts as
     numbers; the row a table makes of it joins and truncates those for a
-    reader. Whatever reads the output by machine wants the former.
+    reader. Whatever reads the output by machine wants the former. Nothing
+    found is ``[]``, which parses, rather than a message, which does not.
     """
-    if not records:
-        typer.echo("No data...")
-        return
     if output_format == OutputFormat.JSON:
         typer.echo(json.dumps(records, indent=2, default=str))
     else:
@@ -1288,9 +1286,7 @@ def routing_pol(ctx: typer.Context) -> None:
         for policy in (r.result or {}).get(spec.resource) or []:
             policies.append({"Node": node, "routing-policy": policy})
 
-    if not policies:
-        typer.echo("No data...")
-        return
+    # Nothing found is still JSON or YAML: [].
     if ctx.obj["output"] == OutputFormat.JSON:
         typer.echo(json.dumps(policies, indent=2, default=str))
     else:
