@@ -1497,14 +1497,37 @@ th.filtered::after {
   overflow: hidden;
 }
 
-.kpi-card[style*="cursor: pointer"] {
+.kpi-card.kpi-clickable {
   cursor: pointer;
 }
 
-.kpi-card[style*="cursor: pointer"]:hover {
+.kpi-card.kpi-clickable:hover {
   transform: translateY(-3px);
   box-shadow: var(--md-elevation-3);
   border-color: rgba(var(--accent-rgb), 0.5);
+}
+
+.kpi-card.kpi-clickable:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* A count on a card that opens the rows behind it. */
+.kpi-link {
+  color: inherit;
+  text-decoration: underline;
+  text-decoration-style: dotted;
+  text-underline-offset: 2px;
+}
+
+.kpi-link:hover {
+  text-decoration-style: solid;
+}
+
+.kpi-link:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+  border-radius: 2px;
 }
 
 .kpi-card.kpi-ok {
@@ -1644,6 +1667,8 @@ th.filtered::after {
 }
 
 .kpi-health-worst {
+  /* One run of text, its link included: not flex items wrapping apart. */
+  display: block;
   font-size: 12px;
   margin-top: 2px;
   font-weight: 500;

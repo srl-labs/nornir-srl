@@ -1742,6 +1742,34 @@ def test_overview_does_not_count_a_standby_port_as_down(store):
     assert down_count("min-links-not-met") == 1
 
 
+def test_overview_names_the_ports_behind_its_interface_counts(store):
+    """The card links to exactly the rows it counts, so it says which they are."""
+    fabric_store, _devices = store
+    stream = list(fabric_store._streams.values())[0]
+    stream._tree["interface"] = [
+        {"name": "ethernet-1/1", "admin-state": "enable", "oper-state": "up"},
+        {"name": "ethernet-1/2", "admin-state": "enable", "oper-state": "down", "description": "to spine"},
+        {"name": "lag1", "admin-state": "enable", "oper-state": "down", "oper-down-reason": "standby-signaling"},
+    ]
+    interfaces = fabric_store.overview()["interfaces"]
+    assert interfaces["down"] == 1
+    assert [list(port) for port in interfaces["down_ports"]] == [[stream.name, "ethernet-1/2"]]
+    assert len(interfaces["error_ports"]) == interfaces["errors"]
+
+
+def test_roll_up_names_the_services_degraded_and_down():
+    from nornir_srl.server.store import _roll_up
+
+    rolled = _roll_up([
+        ("target:1:1", "up"), ("target:1:1", "up"),
+        ("target:1:2", "up"), ("target:1:2", "down"),
+        ("target:1:3", "down"),
+    ])
+    assert (rolled["up"], rolled["degraded"], rolled["down"]) == (1, 1, 1)
+    assert rolled["degraded_names"] == ["target:1:2"]
+    assert rolled["down_names"] == ["target:1:3"]
+
+
 
 # --------------------------------------------------------------------------- #
 # lenses

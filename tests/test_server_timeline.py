@@ -227,7 +227,10 @@ def test_the_timeline_and_baseline_endpoints(client):
 def test_the_overview_and_topology_carry_the_fabric_s_health(client):
     test_client, _devices = client
     health: Dict[str, Any] = test_client.get("/api/overview").json()["health"]
-    assert {"incidents", "errors", "warnings", "findings", "worst", "changes_15m", "baseline_at"} <= set(health)
+    assert {"incidents", "errors", "warnings", "findings", "worst", "worst_id", "changes_15m", "baseline_at"} <= set(health)
+    # The worst incident by the key its card has, for a link to open that card.
+    keys = [card["key"] for card in test_client.get("/api/report/incidents").json()["tree"]]
+    assert health["worst_id"] == (keys[0] if health["worst"] else "")
     graph = test_client.get("/api/topology").json()
     assert "summary" in graph and "incidents" in graph
     assert all("health" in node for node in graph["nodes"])

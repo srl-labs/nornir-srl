@@ -227,6 +227,8 @@
     // whether it is acknowledged: a card starts collapsed, and collapses again
     // when it is acknowledged.
     seenIncidentCards: new Set(),
+    // The incident a link asked to see, opened and scrolled to once drawn.
+    focusIncident: null,
     collapsedSections: new Set(),
     navStack: [],
     navIndex: -1,
@@ -1152,6 +1154,102 @@
   const loadOverview = panelPoller(fetchOverview);
 
   /** Draw the dashboard; returns whether the server is still reading for it. */
+  /* ---------------------------------------------------------- KPI links */
+
+  // A card opens the report it counts; the counts on it that are worth a look
+  // of their own - what is down, degraded, failing - open the rows behind
+  // just them. A card holds links, so it cannot be one itself: it acts as one.
+  function kpiCardLink(card, page, title) {
+    if (!card) return;
+    const href = pageHref(page);
+    card.classList.add("kpi-clickable");
+    card.tabIndex = 0;
+    card.setAttribute("role", "link");
+    if (title) card.title = title;
+    const inNewTab = (event) => event.ctrlKey || event.metaKey || event.shiftKey || event.button === 1;
+    card.addEventListener("click", (event) => {
+      if (event.target.closest("a")) return;
+      if (inNewTab(event)) window.open(href, "_blank", "noopener");
+      else goTo(page);
+    });
+    card.addEventListener("auxclick", (event) => {
+      if (event.button === 1 && !event.target.closest("a")) window.open(href, "_blank", "noopener");
+    });
+    card.addEventListener("keydown", (event) => {
+      if (event.target !== card || (event.key !== "Enter" && event.key !== " ")) return;
+      event.preventDefault();
+      goTo(page);
+    });
+  }
+
+  /**
+   * *el* reading *parts* in turn: a string is text, and { text, page, title }
+   * a link to *page* (text when there is no page). Left alone when that is
+   * what it already says, so a poll does not take the focus or the hover off
+   * a link.
+   */
+  function setKpiParts(el, parts) {
+    if (!el) return;
+    const shown = parts.filter((part) => (typeof part === "string" ? part : part.text));
+    const key = JSON.stringify(
+      shown.map((part) =>
+        typeof part === "string" ? part : [part.text, part.page ? pageHref(part.page) : "", part.title, part.key || ""]
+      )
+    );
+    if (el.dataset.kpi === key) return;
+    el.dataset.kpi = key;
+    el.replaceChildren(...shown.map(kpiPart));
+  }
+
+  // A part of a KPI line: text, or a link to its page - gone to in place by
+  // its own *go* where it has one, the page in a new tab all the same.
+  function kpiPart(part) {
+    if (typeof part === "string" || !part.page) return document.createTextNode(typeof part === "string" ? part : part.text);
+    if (!part.go) return pageLink(part.text, part.title || "", part.page, "kpi-link");
+    const link = document.createElement("a");
+    link.className = "kpi-link";
+    link.textContent = part.text;
+    if (part.title) link.title = part.title;
+    return wireLink(link, pageHref(part.page), part.go);
+  }
+
+  /** *el* reading *prefix* and then *text*, a link to *page* when there is one; nothing without *text*. */
+  function setKpiText(el, text, page = null, title = "", prefix = "") {
+    setKpiParts(el, text ? [prefix, { text, page, title }] : []);
+  }
+
+  /** The interfaces table on exactly *ports* - [node, interface] pairs. */
+  function portsPage(ports) {
+    const nodes = ports.map(([node]) => node);
+    const names = ports.map(([, name]) => name);
+    return reportPage("ifstats", [], nodes, { interface: exactMatchPattern(names) });
+  }
+
+  /** A services page - bridge_domains or routers - on the services named. */
+  function servicesPage(report, names) {
+    const column = report === "routers" ? "Router" : "Bridge Domain";
+    return reportPage(report, [], [], { [column]: exactMatchPattern(names) });
+  }
+
+  // A BGP session the peers table does not show as up.
+  const BGP_NOT_UP = "^(?!up$|established$)";
+
+  // The incident a link asked to see: its card is opened and scrolled to.
+  function focusIncident(id) {
+    state.focusIncident = id;
+    // A card is what is asked for: the incidents open as cards.
+    try {
+      localStorage.setItem("fcli-viewmode-incidents", "tree");
+    } catch (_err) {}
+    if (state.report && state.report.name === "incidents") {
+      state.viewMode = "tree";
+      dom.viewModeBtn.textContent = viewModeLabel();
+      renderBody();
+      return;
+    }
+    goTo({ report: "incidents", filters: null, params: null, scope: [] });
+  }
+
   async function fetchOverview() {
     if (!state.report || state.report.name !== "overview") return false;
     try {
@@ -1170,12 +1268,23 @@
       dom.kpiNodesTotal.textContent = data.nodes.total;
       dom.kpiNodesConnected.textContent = `${data.nodes.connected} connected`;
       dom.kpiNodesStreaming.textContent = `${data.nodes.streaming} streaming`;
-      dom.kpiNodesUnreachable.textContent = `${data.nodes.unreachable} unreachable`;
+      setKpiText(
+        dom.kpiNodesUnreachable,
+        `${data.nodes.unreachable} unreachable`,
+        data.nodes.unreachable > 0 ? { report: "activity", filters: null, params: null, scope: [] } : null,
+        "What each node streams, and which ones do not answer"
+      );
 
       dom.kpiBgpEstablished.textContent = data.bgp.established;
       dom.kpiBgpSub.textContent = `${data.bgp.established} established`;
       dom.kpiBgpTotal.textContent = `${data.bgp.total} total`;
-      dom.kpiBgpDown.textContent = data.bgp.down > 0 ? ` · ${data.bgp.down} down` : "";
+      setKpiText(
+        dom.kpiBgpDown,
+        data.bgp.down > 0 ? `${data.bgp.down} down` : "",
+        reportPage("bgp_peers", [], [], { state: BGP_NOT_UP }),
+        "The BGP sessions that are not established",
+        " · "
+      );
 
       if (dom.kpiCardNodes) {
         dom.kpiCardNodes.classList.remove("kpi-ok", "kpi-warn", "kpi-err");
@@ -1215,14 +1324,38 @@
       }
 
       dom.kpiItfTotal.textContent = data.interfaces.total;
-      dom.kpiItfDown.textContent = `${data.interfaces.down} oper down`;
-      dom.kpiItfErrors.textContent = `${data.interfaces.errors} errors/discards`;
+      const downPorts = data.interfaces.down_ports || [];
+      const errorPorts = data.interfaces.error_ports || [];
+      setKpiText(
+        dom.kpiItfDown,
+        `${data.interfaces.down} oper down`,
+        downPorts.length ? portsPage(downPorts) : null,
+        "The interfaces that are down, not counting ports held down on purpose"
+      );
+      setKpiText(
+        dom.kpiItfErrors,
+        `${data.interfaces.errors} errors/discards`,
+        errorPorts.length ? portsPage(errorPorts) : null,
+        "The interfaces with error or discarded packets"
+      );
 
       if (data.bridge_domains) {
         dom.kpiBdTotal.textContent = data.bridge_domains.total;
         dom.kpiBdUp.textContent = `${data.bridge_domains.up} up`;
-        dom.kpiBdDegraded.textContent = data.bridge_domains.degraded > 0 ? ` · ${data.bridge_domains.degraded} degraded` : "";
-        dom.kpiBdDown.textContent = data.bridge_domains.down > 0 ? ` · ${data.bridge_domains.down} down` : "";
+        setKpiText(
+          dom.kpiBdDegraded,
+          data.bridge_domains.degraded > 0 ? `${data.bridge_domains.degraded} degraded` : "",
+          servicesPage("bridge_domains", data.bridge_domains.degraded_names || []),
+          "The bridge domains up on some of their nodes only",
+          " · "
+        );
+        setKpiText(
+          dom.kpiBdDown,
+          data.bridge_domains.down > 0 ? `${data.bridge_domains.down} down` : "",
+          servicesPage("bridge_domains", data.bridge_domains.down_names || []),
+          "The bridge domains up on none of their nodes",
+          " · "
+        );
         dom.kpiBdInstances.textContent = ` (${data.bridge_domains.instances} inst)`;
 
         if (dom.kpiCardBd) {
@@ -1242,8 +1375,20 @@
       if (data.routers) {
         dom.kpiRoutersTotal.textContent = data.routers.total;
         dom.kpiRoutersUp.textContent = `${data.routers.up} up`;
-        dom.kpiRoutersDegraded.textContent = data.routers.degraded > 0 ? ` · ${data.routers.degraded} degraded` : "";
-        dom.kpiRoutersDown.textContent = data.routers.down > 0 ? ` · ${data.routers.down} down` : "";
+        setKpiText(
+          dom.kpiRoutersDegraded,
+          data.routers.degraded > 0 ? `${data.routers.degraded} degraded` : "",
+          servicesPage("routers", data.routers.degraded_names || []),
+          "The routers up on some of their nodes only",
+          " · "
+        );
+        setKpiText(
+          dom.kpiRoutersDown,
+          data.routers.down > 0 ? `${data.routers.down} down` : "",
+          servicesPage("routers", data.routers.down_names || []),
+          "The routers up on none of their nodes",
+          " · "
+        );
         dom.kpiRoutersInstances.textContent = ` (${data.routers.instances} inst)`;
 
         if (dom.kpiCardRouters) {
@@ -1847,8 +1992,8 @@
           ? `checks running: ${loading.ready} of ${loading.total} report reads in (${Math.round((100 * loading.ready) / loading.total)}%)`
           : "checks running: connecting to the nodes…"
         : "checks not available";
-      dom.kpiHealthWorst.textContent = "";
-      dom.kpiHealthChanges.textContent = "";
+      setKpiParts(dom.kpiHealthWorst, []);
+      setKpiParts(dom.kpiHealthChanges, []);
       return;
     }
     dom.kpiHealthValue.textContent = health.incidents;
@@ -1858,22 +2003,49 @@
       : health.acknowledged
         ? `nothing open${acked}`
         : "no findings: every check passes";
-    dom.kpiHealthWorst.textContent = health.worst ? `worst: ${health.worst}` : "";
+    // In place, the incident's card itself, opened and scrolled to; in a tab
+    // of its own, the incidents.
+    const worstId = health.worst_id || "";
+    setKpiParts(
+      dom.kpiHealthWorst,
+      health.worst
+        ? [
+            "worst: ",
+            {
+              text: health.worst,
+              page: { report: "incidents", filters: null, params: null, scope: [] },
+              title: "Open this incident",
+              go: worstId ? () => focusIncident(worstId) : null,
+              key: worstId,
+            },
+          ]
+        : []
+    );
     dom.kpiCardHealth.classList.add(health.errors ? "kpi-err" : health.warnings ? "kpi-warn" : "kpi-ok");
     if (!health.watching) {
-      dom.kpiHealthChanges.textContent = "timeline off (--watch-interval 0)";
+      setKpiParts(dom.kpiHealthChanges, ["timeline off (--watch-interval 0)"]);
     } else {
       const baseline = health.baseline_at
         ? ` · baseline ${new Date(health.baseline_at * 1000).toLocaleTimeString()}`
         : " · baseline pending";
-      const failures = health.failures_15m ? ` (${health.failures_15m} failures)` : "";
       const checked = health.reading_since
         ? "checking now"
         : typeof health.age === "number"
           ? `checked ${ageText(health.age)}`
           : "";
-      dom.kpiHealthChanges.textContent =
-        `${checked ? checked + " · " : ""}${health.changes_15m} change(s) in 15 min${failures}${baseline}`;
+      const changes = (params) => ({ report: "changes", filters: null, params, scope: [] });
+      setKpiParts(dom.kpiHealthChanges, [
+        checked ? checked + " · " : "",
+        {
+          text: `${health.changes_15m} change(s) in 15 min`,
+          page: health.changes_15m ? changes({ since: "15m" }) : null,
+          title: "What changed in the last 15 minutes",
+        },
+        ...(health.failures_15m
+          ? [" (", { text: `${health.failures_15m} failures`, page: changes({ since: "15m", severity: "error" }), title: "The failures of the last 15 minutes" }, ")"]
+          : []),
+        baseline,
+      ]);
     }
   }
 
@@ -6544,6 +6716,8 @@
         state.seenIncidentCards.add(seenKey);
         state.collapsedCards.add(cardKey);
       }
+      // The incident a link asked for is open, whatever it was before.
+      if (card.key === state.focusIncident) state.collapsedCards.delete(cardKey);
     }
     const collapsed = state.collapsedCards.has(cardKey);
     const el = document.createElement("div");
@@ -6965,6 +7139,25 @@
     dom.servicesTreeView.append(renderTreeControls());
     cards.forEach((card, index) => dom.servicesTreeView.append(lensCard(card, index)));
     restoreTreeScroll(scroll);
+    scrollToFocusedIncident(cards);
+  }
+
+  /** Scroll to the incident a link asked for, once its card is drawn. */
+  function scrollToFocusedIncident(cards) {
+    const id = state.focusIncident;
+    if (!id || !state.report || state.report.name !== "incidents") return;
+    state.focusIncident = null;
+    // Cleared since: the incidents are shown, without it.
+    if (!cards.some((card) => card.key === id)) return;
+    const target = dom.servicesTreeView.querySelector(
+      `[data-card-key="${CSS.escape(`lens:incidents:key:${id}`)}"]`
+    );
+    if (!target) return;
+    target.scrollIntoView({ behavior: "smooth", block: "start" });
+    target.classList.remove("highlight-pulse");
+    void target.offsetWidth; // restart the animation
+    target.classList.add("highlight-pulse");
+    setTimeout(() => target.classList.remove("highlight-pulse"), 3000);
   }
 
   /* ---------------------------------------------------------- path graph */
@@ -7653,13 +7846,15 @@
 
   dom.clearFiltersBtn.addEventListener("click", clearAllFilters);
 
-  const openReport = (name) => {
-    const report = state.reports.find((r) => r.name === name);
-    if (report) selectReport(report);
-  };
-
-  if (dom.kpiCardHealth) dom.kpiCardHealth.addEventListener("click", () => openReport("incidents"));
-  if (dom.kpiCardTelemetry) dom.kpiCardTelemetry.addEventListener("click", () => openReport("activity"));
+  // Each card opens the report it counts.
+  const whole = (report) => ({ report, filters: null, params: null, scope: [] });
+  kpiCardLink(dom.kpiCardHealth, whole("incidents"), "Click to view the incidents");
+  kpiCardLink(dom.kpiCardNodes, whole("sys_info"), "Click to view each node's system information");
+  kpiCardLink(dom.kpiCardBgp, whole("bgp_peers"), "Click to view the BGP peers");
+  kpiCardLink(dom.kpiCardItf, whole("ifstats"), "Click to view the interface statistics");
+  kpiCardLink(dom.kpiCardBd, whole("bridge_domains"), "Click to view the bridge domains");
+  kpiCardLink(dom.kpiCardRouters, whole("routers"), "Click to view the routers");
+  kpiCardLink(dom.kpiCardTelemetry, whole("activity"));
 
   if (dom.baselineBtn) {
     dom.baselineBtn.addEventListener("click", () => {
@@ -7684,19 +7879,6 @@
   if (dom.chatTriage) dom.chatTriage.addEventListener("click", triage);
   if (dom.ackAllBtn) dom.ackAllBtn.addEventListener("click", ackAll);
 
-  if (dom.kpiCardBd) {
-    dom.kpiCardBd.addEventListener("click", () => {
-      const report = state.reports.find((r) => r.name === "bridge_domains");
-      if (report) selectReport(report);
-    });
-  }
-
-  if (dom.kpiCardRouters) {
-    dom.kpiCardRouters.addEventListener("click", () => {
-      const report = state.reports.find((r) => r.name === "routers");
-      if (report) selectReport(report);
-    });
-  }
 
   dom.viewModeBtn.addEventListener("click", () => {
     state.viewMode = nextViewMode();
