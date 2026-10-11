@@ -863,8 +863,9 @@ BGP_PEERS_TABLE = Table(
     each_columns=(
         Column("peer", "peer"),
         Column("state", _session),
+        Column("local-as", lambda n: n.local_as if n.local_as is not None else "-"),
+        Column("peer-as", "peer_as"),
         Column("local-address", "local_address"),
-        Column("local-port", "local_port"),
         Column("evpn\nRx/Act/Tx", _family_cell("evpn")),
         Column("ipv4-unicast\nRx/Act/Tx", _family_cell("ipv4-unicast")),
         Column("ipv6-unicast\nRx/Act/Tx", _family_cell("ipv6-unicast")),
@@ -874,8 +875,6 @@ BGP_PEERS_TABLE = Table(
         Column("flags", _flags),
         Column("group", "group"),
         Column("import-policy", lambda n: _listed(n.import_policies)),
-        Column("local-as", lambda n: n.local_as if n.local_as is not None else "-"),
-        Column("peer-as", "peer_as"),
     ),
 )
 

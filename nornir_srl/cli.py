@@ -153,7 +153,7 @@ TABLE_THEME = Theme(
 #: Wide or server-oriented columns shown in live/structured output but not CLI tables.
 CLI_TABLE_OMIT: Dict[str, FrozenSet[str]] = {
     "bgp_rib": frozenset({"communities"}),
-    "bgp_peers": frozenset({"local-address", "local-port"}),
+    "bgp_peers": frozenset({"local-address"}),
     # The port state streams alongside the counters on the server; the CLI's
     # two samples read only the counters, so here these would always be blank.
     "ifstats": frozenset({"oper-state", "down-reason"}),

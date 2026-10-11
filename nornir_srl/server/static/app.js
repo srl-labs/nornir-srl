@@ -199,6 +199,7 @@
     reportParams: new Map(), // the selected report's own arguments, e.g. the RIB LPM address
     collapsedGroups: loadCollapsedGroups(), // sidebar categories folded away, kept per browser
     networkInstances: [], // the fabric's instances, for an argument that is one of them
+    serviceNames: new Set(), // the fabric's mac-vrfs and ip-vrfs, for a cell naming one to link to
     tree: null, // a lens's answer as cards, alongside its rows
     records: null, // a lens's answer as the objects it found
     graph: null, // a lens's answer as a graph, where it has one (the path walk)
@@ -229,6 +230,8 @@
     seenIncidentCards: new Set(),
     // The incident a link asked to see, opened and scrolled to once drawn.
     focusIncident: null,
+    // The node a link asked to pick on the topology, picked once drawn.
+    pendingTopoNode: null,
     collapsedSections: new Set(),
     navStack: [],
     navIndex: -1,
@@ -421,6 +424,30 @@
     return Boolean(report && report.kind === "lens");
   }
 
+  // The fabric's services - its mac-vrfs and ip-vrfs - by name, for a cell
+  // naming one to link to it. Asked once in a while: they seldom change.
+  const SERVICE_NAMES_TTL_MS = 60000;
+  let serviceNamesAt = 0;
+
+  async function loadServiceNames() {
+    if (Date.now() - serviceNamesAt < SERVICE_NAMES_TTL_MS) return;
+    serviceNamesAt = Date.now();
+    try {
+      const res = await fetch("/api/network-instances");
+      if (!res.ok) return;
+      const instances = (await res.json()).network_instances || [];
+      const names = new Set(
+        instances.filter((ni) => ni.type === "mac-vrf" || ni.type === "ip-vrf").map((ni) => ni.name)
+      );
+      const before = [...state.serviceNames].sort().join(",");
+      state.serviceNames = names;
+      // Rows drawn before the names were in are drawn again, linked.
+      if ([...names].sort().join(",") !== before && state.report && !isPanelReport(state.report.name)) renderBody();
+    } catch {
+      serviceNamesAt = 0;
+    }
+  }
+
   // The arguments a lens cannot answer without, still to be typed.
   function missingParams() {
     const specs = (state.report && state.report.params) || [];
@@ -442,6 +469,7 @@
   // The chip saying a page is about some nodes only, and letting it be about
   // all of them again.
   function renderScope() {
+    refreshNodeLinks();
     const nodes = state.scopeNodes;
     dom.scopeChip.hidden = !nodes.length;
     if (!nodes.length) return;
@@ -2153,10 +2181,21 @@
       }
       state.topoKey = key;
       renderTopology(graph);
+      pickPendingTopoNode();
       return loading;
     } catch (_err) {
       setLive("error", "error");
       return false;
+    }
+  }
+
+  /** Pick the node a link asked for, once the drawing it is on is there. */
+  function pickPendingTopoNode() {
+    const name = state.pendingTopoNode;
+    if (!name || !state.topology) return;
+    state.pendingTopoNode = null;
+    if ((state.topology.nodes || []).some((node) => node.name === name)) {
+      selectTopo({ kind: "node", id: name });
     }
   }
 
@@ -3345,6 +3384,8 @@
 
   function selectTopo(selection) {
     state.topoSelection = selection;
+    // The picked node is in the link to the page.
+    syncCurrentVisit();
     // Walking the peer list of a client can lead to a node of another fabric,
     // which is drawn on its own tab; go there rather than nowhere.
     if (selection && selection.kind === "node") {
@@ -3631,6 +3672,11 @@
       params: [...state.reportParams.entries()],
       scope: [...state.scopeNodes],
       viewMode: state.viewMode,
+      // The node picked on the topology, which a link can pick too.
+      select:
+        state.report.name === "topology" && state.topoSelection && state.topoSelection.kind === "node"
+          ? state.topoSelection.id
+          : "",
     };
   }
 
@@ -3653,6 +3699,7 @@
       if (value) state.reportParams.set(name, value);
     }
     state.scopeNodes = [...(snap.scope || [])];
+    state.pendingTopoNode = snap.select || null;
     if (snap.viewMode) state.viewMode = snap.viewMode;
     saveReportPreferences();
     if (snap.viewMode && state.report) {
@@ -3684,6 +3731,7 @@
     const params = new URLSearchParams();
     for (const [name, value] of snap.params || []) params.set(name, value);
     if ((snap.scope || []).length) params.set("node", snap.scope.join(","));
+    if (snap.select) params.set("select", snap.select);
     for (const [column, pattern] of snap.filters || []) {
       if (pattern) params.set(URL_FILTER + column, pattern);
     }
@@ -3713,7 +3761,8 @@
       if (value) params[spec.name] = value;
     }
     const scope = (given.get("node") || "").split(",").filter(Boolean);
-    return { report: name, filters, params: Object.keys(params).length ? params : null, scope };
+    const select = given.get("select") || "";
+    return { report: name, filters, params: Object.keys(params).length ? params : null, scope, select };
   }
 
   /** The fragment of a page to jump to - what a link to it points at. */
@@ -3723,6 +3772,7 @@
       filters: Object.entries(page.filters || {}),
       params: Object.entries(page.params || {}),
       scope: page.scope || [],
+      select: page.select || "",
     });
   }
 
@@ -3732,10 +3782,12 @@
     snap.id = state.navStack[state.navIndex].id;
     state.navStack[state.navIndex] = snap;
     history.replaceState({ page: snap }, "", pageUrl(snap));
+    refreshNodeLinks();
   }
 
   function recordVisit() {
     if (!state.report) return;
+    refreshNodeLinks();
     const snap = currentNavSnap();
     const current = state.navStack[state.navIndex];
     if (current && navPageKey(current) === navPageKey(snap)) {
@@ -3763,11 +3815,19 @@
   function restoreNavSnap(snap) {
     const report = state.reports.find((r) => r.name === snap.name);
     if (!report) return;
+    if (state.report && state.report.name === snap.name && snap.name === "topology") {
+      state.pendingTopoNode = null;
+      selectTopo(snap.select ? { kind: "node", id: snap.select } : null);
+      updateNavButtons();
+      return;
+    }
     if (state.report && state.report.name === snap.name) {
-      const asked = JSON.stringify([...state.reportParams.entries()]);
+      // What the server is asked: the report's arguments, and its nodes.
+      const asked = () => JSON.stringify([[...state.reportParams.entries()], state.scopeNodes]);
+      const before = asked();
       applyNavSnap(snap);
       updateFilterUI();
-      if (JSON.stringify([...state.reportParams.entries()]) !== asked) {
+      if (asked() !== before) {
         renderReportParams();
         connect();
       }
@@ -3795,6 +3855,7 @@
     closeSideDrawer();
     // Whatever was being queried is not what is being looked at any more.
     endQuery();
+    loadServiceNames();
     if (state.loadStopped) {
       state.loadStopped = false;
       state.paused = false;
@@ -4948,6 +5009,14 @@
   function goTo(page) {
     const reportName = page.report;
     const params = page.params;
+    if (reportName === "topology") {
+      // The topology is not filtered: a link to it picks a node on it.
+      if (state.report && state.report.name === "topology") {
+        if (page.select) selectTopo({ kind: "node", id: page.select });
+        return;
+      }
+      state.pendingTopoNode = page.select || null;
+    }
     state.pendingFilters = { ...page, scope: page.scope || [] };
 
     if (state.report && state.report.name === reportName) {
@@ -5105,10 +5174,145 @@
    * of every report, after the report's own.
    */
   const CELL_LINKS = {
-    bgp_peers: [peerRoutesCell],
+    bgp_peers: [peerRoutesCell, addressCell(["peer"], wherePage)],
     endpoints: [(_row, column, value) => endpointCell(column, value)],
-    "*": [],
+    arp: [addressCell(["IPv4", "MAC"], wherePage)],
+    nd: [addressCell(["IPv6", "MAC"], wherePage)],
+    mac: [addressCell(["mac"], wherePage)],
+    bgp_rib_evpn_2: [addressCell(["IP", "MAC", "next-hop"], wherePage)],
+    ...Object.fromEntries(
+      ["bgp_rib_evpn_1", "bgp_rib_evpn_3", "bgp_rib_evpn_4", "bgp_rib_evpn_5", "bgp_rib_ipv4", "bgp_rib_ipv6",
+        "bgp_rib_l3vpn_v4", "bgp_rib_l3vpn_v6"].map((name) => [name, [addressCell(["next-hop"], wherePage)]])
+    ),
+    es: [addressCell(["ni-peers"], wherePage)],
+    es_dest: [addressCell(["vteps"], wherePage)],
+    vxlan: [addressCell(["destinations"], wherePage)],
+    bfd: [addressCell(["remote"], wherePage)],
+    ipv4_rib: [ribPrefixCell, addressCell(["next-hop"], nextHopPage)],
+    ipv6_rib: [ribPrefixCell, addressCell(["next-hop"], nextHopPage)],
+    "*": [nodeCell, instanceCell],
   };
+
+  // An address as it stands in a cell: an IPv4 or IPv6 address, or a MAC.
+  const MAC_RE = /^[0-9a-f]{2}(?::[0-9a-f]{2}){5}$/i;
+  const IPV4_RE = /^\d{1,3}(?:\.\d{1,3}){3}$/;
+  const IPV6_RE = /^[0-9a-f]{0,4}(?::[0-9a-f]{0,4}){2,7}$/i;
+
+  function addressKind(token) {
+    if (MAC_RE.test(token)) return "mac";
+    if (IPV4_RE.test(token)) return "ipv4";
+    if (IPV6_RE.test(token) && /[0-9a-f]/i.test(token) && !token.includes(":::")) return "ipv6";
+    return "";
+  }
+
+  /**
+   * Where an address is known, across the fabric: null for one that says
+   * nothing beyond the link it is on - link-local, or unspecified.
+   */
+  function wherePage(address) {
+    if (/^fe80:/i.test(address) || address === "0.0.0.0" || address === "::") return null;
+    return reportPage("where", [], [], {}, { target: address });
+  }
+
+  /**
+   * The routes of the row's instance through next-hop *address*, in the RIB
+   * on screen: an IPv4 route can have an IPv6 next-hop. A link-local one is
+   * a neighbour of the row's node only.
+   */
+  function nextHopPage(address, row) {
+    const nodes = /^fe80:/i.test(address) && row.Node ? [row.Node] : [];
+    return reportPage(state.report.name, row.NI ? [row.NI] : [], nodes, { "next-hop": nextHopMatchPattern(address) });
+  }
+
+  const ADDRESS_TITLES = {
+    where: (address) => `Show every node that knows ${address}`,
+    ipv4_rib: (address, row) => `Show the routes${row.NI ? ` in ${row.NI}` : ""} via ${address}`,
+    ipv6_rib: (address, row) => `Show the routes${row.NI ? ` in ${row.NI}` : ""} via ${address}`,
+  };
+
+  /**
+   * A cell maker for *columns* whose cells hold addresses - one, or several
+   * among other text: each address is a link to *pageFor(address, row)*,
+   * the rest of the cell stays text. An address scoped to an interface
+   * (fe80::1%ethernet-1/1.0) is a link-local one, and stays text too.
+   */
+  function addressCell(columns, pageFor) {
+    const wanted = new Set(columns);
+    return (row, column, value) => {
+      if (!wanted.has(column)) return null;
+      const text = String(value ?? "");
+      if (!text || text === "-") return null;
+      const parts = text.split(/([\s,;()[\]]+)/);
+      const cell = document.createDocumentFragment();
+      let linked = false;
+      for (const part of parts) {
+        const page = part && addressKind(part) ? pageFor(part, row) : null;
+        if (!page) {
+          cell.append(document.createTextNode(part));
+          continue;
+        }
+        const title = (ADDRESS_TITLES[page.report] || ADDRESS_TITLES.where)(part, row);
+        cell.append(pageLink(part, title, page));
+        linked = true;
+      }
+      return linked ? cell : null;
+    };
+  }
+
+  /**
+   * A RIB 'Prefix' cell of a host route linked to the path a packet to that
+   * host takes from the row's node. A wider prefix is not one address to
+   * walk to, and stays text.
+   */
+  function ribPrefixCell(row, column, value) {
+    if (column !== "Prefix" || !row.Node) return null;
+    const [address, length] = String(value ?? "").split("/");
+    const kind = addressKind(address || "");
+    if (!(kind === "ipv4" && length === "32") && !(kind === "ipv6" && length === "128")) return null;
+    const params = { source: row.Node, destination: address };
+    if (row.NI) params.ni = row.NI;
+    return pageLink(value, `Walk the path from ${row.Node} to ${address}${row.NI ? ` in ${row.NI}` : ""}`,
+      reportPage("path", [], [], {}, params));
+  }
+
+  /**
+   * A 'Node' cell linked to the node: the report on screen for that node
+   * only, or for a lens the node on the topology. Not where the page is
+   * about that node alone already.
+   */
+  function nodeCell(row, column, value) {
+    const name = String(value ?? "").trim();
+    if (column !== "Node" || !name || name === "-") return null;
+    if (scopedReport() && state.scopeNodes.length === 1 && state.scopeNodes[0] === name) return null;
+    const title = scopedReport() ? `Show ${state.report.title} for ${name} only` : `Show ${name} on the topology`;
+    return pageLink(name, title, nodePage(name, { only: true }));
+  }
+
+  // The columns that name network-instances: one, or a comma list (an IRB
+  // sits in an ip-vrf and a mac-vrf).
+  const INSTANCE_COLUMNS = new Set(["NI", "assoc-ni", "IP-VRF", "MAC-VRF"]);
+
+  /**
+   * A network-instance cell with each service in it - a mac-vrf or an
+   * ip-vrf - linked to the Service lens: that service as every node that
+   * carries it sees it. The default instance is not a service, and stays text.
+   */
+  function instanceCell(_row, column, value) {
+    if (!INSTANCE_COLUMNS.has(column) || !state.serviceNames.size) return null;
+    const text = String(value ?? "");
+    const parts = text.split(/(,\s*)/);
+    if (!parts.some((part) => state.serviceNames.has(part))) return null;
+    const cell = document.createDocumentFragment();
+    for (const part of parts) {
+      cell.append(
+        state.serviceNames.has(part)
+          ? pageLink(part, `Show service ${part} on every node that carries it`,
+              reportPage("service", [], [], {}, { name: `^${escapeRegex(part)}$` }))
+          : document.createTextNode(part)
+      );
+    }
+    return cell;
+  }
 
   /** A table cell as a link to the report that tells more, or null. */
   function linkedCell(row, column, value) {
@@ -7664,6 +7868,10 @@
       dom.nodeList.replaceChildren(
         ...hosts.map((host) => {
           const item = document.createElement("li");
+          // The node is a link to the page about it; see nodePage.
+          const link = document.createElement("a");
+          link.className = "node-link";
+          link.dataset.node = host.name;
           const dot = document.createElement("span");
           dot.className =
             "dot " +
@@ -7677,17 +7885,72 @@
           else if (host.active) status = "gNMI Get just completed";
           else if (host.streaming) status = "streaming";
           else status = "connected, not subscribed";
-          item.title = `${host.name} (${host.hostname}) - ${status}`;
-          item.append(dot, name);
-          if (host.active) item.append(transferIcon());
+          link.dataset.status = `${host.name} (${host.hostname}) - ${status}`;
+          link.append(dot, name);
+          if (host.active) link.append(transferIcon());
+          item.append(link);
           return item;
         })
       );
+      refreshNodeLinks();
       const up = hosts.filter((h) => h.connected).length;
       dom.nodeSummary.textContent = `${up}/${hosts.length} up`;
     } catch (_err) {
       inventoryKey = "";
       dom.nodeSummary.textContent = "unavailable";
+    }
+  }
+
+  /* ---------------------------------------------------------- node links */
+
+  /** Whether the page on screen is a table the server can ask some nodes only. */
+  function scopedReport() {
+    return Boolean(state.report) && !isPanelReport(state.report.name) && !isLens(state.report);
+  }
+
+  /**
+   * The page about node *name*, from the page on screen: a table report asks
+   * that node only - again every node when it was the only one, and with
+   * *add* the node added to or taken from the ones asked; a dashboard or a
+   * lens, which is not asked by node, shows the node on the topology.
+   */
+  function nodePage(name, { add = false, only = false } = {}) {
+    if (!scopedReport()) return { report: "topology", filters: null, params: null, scope: [], select: name };
+    const current = state.scopeNodes;
+    let scope;
+    if (only) scope = [name];
+    else if (add) scope = current.includes(name) ? current.filter((n) => n !== name) : [...current, name];
+    else scope = current.length === 1 && current[0] === name ? [] : [name];
+    // A Node filter left from a jump would hide the node asked for.
+    const filters = Object.fromEntries([...state.colFilters].filter(([column]) => column !== "Node"));
+    const params = state.reportParams.size ? Object.fromEntries(state.reportParams) : null;
+    return { report: state.report.name, filters, params, scope };
+  }
+
+  /** What following node *name* in the side pane does, in words. */
+  function nodeLinkTitle(name) {
+    if (!scopedReport()) return `Show ${name} on the topology`;
+    const report = state.report.title;
+    const current = state.scopeNodes;
+    if (current.length === 1 && current[0] === name) return `Show ${report} for every node again`;
+    return `Show ${report} for ${name} only · shift-click to ${current.includes(name) ? "take it from" : "add it to"} the nodes shown`;
+  }
+
+  /** Point the side pane's nodes at what they open from the page on screen. */
+  function refreshNodeLinks() {
+    if (!dom.nodeList) return;
+    const selected = scopedReport()
+      ? state.scopeNodes
+      : state.report && state.report.name === "topology" && state.topoSelection && state.topoSelection.kind === "node"
+        ? [state.topoSelection.id]
+        : [];
+    for (const link of dom.nodeList.querySelectorAll("a.node-link")) {
+      const name = link.dataset.node;
+      link.href = pageHref(nodePage(name));
+      link.title = `${link.dataset.status || name}\n${nodeLinkTitle(name)}`;
+      link.classList.toggle("is-selected", selected.includes(name));
+      if (selected.includes(name)) link.setAttribute("aria-current", "true");
+      else link.removeAttribute("aria-current");
     }
   }
 
@@ -8152,9 +8415,15 @@
   document.addEventListener("keydown", (event) => {
     if (event.key === "Escape") closeSideDrawer();
   });
-  // A node picked from the list filters the page behind the drawer.
+  // A node picked from the list: the page on screen for that node, or the
+  // node on the topology. Ctrl- or middle-click opens it in a tab of its own.
   dom.nodeList.addEventListener("click", (event) => {
-    if (narrowScreen && narrowScreen.matches && event.target.closest("li, button")) closeSideDrawer();
+    const link = event.target.closest("a.node-link");
+    if (!link || event.button !== 0 || event.ctrlKey || event.metaKey || event.altKey) return;
+    event.preventDefault();
+    goTo(nodePage(link.dataset.node, { add: event.shiftKey }));
+    // On a phone, the page behind the drawer is what was asked for.
+    if (narrowScreen && narrowScreen.matches) closeSideDrawer();
   });
   if (narrowScreen) narrowScreen.addEventListener("change", closeSideDrawer);
 

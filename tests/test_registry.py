@@ -431,7 +431,7 @@ def test_cli_table_omits_bgp_rib_communities_column():
 def test_cli_table_omits_bgp_peers_local_endpoint_columns():
     columns = cli._cli_table_columns(
         "bgp_peers",
-        ["peer", "local-address", "local-port", "state", "peer-as"],
+        ["peer", "state", "peer-as", "local-address"],
     )
     assert columns == ["peer", "state", "peer-as"]
 

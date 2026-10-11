@@ -481,6 +481,35 @@ body {
   background: var(--panel-2);
 }
 
+.node-list .node-link {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1;
+  min-width: 0;
+  /* The whole row, padding and all, is the link. */
+  margin: -5px -8px;
+  padding: 5px 8px;
+  color: inherit;
+  text-decoration: none;
+}
+
+.node-list .node-link:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: var(--radius-sm);
+}
+
+/* The nodes the page on screen is asked about, or picked on the topology. */
+.node-list .node-link.is-selected {
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.node-list li:has(.node-link.is-selected) {
+  background: var(--accent-soft);
+}
+
 .node-list .dot {
   flex: none;
 }
