@@ -646,6 +646,13 @@ body {
   transform: translateY(-1px);
 }
 
+/* A link styled as a round button: no underline, and its own size wins over .btn. */
+.topbar-state .help-link {
+  padding: 0;
+  font-size: 16px;
+  text-decoration: none;
+}
+
 .nav-btn:disabled {
   opacity: 0.35;
   cursor: default;
