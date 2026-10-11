@@ -1009,6 +1009,7 @@
     state.reportParams.clear();
     renderReportParams();
     saveReportPreferences();
+    syncCurrentVisit();
     updateFilterUI();
     renderHead();
     renderBody();
@@ -1054,32 +1055,11 @@
     } catch (_err) {}
 
     // A lens is asked something, and a walk worth sharing is one with its
-    // arguments in the link: #path?source=leaf1&destination=10.0.0.1&ni=vrf.
-    const [wanted, query] = location.hash.replace(/^#/, "").split("?", 2);
-    const initial = state.reports.find((r) => r.name === wanted) || state.reports[0];
-    if (initial) {
-      selectReport(initial);
-      const scoped = query ? (new URLSearchParams(query).get("node") || "").split(",").filter(Boolean) : [];
-      if (scoped.length) {
-        state.scopeNodes = scoped;
-        renderReportParams();
-        if (!(initial.params || []).length) {
-          connect();
-          syncCurrentVisit();
-        }
-      }
-      if (query && (initial.params || []).length) {
-        const given = new URLSearchParams(query);
-        for (const spec of initial.params) {
-          const value = (given.get(spec.name) || "").trim();
-          if (value) state.reportParams.set(spec.name, value);
-        }
-        renderReportParams();
-        updateFilterUI();
-        connect();
-        syncCurrentVisit();
-      }
-    }
+    // arguments in the link: #path?source=leaf1&destination=10.0.0.1&ni=vrf;
+    // a filtered table has its filters in it: #bgp_peers?f.state=down.
+    const page = pageFromUrl(location.hash);
+    if (page) goTo(page);
+    else if (state.reports[0]) selectReport(state.reports[0]);
   }
 
   // Folded sidebar groups are a per-browser convenience: kept when the
@@ -3522,13 +3502,56 @@
     dom.navForward.title = next ? `Forward to ${next.title}` : "Forward";
   }
 
-  // The fragment names the page, and for a lens carries what it was asked.
+  // A column filter in the fragment: `f.<column>=<pattern>`.
+  const URL_FILTER = "f.";
+
+  // The fragment names the page, and carries what it was asked and what it
+  // is filtered on, so a page opened from a link - or a bookmark, or a
+  // reload - is the page that was looked at.
   function pageUrl(snap) {
     const params = new URLSearchParams();
     for (const [name, value] of snap.params || []) params.set(name, value);
     if ((snap.scope || []).length) params.set("node", snap.scope.join(","));
+    for (const [column, pattern] of snap.filters || []) {
+      if (pattern) params.set(URL_FILTER + column, pattern);
+    }
     const query = params.toString();
     return "#" + snap.name + (query ? "?" + query : "");
+  }
+
+  /**
+   * The page a fragment names, as a jump to it: null for a report the server
+   * does not have. Its filters are null when the fragment has none, so the
+   * report opens with the ones it was last left with.
+   */
+  function pageFromUrl(hash) {
+    const [name, query] = String(hash || "").replace(/^#/, "").split("?", 2);
+    const report = state.reports.find((r) => r.name === name);
+    if (!report) return null;
+    const given = new URLSearchParams(query || "");
+    let filters = null;
+    for (const [key, value] of given) {
+      if (!key.startsWith(URL_FILTER)) continue;
+      filters = filters || {};
+      if (value) filters[key.slice(URL_FILTER.length)] = value;
+    }
+    const params = {};
+    for (const spec of report.params || []) {
+      const value = (given.get(spec.name) || "").trim();
+      if (value) params[spec.name] = value;
+    }
+    const scope = (given.get("node") || "").split(",").filter(Boolean);
+    return { report: name, filters, params: Object.keys(params).length ? params : null, scope };
+  }
+
+  /** The fragment of a page to jump to - what a link to it points at. */
+  function pageHref(page) {
+    return pageUrl({
+      name: page.report,
+      filters: Object.entries(page.filters || {}),
+      params: Object.entries(page.params || {}),
+      scope: page.scope || [],
+    });
   }
 
   function syncCurrentVisit() {
@@ -4299,6 +4322,7 @@
           else state.colFilters.delete(column);
           state.windowSize = WINDOW_STEP;
           saveReportPreferences();
+          syncCurrentVisit();
           updateFilterUI();
           th.classList.toggle("filtered", Boolean(value));
           renderBody();
@@ -4681,9 +4705,12 @@
   function applyPendingFilters() {
     if (!state.pendingFilters) return;
     if (!state.report || state.report.name !== state.pendingFilters.report) return;
-    state.colFilters.clear();
-    for (const [column, pattern] of Object.entries(state.pendingFilters.filters || {})) {
-      if (pattern) state.colFilters.set(column, pattern);
+    // No filters at all - a link without any - keeps the ones the report has.
+    if (state.pendingFilters.filters) {
+      state.colFilters.clear();
+      for (const [column, pattern] of Object.entries(state.pendingFilters.filters)) {
+        if (pattern) state.colFilters.set(column, pattern);
+      }
     }
     // A jump about one node asks only that node, not the whole fabric.
     state.scopeNodes = [...(state.pendingFilters.scope || [])];
@@ -4726,14 +4753,30 @@
     return `(?:^|[^0-9])${e}(?=$|[^0-9])`;
   }
 
-  function jumpToFilteredReport(reportName, niNames, nodeNames, extraFilters, params, scope) {
+  /**
+   * A report opened on some network instances and nodes, with more column
+   * filters, its own arguments and the nodes it asks: the page a jump goes
+   * to, and a link points at.
+   */
+  function reportPage(reportName, niNames, nodeNames, extraFilters, params, scope) {
     const filters = {};
     const ni = tokenMatchPattern(niNames);
     const nodes = exactMatchPattern(nodeNames);
     if (ni) filters.NI = ni;
     if (nodes) filters.Node = nodes;
     Object.assign(filters, extraFilters || {});
-    state.pendingFilters = { report: reportName, filters, params: params || null, scope: scope || [] };
+    return { report: reportName, filters, params: params || null, scope: scope || [] };
+  }
+
+  function jumpToFilteredReport(reportName, niNames, nodeNames, extraFilters, params, scope) {
+    goTo(reportPage(reportName, niNames, nodeNames, extraFilters, params, scope));
+  }
+
+  /** Open *page* - see reportPage - as a visit of its own. */
+  function goTo(page) {
+    const reportName = page.report;
+    const params = page.params;
+    state.pendingFilters = { ...page, scope: page.scope || [] };
 
     if (state.report && state.report.name === reportName) {
       syncCurrentVisit();
@@ -4757,18 +4800,34 @@
     }
   }
 
-  function makeReportJumpButton(label, title, reportName, niNames, nodeNames) {
-    const button = document.createElement("button");
-    button.type = "button";
-    button.className = "bd-report-jump-btn";
-    button.textContent = label;
-    button.title = title;
-    button.addEventListener("click", (event) => {
-      event.preventDefault();
+  /**
+   * *link* as a link to *href*: opened in a new tab or window, copied or
+   * bookmarked like any other, and a plain click goes there in place with
+   * *go* - without reloading the page and the streams it has open.
+   */
+  function wireLink(link, href, go) {
+    link.href = href;
+    link.addEventListener("click", (event) => {
+      // Never also a click on the card or the row it sits in.
       event.stopPropagation();
-      jumpToFilteredReport(reportName, niNames, nodeNames);
+      if (event.button !== 0 || event.ctrlKey || event.metaKey || event.shiftKey || event.altKey) return;
+      event.preventDefault();
+      go();
     });
-    return button;
+    return link;
+  }
+
+  /** A link to *page* - see reportPage - reading *text*. */
+  function pageLink(text, title, page, className = "vrf-link") {
+    const link = document.createElement("a");
+    link.className = className;
+    link.textContent = text;
+    if (title) link.title = title;
+    return wireLink(link, pageHref(page), () => goTo(page));
+  }
+
+  function makeReportJumpButton(label, title, reportName, niNames, nodeNames) {
+    return pageLink(label, title, reportPage(reportName, niNames, nodeNames), "bd-report-jump-btn");
   }
 
   function ribReportForAddress(ip) {
@@ -4779,21 +4838,22 @@
     return "";
   }
 
-  function jumpToNextHopRib(ip, niName) {
+  /** The routes using *ip* as their next-hop, or null for what is not an address. */
+  function nextHopRibPage(ip, niName) {
     const report = ribReportForAddress(ip);
     const nh = nextHopMatchPattern(ip);
-    if (!report || !nh) return;
-    jumpToFilteredReport(report, niName ? [niName] : [], [], { "next-hop": nh });
+    if (!report || !nh) return null;
+    return reportPage(report, niName ? [niName] : [], [], { "next-hop": nh });
   }
 
   /**
    * The routes exchanged with a peer in one family, as the node that peers
    * with it holds them: *direction* ``received`` or ``advertised``.
    */
-  function jumpToPeerRoutes(direction, nodeName, niName, peerAddress, family) {
+  function peerRoutesPage(direction, nodeName, niName, peerAddress, family) {
     // One peer of one node: the server is asked about that node alone, rather
     // than reading every node's RIB for a table filtered down in the browser.
-    jumpToFilteredReport(`bgp_${direction}_routes`, [niName], [nodeName], {}, { peer: peerAddress, family }, [nodeName]);
+    return reportPage(`bgp_${direction}_routes`, [niName], [nodeName], {}, { peer: peerAddress, family }, [nodeName]);
   }
 
   /**
@@ -4809,21 +4869,20 @@
   };
 
   /** The routes from a peer in one family that the node uses. */
-  function jumpToPeerActiveRoutes(nodeName, niName, peerAddress, family) {
+  function peerActiveRoutesPage(nodeName, niName, peerAddress, family) {
     // An unnumbered peer is fe80::1%ethernet-1/1.0; match it with or without
     // the interface it is scoped to.
     const address = peerAddress.split("%")[0];
     const peer = `^${escapeRegex(address)}(%\\S*)?$`;
     const target = ACTIVE_ROUTES_REPORTS[family];
     if (!target) {
-      jumpToFilteredReport("bgp_received_routes", [niName], [nodeName],
+      return reportPage("bgp_received_routes", [niName], [nodeName],
         { peer, st: BGP_RIB_USED_FILTER }, { peer: peerAddress, family }, [nodeName]);
-      return;
     }
     const [report, column] = target;
     // The peer as the RIB's neighbor key: the node picks its routes, rather
     // than the whole RIB being read for a table filtered in the browser.
-    jumpToFilteredReport(report, [niName], [nodeName],
+    return reportPage(report, [niName], [nodeName],
       { [column]: peer, st: BGP_RIB_USED_FILTER }, { neighbor: peerAddress }, [nodeName]);
   }
 
@@ -4839,29 +4898,18 @@
     const counts = /^(\d+)\/(\d+)\/(\d+)$/.exec(String(value));
     if (!peer || !row.Node || !family || !counts) return null;
     const [, rx, act, tx] = counts;
-    const part = (count, title, jump) => {
-      if (count === "0") return document.createTextNode(count);
-      const link = document.createElement("a");
-      link.className = "vrf-link";
-      link.href = "#";
-      link.textContent = count;
-      link.title = title;
-      link.addEventListener("click", (event) => {
-        event.preventDefault();
-        jump();
-      });
-      return link;
-    };
+    const part = (count, title, page) =>
+      count === "0" ? document.createTextNode(count) : pageLink(count, title, page);
     const cell = document.createDocumentFragment();
     cell.append(
       part(rx, `Show the ${family} routes ${peer} sent to ${row.Node}`,
-        () => jumpToPeerRoutes("received", row.Node, row.NI, peer, family)),
+        peerRoutesPage("received", row.Node, row.NI, peer, family)),
       document.createTextNode("/"),
       part(act, `Show the active ${family} routes ${row.Node} has from ${peer}`,
-        () => jumpToPeerActiveRoutes(row.Node, row.NI, peer, family)),
+        peerActiveRoutesPage(row.Node, row.NI, peer, family)),
       document.createTextNode("/"),
       part(tx, `Show the ${family} routes ${row.Node} sent to ${peer}`,
-        () => jumpToPeerRoutes("advertised", row.Node, row.NI, peer, family))
+        peerRoutesPage("advertised", row.Node, row.NI, peer, family))
     );
     return cell;
   }
@@ -4874,20 +4922,34 @@
   function endpointCell(column, value) {
     const address = String(value ?? "").trim();
     if ((column !== "IP" && column !== "MAC") || !address) return null;
-    const link = document.createElement("a");
-    link.className = "vrf-link";
-    link.href = "#";
-    link.textContent = address;
-    link.title = `Show every node that knows ${address}`;
-    link.addEventListener("click", (event) => {
-      event.preventDefault();
-      jumpToFilteredReport("where", [], [], {}, { target: address });
-    });
-    return link;
+    return pageLink(address, `Show every node that knows ${address}`,
+      reportPage("where", [], [], {}, { target: address }));
   }
 
-  function jumpToBgpPeer(nodeName, niName, peerAddress) {
-    jumpToFilteredReport("bgp_peers", [niName], [nodeName], {
+  /**
+   * Table cells that are links to another report, by report: each makes a
+   * cell's content from its row, column and value, or returns null for a
+   * cell it leaves as text. A function under "*" is asked about the cells
+   * of every report, after the report's own.
+   */
+  const CELL_LINKS = {
+    bgp_peers: [peerRoutesCell],
+    endpoints: [(_row, column, value) => endpointCell(column, value)],
+    "*": [],
+  };
+
+  /** A table cell as a link to the report that tells more, or null. */
+  function linkedCell(row, column, value) {
+    if (!state.report) return null;
+    for (const make of [...(CELL_LINKS[state.report.name] || []), ...CELL_LINKS["*"]]) {
+      const linked = make(row, column, value);
+      if (linked) return linked;
+    }
+    return null;
+  }
+
+  function bgpPeerPage(nodeName, niName, peerAddress) {
+    return reportPage("bgp_peers", [niName], [nodeName], {
       peer: exactMatchPattern([peerAddress]),
     });
   }
@@ -4900,9 +4962,9 @@
   }
 
   /** One interface of one node, in the report that lists it. */
-  function jumpToInterface(name, nodeName) {
+  function interfacePage(name, nodeName) {
     const [report, column] = interfaceReport(name);
-    jumpToFilteredReport(report, [], [nodeName], { [column]: exactMatchPattern([name]) });
+    return reportPage(report, [], [nodeName], { [column]: exactMatchPattern([name]) });
   }
 
   /**
@@ -4910,8 +4972,8 @@
    * worth seeing from all the nodes that share it. Its name is optional and
    * may be missing, its ESI never is.
    */
-  function jumpToEthernetSegment(esi) {
-    jumpToFilteredReport("es", [], [], { esi: exactMatchPattern([esi]) });
+  function ethernetSegmentPage(esi) {
+    return reportPage("es", [], [], { esi: exactMatchPattern([esi]) });
   }
 
   /** A full 10-byte ESI from the compressed one a label shows: `..` is a run of zero bytes. */
@@ -4923,25 +4985,11 @@
     return [...parts.slice(0, gap), ...zeros, ...parts.slice(gap + 1)].join(":");
   }
 
-  function reportLink(text, title, jump) {
-    const link = document.createElement("a");
-    link.className = "vrf-link";
-    link.href = "#";
-    link.textContent = text;
-    link.title = title;
-    link.addEventListener("click", (event) => {
-      event.preventDefault();
-      event.stopPropagation();
-      jump();
-    });
-    return link;
-  }
-
   /**
-   * A pill label with *name* in it turned into a jump to the report that
-   * lists it; the rest of the label stays text.
+   * A pill label with *name* in it turned into a link to *page*, the report
+   * that lists it; the rest of the label stays text.
    */
-  function fillLinkedLabel(pill, label, name, title, jump) {
+  function fillLinkedLabel(pill, label, name, title, page) {
     const at = name ? label.indexOf(name) : -1;
     if (at < 0) {
       pill.append(document.createTextNode(label));
@@ -4949,7 +4997,7 @@
     }
     pill.append(
       document.createTextNode(label.slice(0, at)),
-      reportLink(name, title, jump),
+      pageLink(name, title, page),
       document.createTextNode(label.slice(at + name.length))
     );
   }
@@ -4959,9 +5007,7 @@
     const name = (/^\S+/.exec(label) || [""])[0];
     const [report] = interfaceReport(name);
     const what = { irb: "IRB interface", vxlan: "VXLAN interface", subif: "sub-interface" }[report];
-    fillLinkedLabel(pill, label, name, `Show ${what} ${name} on ${nodeName}`, () =>
-      jumpToInterface(name, nodeName)
-    );
+    fillLinkedLabel(pill, label, name, `Show ${what} ${name} on ${nodeName}`, interfacePage(name, nodeName));
   }
 
   /**
@@ -4971,9 +5017,7 @@
   function fillEsLabel(pill, label) {
     const id = (/\bID:\s*([0-9a-f:.]+)/i.exec(label) || [])[1] || "";
     const esi = expandEsi(id);
-    fillLinkedLabel(pill, label, id, `Show ethernet-segment ${esi}`, () =>
-      jumpToEthernetSegment(esi)
-    );
+    fillLinkedLabel(pill, label, id, `Show ethernet-segment ${esi}`, ethernetSegmentPage(esi));
   }
 
   // A virtual-ES label with its next-hop(s) turned into RIB jumps. The rest of
@@ -4989,25 +5033,21 @@
     fillEsLabel(esPill, es.slice(0, match.index) + "nh: ");
     ips.forEach((ip, index) => {
       if (index) esPill.append(document.createTextNode(" "));
-      const report = ribReportForAddress(ip);
-      if (!report) {
+      const page = nextHopRibPage(ip, niName);
+      if (!page) {
         esPill.append(document.createTextNode(ip));
         return;
       }
-      const family = report === "ipv4_rib" ? "IPv4" : "IPv6";
-      const link = document.createElement("a");
-      link.className = "vrf-link";
-      link.href = "#";
-      link.textContent = ip;
-      link.title = niName
-        ? `Show ${family} routes in ${niName} with next-hop ${ip}`
-        : `Show ${family} routes with next-hop ${ip}`;
-      link.addEventListener("click", (event) => {
-        event.preventDefault();
-        event.stopPropagation();
-        jumpToNextHopRib(ip, niName);
-      });
-      esPill.append(link);
+      const family = page.report === "ipv4_rib" ? "IPv4" : "IPv6";
+      esPill.append(
+        pageLink(
+          ip,
+          niName
+            ? `Show ${family} routes in ${niName} with next-hop ${ip}`
+            : `Show ${family} routes with next-hop ${ip}`,
+          page
+        )
+      );
     });
     esPill.append(document.createTextNode(es.slice(match.index + match[0].length)));
   }
@@ -5236,16 +5276,13 @@
   // the association is worth a control of its own rather than a link buried in
   // the text of a pill.
   function makeJumpButton(report, target, node, title) {
-    const button = document.createElement("button");
-    button.type = "button";
-    button.className = "pill pill-jump";
-    button.textContent = target;
-    button.title = title;
-    button.addEventListener("click", (event) => {
-      event.preventDefault();
-      jumpToVrf(report, target, node);
-    });
-    return button;
+    const link = document.createElement("a");
+    link.className = "pill pill-jump";
+    link.textContent = target;
+    link.title = title;
+    // In a tab of its own, the page the service is on; in place, the
+    // service itself, scrolled to and lit up.
+    return wireLink(link, `#${report}`, () => jumpToVrf(report, target, node));
   }
 
   function makeCollapsibleDetailSection(sectionKey, labelText, contentEl) {
@@ -6033,12 +6070,8 @@
                 const link = document.createElement("a");
                 link.className = "vrf-link";
                 link.textContent = macName;
-                link.href = "#";
                 link.title = `Jump to Bridge Domain ${macName}`;
-                link.addEventListener("click", (e) => {
-                  e.preventDefault();
-                  jumpToVrf("bridge_domains", macName, nodeName);
-                });
+                wireLink(link, "#bridge_domains", () => jumpToVrf("bridge_domains", macName, nodeName));
 
                 p.append(link);
                 const irb = /^(\s*\()(irb\S+)/.exec(restText);
@@ -6114,16 +6147,11 @@
               const kind = stateKind(peerState);
               if (kind) peerPill.classList.add(`pill-${kind}`);
 
-              const link = document.createElement("a");
-              link.className = "vrf-link";
-              link.textContent = peerAddr;
-              link.href = "#";
-              link.title = `Show BGP peer ${peerAddr} in ${row["IP-VRF"]} on ${nodeName}`;
-              link.addEventListener("click", (e) => {
-                e.preventDefault();
-                e.stopPropagation();
-                jumpToBgpPeer(nodeName, row["IP-VRF"], peerAddr);
-              });
+              const link = pageLink(
+                peerAddr,
+                `Show BGP peer ${peerAddr} in ${row["IP-VRF"]} on ${nodeName}`,
+                bgpPeerPage(nodeName, row["IP-VRF"], peerAddr)
+              );
 
               peerPill.append(link, document.createTextNode(` ${peerState}`));
               line.append(localPill, arrow, peerPill);
@@ -6397,22 +6425,22 @@
   // A jump to the report holding the rows an item was made of, filtered to
   // them on its node: the irb, the bridge-table entry, the RIB lookup.
   function lensLinkButton(link) {
-    const button = document.createElement("button");
-    button.type = "button";
-    button.className = "bd-report-jump-btn";
-    button.textContent = link.label;
     const report = state.reports.find((r) => r.name === link.report);
-    button.title = `Open ${report ? report.title : link.report}${link.node ? ` on ${link.node}` : ""}`;
-    if (!report) button.disabled = true;
-    button.addEventListener("click", (event) => {
-      event.preventDefault();
-      event.stopPropagation();
-      const filters = {};
-      for (const [column, value] of link.match || []) filters[column] = exactMatchPattern([value]);
-      const params = (link.params || []).length ? Object.fromEntries(link.params) : null;
-      jumpToFilteredReport(link.report, link.nis || [], link.node ? [link.node] : [], filters, params);
-    });
-    return button;
+    const title = `Open ${report ? report.title : link.report}${link.node ? ` on ${link.node}` : ""}`;
+    if (!report) {
+      // A report this server does not serve: named, but nowhere to go.
+      const label = document.createElement("span");
+      label.className = "bd-report-jump-btn is-disabled";
+      label.textContent = link.label;
+      label.title = title;
+      return label;
+    }
+    const filters = {};
+    for (const [column, value] of link.match || []) filters[column] = exactMatchPattern([value]);
+    const params = (link.params || []).length ? Object.fromEntries(link.params) : null;
+    return pageLink(link.label, title,
+      reportPage(link.report, link.nis || [], link.node ? [link.node] : [], filters, params),
+      "bd-report-jump-btn");
   }
 
   function lensItem(item) {
@@ -7275,13 +7303,7 @@
       for (const column of columns) {
         const value = row[column] ?? "";
         const td = document.createElement("td");
-        const linked = state.diff || !state.report
-          ? null
-          : state.report.name === "bgp_peers"
-            ? peerRoutesCell(row, column, value)
-            : state.report.name === "endpoints"
-              ? endpointCell(column, value)
-              : null;
+        const linked = state.diff ? null : linkedCell(row, column, value);
         if (linked) td.append(linked);
         else td.textContent = value;
         if (tone && column === toned.column) td.classList.add("tone-cell");
@@ -7579,7 +7601,14 @@
   }
   window.addEventListener("popstate", (event) => {
     const snap = event.state && event.state.page;
-    if (!snap || !state.reports.length) return;
+    if (!state.reports.length) return;
+    if (!snap) {
+      // A fragment typed or pasted into the address bar: no visit of ours,
+      // but a page all the same.
+      const page = pageFromUrl(location.hash);
+      if (page) goTo(page);
+      return;
+    }
     const idx = state.navStack.findIndex((entry) => entry.id === snap.id);
     if (idx >= 0) {
       state.navIndex = idx;

@@ -1767,6 +1767,8 @@ th.filtered::after {
 }
 
 .bd-report-jump-btn {
+  display: inline-block;
+  text-decoration: none;
   background: var(--accent-soft);
   color: var(--accent);
   border: 1px solid rgba(var(--accent-rgb), 0.35);
@@ -1782,6 +1784,15 @@ th.filtered::after {
   background: var(--accent);
   color: #000;
   border-color: var(--accent);
+}
+
+.bd-report-jump-btn.is-disabled,
+.bd-report-jump-btn.is-disabled:hover {
+  background: var(--accent-soft);
+  color: var(--accent);
+  border-color: rgba(var(--accent-rgb), 0.35);
+  cursor: default;
+  opacity: 0.5;
 }
 
 .bd-report-jump-btn:focus-visible {
@@ -2147,7 +2158,8 @@ th.filtered::after {
   font-size: 11px;
 }
 
-button.pill-jump {
+.pill-jump {
+  text-decoration: none;
   background: var(--accent-soft);
   color: var(--accent);
   border: 1px solid rgba(var(--accent-rgb), 0.4);
@@ -2158,7 +2170,7 @@ button.pill-jump {
   transition: all var(--transition-fast);
 }
 
-button.pill-jump:hover {
+.pill-jump:hover {
   background: var(--accent);
   color: #000;
 }
