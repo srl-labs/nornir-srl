@@ -31,7 +31,7 @@ from .fabric import collect_fabric_state as collect_lens_state
 from .history import DEFAULT_RETENTION_DAYS
 from .lenses import LensSpec, get_lens
 from .records import as_dict
-from .reports import ReportSpec, get_report
+from .reports import ReportSpec, fabric_args, get_report
 from .rows import NodeRows, Row, Table as ReportTable, cell, clean_columns, extract, pass_filter
 from .utils.logging_config import setup_logging
 from . import __version__
@@ -123,11 +123,11 @@ def print_structured(
     rows: List[Dict[str, Any]],
     output_format: OutputFormat,
 ) -> None:
-    """Print data in JSON, YAML, or CSV format."""
-    if not rows:
-        typer.echo("No data...")
-        return
+    """Print data in JSON, YAML, or CSV format.
 
+    Nothing found is still the format asked for - ``[]``, or a CSV header with
+    no rows - so whatever reads the output parses it either way.
+    """
     col_names = clean_columns(col_names)
     rows = [{clean_structured_key(k): v for k, v in row.items()} for row in rows]
 
@@ -153,7 +153,7 @@ TABLE_THEME = Theme(
 #: Wide or server-oriented columns shown in live/structured output but not CLI tables.
 CLI_TABLE_OMIT: Dict[str, FrozenSet[str]] = {
     "bgp_rib": frozenset({"communities"}),
-    "bgp_peers": frozenset({"local-address", "local-port"}),
+    "bgp_peers": frozenset({"local-address"}),
     # The port state streams alongside the counters on the server; the CLI's
     # two samples read only the counters, so here these would always be blank.
     "ifstats": frozenset({"oper-state", "down-reason"}),
@@ -500,6 +500,9 @@ def main(
         ", ".join(sorted(target.inventory.hosts)),
     )
     ctx.obj["target"] = target
+    # The whole inventory, for the reports that ask which neighbours are
+    # the fabric's whatever the filter selected.
+    ctx.obj["fabric"] = fabric
     ctx.obj["i_filter"] = resolved_filter
     ctx.obj["box_type"] = box_type.upper() if box_type else None
     ctx.obj["output"] = output
@@ -547,7 +550,9 @@ def run_query(
     )
     started = time.perf_counter()
     result = target.run(
-        task=_task_for(spec, params), name=spec.resource, raise_on_error=False
+        task=_task_for(spec, {**params, **fabric_args(spec, ctx.obj["fabric"].inventory.hosts)}),
+        name=spec.resource,
+        raise_on_error=False,
     )
     logger.debug(
         "report '%s' finished in %.3fs, %d/%d node(s) failed: %s",
@@ -699,11 +704,9 @@ def print_records(
 
     A record is what a lens found, with its lists as lists and its counts as
     numbers; the row a table makes of it joins and truncates those for a
-    reader. Whatever reads the output by machine wants the former.
+    reader. Whatever reads the output by machine wants the former. Nothing
+    found is ``[]``, which parses, rather than a message, which does not.
     """
-    if not records:
-        typer.echo("No data...")
-        return
     if output_format == OutputFormat.JSON:
         typer.echo(json.dumps(records, indent=2, default=str))
     else:
@@ -1194,6 +1197,15 @@ def nd(
 
 
 @app.command()
+def endpoints(
+    ctx: typer.Context,
+    field_filter: Optional[List[str]] = FIELD_FILTER,
+) -> None:
+    """Displays the hosts ARP/ND know, with their VRFs, access port and ES"""
+    run_report(ctx, "endpoints", field_filter)
+
+
+@app.command()
 def bfd(
     ctx: typer.Context,
     field_filter: Optional[List[str]] = FIELD_FILTER,
@@ -1274,9 +1286,7 @@ def routing_pol(ctx: typer.Context) -> None:
         for policy in (r.result or {}).get(spec.resource) or []:
             policies.append({"Node": node, "routing-policy": policy})
 
-    if not policies:
-        typer.echo("No data...")
-        return
+    # Nothing found is still JSON or YAML: [].
     if ctx.obj["output"] == OutputFormat.JSON:
         typer.echo(json.dumps(policies, indent=2, default=str))
     else:

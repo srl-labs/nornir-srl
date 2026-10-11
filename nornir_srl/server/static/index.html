@@ -51,13 +51,24 @@
 
         <div id="side-split" class="side-split">
           <div class="side-block reports-block">
-            <input
-              id="report-search"
-              class="input"
-              type="search"
-              placeholder="Filter reports…"
-              autocomplete="off"
-            />
+            <div class="report-tools">
+              <input
+                id="report-search"
+                class="input"
+                type="search"
+                placeholder="Filter reports…"
+                autocomplete="off"
+              />
+              <button
+                id="report-fold-all"
+                class="btn nav-btn report-fold-all"
+                type="button"
+                title="Unfold every category"
+                aria-label="Unfold every category"
+              >
+                ▸
+              </button>
+            </div>
             <nav id="report-list" class="report-list" aria-label="Reports"></nav>
           </div>
           <div
@@ -238,7 +249,7 @@
 
         <div id="overview-dashboard" class="dashboard-wrap" hidden>
           <div class="kpi-grid">
-            <div class="kpi-card" id="kpi-card-health" style="cursor: pointer;" title="Click to view the incidents">
+            <div class="kpi-card" id="kpi-card-health">
               <div class="kpi-header">
                 <span class="kpi-title">Fabric Health</span>
                 <span class="kpi-icon">🩺</span>
@@ -295,7 +306,7 @@
                 <span class="state-down" id="kpi-itf-errors">0 errors/discards</span>
               </div>
             </div>
-            <div class="kpi-card" id="kpi-card-bd" style="cursor: pointer;" title="Click to view Bridge Domains report">
+            <div class="kpi-card" id="kpi-card-bd">
               <div class="kpi-header">
                 <span class="kpi-title">Bridge Domains</span>
                 <span class="kpi-icon" aria-hidden="true">
@@ -311,7 +322,7 @@
                 <span class="muted" id="kpi-bd-instances"></span>
               </div>
             </div>
-            <div class="kpi-card" id="kpi-card-routers" style="cursor: pointer;" title="Click to view Routers report">
+            <div class="kpi-card" id="kpi-card-routers">
               <div class="kpi-header">
                 <span class="kpi-title">Routers</span>
                 <span class="kpi-icon" aria-hidden="true">
@@ -330,7 +341,6 @@
             <div
               class="kpi-card"
               id="kpi-card-telemetry"
-              style="cursor: pointer;"
               title="Click for each node's activity. gNMI paths: what the reports in use read, on every node - each node has one Subscribe RPC carrying its paths. Streaming: delivered by the subscription. Pending: empty when first read, served by short-lived Gets until they fill. Polled: left out of a subscription for room. Backlog: the most notifications one node has waiting to be applied - past the limit the server is not keeping up, and stops ageing entries out."
             >
               <div class="kpi-header">

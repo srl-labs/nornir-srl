@@ -882,6 +882,27 @@ FLAP_THRESHOLD = 3
 FLAP_WINDOW = 600.0
 
 
+def _mac_of(binding: str) -> str:
+    """The MAC of an ARP/ND observation, ``aa:bb:.. on irb0.1``."""
+    return binding.split(" on ", 1)[0]
+
+
+def _flaps(change: Change) -> bool:
+    """Whether *change* is a transition a flap is counted from.
+
+    An ARP or ND cache learning and ageing out entries is doing its job: an
+    idle host's address goes when its timer runs out and comes back with its
+    next packet, and a multihomed host's does so on every node of its
+    segment at once. What flaps is an address answering from another MAC -
+    a duplicate address, or two hosts taking turns - so only that counts.
+    """
+    if change.kind not in FLAP_KINDS:
+        return False
+    if change.kind in _NEIGHBOR_KINDS:
+        return ABSENT not in (change.before, change.after) and _mac_of(change.before) != _mac_of(change.after)
+    return True
+
+
 @dataclass(frozen=True)
 class Flap:
     """One thing that changed state too often, lately."""
@@ -906,7 +927,7 @@ def flaps(
     now = time.time() if now is None else now
     grouped: Dict[Tuple[str, str, str], List[Change]] = {}
     for change in changes:
-        if change.kind in FLAP_KINDS and now - change.at <= window:
+        if _flaps(change) and now - change.at <= window:
             grouped.setdefault((change.node, change.kind, change.subject), []).append(change)
     found = []
     for (node, kind, subject), seen in sorted(grouped.items()):

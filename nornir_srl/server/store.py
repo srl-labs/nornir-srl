@@ -25,7 +25,7 @@ from ..history import DEFAULT_RETENTION_DAYS, HistoryStore
 from ..connections.layer2 import stamp_underlay_sites
 from ..lenses import LensSpec
 from ..records import as_dict
-from ..reports import ReportSpec, SubscriptionSpec, get_report, reading_reports, subscription_mode
+from ..reports import ReportSpec, SubscriptionSpec, fabric_args, get_report, reading_reports, subscription_mode
 from ..rows import cell, clean_columns, flatten, merge_fields, sub_item_keys
 from .devices import CachedDevice, DirectDevice, RecordingDevice
 from .readings import NOT_RECORDED, Recorder, TapDevice, TapDirectDevice
@@ -878,7 +878,7 @@ class FabricStore:
             return response
 
         recorder = RecordingDevice(stream.device, read, lookup)
-        report.getter(recorder, **(params or {}))
+        report.getter(recorder, **(params or {}), **fabric_args(report, self.nornir.inventory.hosts))
         interval = self.sample_interval or report.sample_interval
         return [
             SubscriptionSpec(path=path, datatype=datatype, mode=subscription_mode(path), sample_interval=interval)
@@ -1177,7 +1177,7 @@ class FabricStore:
                 if recorder is None or report.name in NOT_RECORDED
                 else TapDevice(stream, recorder.for_report(name, report.name, getattr(stream.device, "capabilities", None)))
             )
-            result = report.getter(device, **(params or {}))
+            result = report.getter(device, **(params or {}), **fabric_args(report, self.nornir.inventory.hosts))
         except Exception as exc:  # noqa: BLE001 - reported per node in the UI
             logger.debug(
                 "%s: report '%s' failed: %s", name, report.name, exc, exc_info=exc
@@ -1802,7 +1802,7 @@ class FabricStore:
         for stream in streams:
             snapshot = stream.snapshot_paths(_report_paths("overview"))
             itfs = snapshot.get("interface")
-            _tally_interfaces(health, itfs, count_errors=stream.name not in virtual)
+            _tally_interfaces(health, itfs, count_errors=stream.name not in virtual, node=stream.name)
             _tally_network_instances(health, snapshot.get("network-instance"), itfs)
 
         summary = self._health_summary(inv_filter, names, wait=deadline - time.time())
@@ -1825,6 +1825,10 @@ class FabricStore:
                 "total": health.itf_total,
                 "down": health.itf_down,
                 "errors": health.itf_errors,
+                # The [node, interface] pairs behind the two counts, for the
+                # card to link to exactly those rows.
+                "down_ports": sorted(health.itf_down_ports),
+                "error_ports": sorted(health.itf_error_ports),
             },
             "bridge_domains": _roll_up(health.bridge_domains),
             "routers": _roll_up(health.routers),
@@ -1862,6 +1866,7 @@ class FabricStore:
             "findings": sum(len(i.findings) for i in open_),
             "acknowledged": len(incidents) - len(open_),
             "worst": open_[0].title if open_ else "",
+            "worst_id": open_[0].id if open_ else "",
             "changes_15m": len(recent),
             "failures_15m": sum(1 for c in recent if c.severity == "error"),
             "baseline_at": baseline.at if baseline else None,
@@ -2032,6 +2037,9 @@ class _Health:
     itf_total: int = 0
     itf_down: int = 0
     itf_errors: int = 0
+    #: (node, interface) of each port counted in ``itf_down`` / ``itf_errors``.
+    itf_down_ports: List[Tuple[str, str]] = field(default_factory=list)
+    itf_error_ports: List[Tuple[str, str]] = field(default_factory=list)
     #: (service name, state) per node, rolled up by :func:`_roll_up`.
     bridge_domains: List[Tuple[str, str]] = field(default_factory=list)
     routers: List[Tuple[str, str]] = field(default_factory=list)
@@ -2063,7 +2071,7 @@ def _is_configured(itf: Dict[str, Any], oper_state: str) -> bool:
     return isinstance(ethernet, dict) and bool(ethernet.get("aggregate-id"))
 
 
-def _tally_interfaces(health: _Health, itfs: Any, count_errors: bool = True) -> None:
+def _tally_interfaces(health: _Health, itfs: Any, count_errors: bool = True, node: str = "") -> None:
     """Count the configured interfaces of one node by health."""
     if not isinstance(itfs, list):
         return
@@ -2081,6 +2089,7 @@ def _tally_interfaces(health: _Health, itfs: Any, count_errors: bool = True) -> 
         # healthy multi-homed fabric.
         if oper_state == "down" and not is_intent(itf.get("oper-down-reason")):
             health.itf_down += 1
+            health.itf_down_ports.append((node, str(itf.get("name", ""))))
         stats = itf.get("statistics", {})
         if not count_errors or not isinstance(stats, dict):
             continue
@@ -2092,6 +2101,7 @@ def _tally_interfaces(health: _Health, itfs: Any, count_errors: bool = True) -> 
                 continue
         if errors > 0:
             health.itf_errors += 1
+            health.itf_error_ports.append((node, str(itf.get("name", ""))))
 
 
 def _route_targets(ni: Dict[str, Any]) -> List[str]:
@@ -2210,26 +2220,34 @@ def _tally_network_instances(health: _Health, nis: Any, itfs: Any) -> None:
             )
 
 
-def _roll_up(instances: List[Tuple[str, str]]) -> Dict[str, int]:
-    """Group per-node service instances into fabric-wide service health."""
+def _roll_up(instances: List[Tuple[str, str]]) -> Dict[str, Any]:
+    """Group per-node service instances into fabric-wide service health.
+
+    With the names of the services that are degraded and down - their
+    route-targets, as the services pages name them - for a link to them.
+    """
     by_name: Dict[str, List[str]] = {}
     for name, state in instances:
         by_name.setdefault(name, []).append(state)
-    up = degraded = down = 0
-    for states in by_name.values():
+    up = 0
+    degraded: List[str] = []
+    down: List[str] = []
+    for name, states in sorted(by_name.items()):
         up_count = sum(1 for s in states if s in _MEMBER_UP_STATES)
         if up_count == len(states):
             up += 1
         elif up_count == 0:
-            down += 1
+            down.append(name)
         else:
-            degraded += 1
+            degraded.append(name)
     return {
         "total": len(by_name),
         "up": up,
-        "degraded": degraded,
-        "down": down,
+        "degraded": len(degraded),
+        "down": len(down),
         "instances": len(instances),
+        "degraded_names": degraded,
+        "down_names": down,
     }
 
 

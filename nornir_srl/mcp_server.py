@@ -43,7 +43,7 @@ from .connections.helpers import clean_structured_key
 from .fabric import collect_fabric_state as collect_lens_state
 from .lenses import get_lens
 from .records import as_dict
-from .reports import ReportSpec, get_report
+from .reports import ReportSpec, fabric_args, get_report
 from .rows import extract
 
 logger = logging.getLogger(__name__)
@@ -158,11 +158,13 @@ def _error_row(_node: str, exception: Optional[BaseException]) -> Dict[str, Any]
 def _query(spec: ReportSpec, inv_filter: Optional[Dict[str, str]], **params: Any):
     """Run a report's getter across the filtered inventory."""
 
+    nornir = get_nornir()
+    args = {**params, **fabric_args(spec, nornir.inventory.hosts)}
+
     def task_func(task: Task) -> Result:
         device = task.host.get_connection(CONNECTION_NAME, task.nornir.config)
-        return Result(host=task.host, result=spec.getter(device, **params))
+        return Result(host=task.host, result=spec.getter(device, **args))
 
-    nornir = get_nornir()
     target = nornir.filter(**inv_filter) if inv_filter else nornir
     return target.run(task=task_func, name=spec.resource, raise_on_error=False)
 
@@ -874,6 +876,47 @@ def ipv6_neighbors(
 
 
 @mcp.tool()
+def endpoints(
+    inv_filter: Optional[str] = None,
+    field_filter: Optional[str] = None,
+) -> str:
+    """Get the hosts ARP and ND have entries for, placed in their services.
+
+    Neighbours on out-of-band ports (mgmt0), and on links to other nodes of
+    the inventory (a spine's neighbours, a leaf's uplinks), are left out, and
+    so are hosts learned over EVPN unless they are behind an ethernet-segment
+    this node has too (a multihomed host its ES peer learned).
+
+    A host that only bridges - a MAC a mac-vrf learned that no ARP or ND entry
+    names - is an object of its own, with an empty address, l3_interface and
+    ip_vrf. Use locate_address on an address or MAC to see every node that
+    knows it, including the ones left out here.
+
+    Returns one object per host per node: address, mac, origin
+    (dynamic/static/evpn...), state (ND only), l3_interface (the irb or routed
+    port the ARP/ND entry is on), subinterface (the access sub-interface the
+    host lives behind - where its MAC was learned, the routed port for a
+    routed neighbour, or this node's side of the segment for a host its ES
+    peer learned), ip_vrf and mac_vrf (an irb's bridge domain), learned
+    ('local', or 'remote' for a host the ES peer learned). esi and es name
+    the ethernet-segment the host is behind. lldp lists
+    the system-names LLDP hears on the host's port (a LAG's members, or this
+    node's side of the segment): what the host calls itself, where it runs LLDP.
+
+    Use this to answer 'which port and segment is this host on' for every
+    host at once; use locate_address for one address across the fabric.
+
+    Args:
+        inv_filter: Inventory filter as comma-separated key=value pairs (e.g. 'role=leaf,site=dc1').
+            Supports wildcards. Matches against node labels from the topology file; use
+            'show_topology' to see available keys. Omit to target all nodes.
+        field_filter: Field filter as comma-separated key=value pairs to filter output rows
+            (e.g. 'learned=remote'). Values are case-insensitive regexes.
+    """
+    return _run_report("endpoints", inv_filter, field_filter)
+
+
+@mcp.tool()
 def bfd_sessions(
     inv_filter: Optional[str] = None,
     field_filter: Optional[str] = None,
@@ -1550,6 +1593,10 @@ def trace_path(
     happened to take. A lookup in a VRF that resolves onto a tunnel hands off
     to the underlay towards its endpoint and resumes in the VRF at the far end,
     so a DCI path traces VXLAN to the gateway, MPLS across, and VXLAN again.
+    A MAC destination is walked through the bridge tables instead: a MAC behind
+    an ethernet-segment is aliased over every VTEP of that segment, one tunnel
+    each. A source address (IP or MAC) adds a hop-0 'ingress' record naming
+    the port and ethernet-segment its MAC is learned on.
 
     Use this for 'why does A not reach B': the hop whose outcome is 'no-route',
     'discard', 'unresolved' or 'dead-end' is where the path stops.
@@ -1558,7 +1605,9 @@ def trace_path(
     records share a hop number when the walk fans out over ECMP. Each has:
         hop, node, ni, address: where the lookup was done and what was looked
             up - the destination, or the VTEP being chased through the underlay.
-        outcome: 'forwarded' (out of egress to peer, where the walk goes on),
+        outcome: 'ingress' (hop 0: the source's MAC is learned on ingress, in
+            bridge_ni, over the segment esi), 'forwarded' (out of egress to
+            peer, where the walk goes on),
             'dead-end' (no LLDP neighbour on egress, so it cannot),
             'handed-off' (no LLDP neighbour on egress, but ARP/ND there
             resolves the next-hop: the packet leaves the fabric to gateway at
@@ -1569,7 +1618,8 @@ def trace_path(
             is decapsulated and looked up in resumes_in, the VRF there),
             'leaked' (the route was leaked from resumes_in, whose next-hops
             forward it; the walk goes on in that instance on the same node),
-            'delivered' (the destination is attached here), 'local-ip' (it is
+            'delivered' (the destination is attached here, or a MAC destination
+            is learned on egress, a port of this node), 'local-ip' (it is
             this node's own address), 'neighbor' or 'no-neighbor' (whether
             ARP/ND has the delivered address), 'discard' (a discard route
             drops it), 'unresolved' (the next-hop leads to no port or tunnel;
@@ -1578,15 +1628,20 @@ def trace_path(
         prefix, route_type, next_hops: the route that matched.
         egress: the subinterface, or 'vxlan:<vtep>' over the overlay.
         peer, peer_port: the node on the other end of that cable.
-        tunnel, endpoint, resumes_in, mac, origin, visited: filled for the
-            outcomes named.
+        esi, segments: the ethernet-segment the source enters on (ingress), a
+            MAC destination is aliased over (tunnel, one per VTEP of the
+            segment) or is delivered on (delivered).
+        tunnel, endpoint, resumes_in, mac, origin, visited, ingress, bridge_ni:
+            filled for the outcomes named.
     Plus "not_collected" when a node's report could not be read.
 
     Args:
-        source: The node to start from, or an address attached to one.
-        destination: The address being forwarded towards.
+        source: The node to start from, or an IP or MAC address attached to one.
+        destination: The IP address being routed, or the MAC being bridged,
+            towards.
         ni: Network instance to look the destination up in. Defaults to 'default'
-            (the underlay); name the IP-VRF for a tenant address.
+            (the underlay); name the IP-VRF for a tenant address, or the mac-vrf
+            for a MAC (with 'default', the source's own or any that has it).
         inv_filter: Inventory filter as comma-separated key=value pairs. A filter
             that excludes a node the path goes through will truncate the walk there.
     """

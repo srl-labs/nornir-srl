@@ -41,6 +41,7 @@
   const el = (id) => document.getElementById(id);
   const dom = {
     reportSearch: el("report-search"),
+    reportFoldAll: el("report-fold-all"),
     reportList: el("report-list"),
     sideSplit: el("side-split"),
     sideSplitter: el("side-splitter"),
@@ -197,8 +198,9 @@
     colFilters: new Map(),
     colWidths: new Map(),
     reportParams: new Map(), // the selected report's own arguments, e.g. the RIB LPM address
-    collapsedGroups: loadCollapsedGroups(), // sidebar categories folded away, kept per browser
+    collapsedGroups: new Set(), // sidebar categories folded away; every one on page load
     networkInstances: [], // the fabric's instances, for an argument that is one of them
+    serviceNames: new Set(), // the fabric's mac-vrfs and ip-vrfs, for a cell naming one to link to
     tree: null, // a lens's answer as cards, alongside its rows
     records: null, // a lens's answer as the objects it found
     graph: null, // a lens's answer as a graph, where it has one (the path walk)
@@ -227,6 +229,10 @@
     // whether it is acknowledged: a card starts collapsed, and collapses again
     // when it is acknowledged.
     seenIncidentCards: new Set(),
+    // The incident a link asked to see, opened and scrolled to once drawn.
+    focusIncident: null,
+    // The node a link asked to pick on the topology, picked once drawn.
+    pendingTopoNode: null,
     collapsedSections: new Set(),
     navStack: [],
     navIndex: -1,
@@ -419,6 +425,30 @@
     return Boolean(report && report.kind === "lens");
   }
 
+  // The fabric's services - its mac-vrfs and ip-vrfs - by name, for a cell
+  // naming one to link to it. Asked once in a while: they seldom change.
+  const SERVICE_NAMES_TTL_MS = 60000;
+  let serviceNamesAt = 0;
+
+  async function loadServiceNames() {
+    if (Date.now() - serviceNamesAt < SERVICE_NAMES_TTL_MS) return;
+    serviceNamesAt = Date.now();
+    try {
+      const res = await fetch("/api/network-instances");
+      if (!res.ok) return;
+      const instances = (await res.json()).network_instances || [];
+      const names = new Set(
+        instances.filter((ni) => ni.type === "mac-vrf" || ni.type === "ip-vrf").map((ni) => ni.name)
+      );
+      const before = [...state.serviceNames].sort().join(",");
+      state.serviceNames = names;
+      // Rows drawn before the names were in are drawn again, linked.
+      if ([...names].sort().join(",") !== before && state.report && !isPanelReport(state.report.name)) renderBody();
+    } catch {
+      serviceNamesAt = 0;
+    }
+  }
+
   // The arguments a lens cannot answer without, still to be typed.
   function missingParams() {
     const specs = (state.report && state.report.params) || [];
@@ -440,6 +470,7 @@
   // The chip saying a page is about some nodes only, and letting it be about
   // all of them again.
   function renderScope() {
+    refreshNodeLinks();
     const nodes = state.scopeNodes;
     dom.scopeChip.hidden = !nodes.length;
     if (!nodes.length) return;
@@ -1009,6 +1040,7 @@
     state.reportParams.clear();
     renderReportParams();
     saveReportPreferences();
+    syncCurrentVisit();
     updateFilterUI();
     renderHead();
     renderBody();
@@ -1024,6 +1056,8 @@
     const data = await res.json();
     state.reports = data.reports;
     state.fabric = data.topo_name || "";
+    // The page starts with every category folded.
+    state.collapsedGroups = listedCategories();
     dom.version.textContent = "v" + data.version;
     if (dom.fabricName) {
       const clab = data.fabric_source === "clab";
@@ -1054,51 +1088,31 @@
     } catch (_err) {}
 
     // A lens is asked something, and a walk worth sharing is one with its
-    // arguments in the link: #path?source=leaf1&destination=10.0.0.1&ni=vrf.
-    const [wanted, query] = location.hash.replace(/^#/, "").split("?", 2);
-    const initial = state.reports.find((r) => r.name === wanted) || state.reports[0];
-    if (initial) {
-      selectReport(initial);
-      const scoped = query ? (new URLSearchParams(query).get("node") || "").split(",").filter(Boolean) : [];
-      if (scoped.length) {
-        state.scopeNodes = scoped;
-        renderReportParams();
-        if (!(initial.params || []).length) {
-          connect();
-          syncCurrentVisit();
-        }
-      }
-      if (query && (initial.params || []).length) {
-        const given = new URLSearchParams(query);
-        for (const spec of initial.params) {
-          const value = (given.get(spec.name) || "").trim();
-          if (value) state.reportParams.set(spec.name, value);
-        }
-        renderReportParams();
-        updateFilterUI();
-        connect();
-        syncCurrentVisit();
-      }
+    // arguments in the link: #path?source=leaf1&destination=10.0.0.1&ni=vrf;
+    // a filtered table has its filters in it: #bgp_peers?f.state=down.
+    const page = pageFromUrl(location.hash);
+    state.foldingOnLoad = true;
+    try {
+      if (page) goTo(page);
+      else if (state.reports[0]) selectReport(state.reports[0]);
+    } finally {
+      state.foldingOnLoad = false;
     }
   }
 
-  // Folded sidebar groups are a per-browser convenience: kept when the
-  // browser lets us, and an empty set when it does not.
-  function loadCollapsedGroups() {
-    try {
-      const raw = JSON.parse(localStorage.getItem("fcli-collapsed-groups") || "[]");
-      return new Set(Array.isArray(raw) ? raw : []);
-    } catch (_err) {
-      return new Set();
-    }
+  function listedCategories() {
+    return new Set(state.reports.filter((r) => r.listed !== false && r.category).map((r) => r.category));
   }
 
-  function saveCollapsedGroups() {
-    try {
-      localStorage.setItem("fcli-collapsed-groups", JSON.stringify([...state.collapsedGroups]));
-    } catch (_err) {
-      /* storage unavailable: folding lasts as long as the page */
-    }
+  // One button folds every category, or unfolds them all once all are folded.
+  function syncFoldAll() {
+    if (!dom.reportFoldAll) return;
+    const categories = listedCategories();
+    const allFolded = [...categories].every((c) => state.collapsedGroups.has(c));
+    const label = allFolded ? "Unfold every category" : "Fold every category";
+    dom.reportFoldAll.textContent = allFolded ? "▸" : "▾";
+    dom.reportFoldAll.title = label;
+    dom.reportFoldAll.setAttribute("aria-label", label);
   }
 
   function renderReportList() {
@@ -1144,7 +1158,6 @@
       toggle.addEventListener("click", () => {
         if (state.collapsedGroups.has(category)) state.collapsedGroups.delete(category);
         else state.collapsedGroups.add(category);
-        saveCollapsedGroups();
         renderReportList();
       });
       heading.append(toggle);
@@ -1167,11 +1180,108 @@
       }
       dom.reportList.append(section);
     }
+    syncFoldAll();
   }
 
   const loadOverview = panelPoller(fetchOverview);
 
   /** Draw the dashboard; returns whether the server is still reading for it. */
+  /* ---------------------------------------------------------- KPI links */
+
+  // A card opens the report it counts; the counts on it that are worth a look
+  // of their own - what is down, degraded, failing - open the rows behind
+  // just them. A card holds links, so it cannot be one itself: it acts as one.
+  function kpiCardLink(card, page, title) {
+    if (!card) return;
+    const href = pageHref(page);
+    card.classList.add("kpi-clickable");
+    card.tabIndex = 0;
+    card.setAttribute("role", "link");
+    if (title) card.title = title;
+    const inNewTab = (event) => event.ctrlKey || event.metaKey || event.shiftKey || event.button === 1;
+    card.addEventListener("click", (event) => {
+      if (event.target.closest("a")) return;
+      if (inNewTab(event)) window.open(href, "_blank", "noopener");
+      else goTo(page);
+    });
+    card.addEventListener("auxclick", (event) => {
+      if (event.button === 1 && !event.target.closest("a")) window.open(href, "_blank", "noopener");
+    });
+    card.addEventListener("keydown", (event) => {
+      if (event.target !== card || (event.key !== "Enter" && event.key !== " ")) return;
+      event.preventDefault();
+      goTo(page);
+    });
+  }
+
+  /**
+   * *el* reading *parts* in turn: a string is text, and { text, page, title }
+   * a link to *page* (text when there is no page). Left alone when that is
+   * what it already says, so a poll does not take the focus or the hover off
+   * a link.
+   */
+  function setKpiParts(el, parts) {
+    if (!el) return;
+    const shown = parts.filter((part) => (typeof part === "string" ? part : part.text));
+    const key = JSON.stringify(
+      shown.map((part) =>
+        typeof part === "string" ? part : [part.text, part.page ? pageHref(part.page) : "", part.title, part.key || ""]
+      )
+    );
+    if (el.dataset.kpi === key) return;
+    el.dataset.kpi = key;
+    el.replaceChildren(...shown.map(kpiPart));
+  }
+
+  // A part of a KPI line: text, or a link to its page - gone to in place by
+  // its own *go* where it has one, the page in a new tab all the same.
+  function kpiPart(part) {
+    if (typeof part === "string" || !part.page) return document.createTextNode(typeof part === "string" ? part : part.text);
+    if (!part.go) return pageLink(part.text, part.title || "", part.page, "kpi-link");
+    const link = document.createElement("a");
+    link.className = "kpi-link";
+    link.textContent = part.text;
+    if (part.title) link.title = part.title;
+    return wireLink(link, pageHref(part.page), part.go);
+  }
+
+  /** *el* reading *prefix* and then *text*, a link to *page* when there is one; nothing without *text*. */
+  function setKpiText(el, text, page = null, title = "", prefix = "") {
+    setKpiParts(el, text ? [prefix, { text, page, title }] : []);
+  }
+
+  /** The interfaces table on exactly *ports* - [node, interface] pairs. */
+  function portsPage(ports) {
+    const nodes = ports.map(([node]) => node);
+    const names = ports.map(([, name]) => name);
+    return reportPage("ifstats", [], nodes, { interface: exactMatchPattern(names) });
+  }
+
+  /** A services page - bridge_domains or routers - on the services named. */
+  function servicesPage(report, names) {
+    const column = report === "routers" ? "Router" : "Bridge Domain";
+    return reportPage(report, [], [], { [column]: exactMatchPattern(names) });
+  }
+
+  // A BGP session the peers table does not show as up.
+  const BGP_NOT_UP = "^(?!up$|established$)";
+
+  // The incident a link asked to see: its card is opened and scrolled to.
+  function focusIncident(id) {
+    state.focusIncident = id;
+    // A card is what is asked for: the incidents open as cards.
+    try {
+      localStorage.setItem("fcli-viewmode-incidents", "tree");
+    } catch (_err) {}
+    if (state.report && state.report.name === "incidents") {
+      state.viewMode = "tree";
+      dom.viewModeBtn.textContent = viewModeLabel();
+      renderBody();
+      return;
+    }
+    goTo({ report: "incidents", filters: null, params: null, scope: [] });
+  }
+
   async function fetchOverview() {
     if (!state.report || state.report.name !== "overview") return false;
     try {
@@ -1190,12 +1300,23 @@
       dom.kpiNodesTotal.textContent = data.nodes.total;
       dom.kpiNodesConnected.textContent = `${data.nodes.connected} connected`;
       dom.kpiNodesStreaming.textContent = `${data.nodes.streaming} streaming`;
-      dom.kpiNodesUnreachable.textContent = `${data.nodes.unreachable} unreachable`;
+      setKpiText(
+        dom.kpiNodesUnreachable,
+        `${data.nodes.unreachable} unreachable`,
+        data.nodes.unreachable > 0 ? { report: "activity", filters: null, params: null, scope: [] } : null,
+        "What each node streams, and which ones do not answer"
+      );
 
       dom.kpiBgpEstablished.textContent = data.bgp.established;
       dom.kpiBgpSub.textContent = `${data.bgp.established} established`;
       dom.kpiBgpTotal.textContent = `${data.bgp.total} total`;
-      dom.kpiBgpDown.textContent = data.bgp.down > 0 ? ` · ${data.bgp.down} down` : "";
+      setKpiText(
+        dom.kpiBgpDown,
+        data.bgp.down > 0 ? `${data.bgp.down} down` : "",
+        reportPage("bgp_peers", [], [], { state: BGP_NOT_UP }),
+        "The BGP sessions that are not established",
+        " · "
+      );
 
       if (dom.kpiCardNodes) {
         dom.kpiCardNodes.classList.remove("kpi-ok", "kpi-warn", "kpi-err");
@@ -1235,14 +1356,38 @@
       }
 
       dom.kpiItfTotal.textContent = data.interfaces.total;
-      dom.kpiItfDown.textContent = `${data.interfaces.down} oper down`;
-      dom.kpiItfErrors.textContent = `${data.interfaces.errors} errors/discards`;
+      const downPorts = data.interfaces.down_ports || [];
+      const errorPorts = data.interfaces.error_ports || [];
+      setKpiText(
+        dom.kpiItfDown,
+        `${data.interfaces.down} oper down`,
+        downPorts.length ? portsPage(downPorts) : null,
+        "The interfaces that are down, not counting ports held down on purpose"
+      );
+      setKpiText(
+        dom.kpiItfErrors,
+        `${data.interfaces.errors} errors/discards`,
+        errorPorts.length ? portsPage(errorPorts) : null,
+        "The interfaces with error or discarded packets"
+      );
 
       if (data.bridge_domains) {
         dom.kpiBdTotal.textContent = data.bridge_domains.total;
         dom.kpiBdUp.textContent = `${data.bridge_domains.up} up`;
-        dom.kpiBdDegraded.textContent = data.bridge_domains.degraded > 0 ? ` · ${data.bridge_domains.degraded} degraded` : "";
-        dom.kpiBdDown.textContent = data.bridge_domains.down > 0 ? ` · ${data.bridge_domains.down} down` : "";
+        setKpiText(
+          dom.kpiBdDegraded,
+          data.bridge_domains.degraded > 0 ? `${data.bridge_domains.degraded} degraded` : "",
+          servicesPage("bridge_domains", data.bridge_domains.degraded_names || []),
+          "The bridge domains up on some of their nodes only",
+          " · "
+        );
+        setKpiText(
+          dom.kpiBdDown,
+          data.bridge_domains.down > 0 ? `${data.bridge_domains.down} down` : "",
+          servicesPage("bridge_domains", data.bridge_domains.down_names || []),
+          "The bridge domains up on none of their nodes",
+          " · "
+        );
         dom.kpiBdInstances.textContent = ` (${data.bridge_domains.instances} inst)`;
 
         if (dom.kpiCardBd) {
@@ -1262,8 +1407,20 @@
       if (data.routers) {
         dom.kpiRoutersTotal.textContent = data.routers.total;
         dom.kpiRoutersUp.textContent = `${data.routers.up} up`;
-        dom.kpiRoutersDegraded.textContent = data.routers.degraded > 0 ? ` · ${data.routers.degraded} degraded` : "";
-        dom.kpiRoutersDown.textContent = data.routers.down > 0 ? ` · ${data.routers.down} down` : "";
+        setKpiText(
+          dom.kpiRoutersDegraded,
+          data.routers.degraded > 0 ? `${data.routers.degraded} degraded` : "",
+          servicesPage("routers", data.routers.degraded_names || []),
+          "The routers up on some of their nodes only",
+          " · "
+        );
+        setKpiText(
+          dom.kpiRoutersDown,
+          data.routers.down > 0 ? `${data.routers.down} down` : "",
+          servicesPage("routers", data.routers.down_names || []),
+          "The routers up on none of their nodes",
+          " · "
+        );
         dom.kpiRoutersInstances.textContent = ` (${data.routers.instances} inst)`;
 
         if (dom.kpiCardRouters) {
@@ -1867,8 +2024,8 @@
           ? `checks running: ${loading.ready} of ${loading.total} report reads in (${Math.round((100 * loading.ready) / loading.total)}%)`
           : "checks running: connecting to the nodes…"
         : "checks not available";
-      dom.kpiHealthWorst.textContent = "";
-      dom.kpiHealthChanges.textContent = "";
+      setKpiParts(dom.kpiHealthWorst, []);
+      setKpiParts(dom.kpiHealthChanges, []);
       return;
     }
     dom.kpiHealthValue.textContent = health.incidents;
@@ -1878,22 +2035,49 @@
       : health.acknowledged
         ? `nothing open${acked}`
         : "no findings: every check passes";
-    dom.kpiHealthWorst.textContent = health.worst ? `worst: ${health.worst}` : "";
+    // In place, the incident's card itself, opened and scrolled to; in a tab
+    // of its own, the incidents.
+    const worstId = health.worst_id || "";
+    setKpiParts(
+      dom.kpiHealthWorst,
+      health.worst
+        ? [
+            "worst: ",
+            {
+              text: health.worst,
+              page: { report: "incidents", filters: null, params: null, scope: [] },
+              title: "Open this incident",
+              go: worstId ? () => focusIncident(worstId) : null,
+              key: worstId,
+            },
+          ]
+        : []
+    );
     dom.kpiCardHealth.classList.add(health.errors ? "kpi-err" : health.warnings ? "kpi-warn" : "kpi-ok");
     if (!health.watching) {
-      dom.kpiHealthChanges.textContent = "timeline off (--watch-interval 0)";
+      setKpiParts(dom.kpiHealthChanges, ["timeline off (--watch-interval 0)"]);
     } else {
       const baseline = health.baseline_at
         ? ` · baseline ${new Date(health.baseline_at * 1000).toLocaleTimeString()}`
         : " · baseline pending";
-      const failures = health.failures_15m ? ` (${health.failures_15m} failures)` : "";
       const checked = health.reading_since
         ? "checking now"
         : typeof health.age === "number"
           ? `checked ${ageText(health.age)}`
           : "";
-      dom.kpiHealthChanges.textContent =
-        `${checked ? checked + " · " : ""}${health.changes_15m} change(s) in 15 min${failures}${baseline}`;
+      const changes = (params) => ({ report: "changes", filters: null, params, scope: [] });
+      setKpiParts(dom.kpiHealthChanges, [
+        checked ? checked + " · " : "",
+        {
+          text: `${health.changes_15m} change(s) in 15 min`,
+          page: health.changes_15m ? changes({ since: "15m" }) : null,
+          title: "What changed in the last 15 minutes",
+        },
+        ...(health.failures_15m
+          ? [" (", { text: `${health.failures_15m} failures`, page: changes({ since: "15m", severity: "error" }), title: "The failures of the last 15 minutes" }, ")"]
+          : []),
+        baseline,
+      ]);
     }
   }
 
@@ -2001,10 +2185,21 @@
       }
       state.topoKey = key;
       renderTopology(graph);
+      pickPendingTopoNode();
       return loading;
     } catch (_err) {
       setLive("error", "error");
       return false;
+    }
+  }
+
+  /** Pick the node a link asked for, once the drawing it is on is there. */
+  function pickPendingTopoNode() {
+    const name = state.pendingTopoNode;
+    if (!name || !state.topology) return;
+    state.pendingTopoNode = null;
+    if ((state.topology.nodes || []).some((node) => node.name === name)) {
+      selectTopo({ kind: "node", id: name });
     }
   }
 
@@ -3193,6 +3388,8 @@
 
   function selectTopo(selection) {
     state.topoSelection = selection;
+    // The picked node is in the link to the page.
+    syncCurrentVisit();
     // Walking the peer list of a client can lead to a node of another fabric,
     // which is drawn on its own tab; go there rather than nowhere.
     if (selection && selection.kind === "node") {
@@ -3479,6 +3676,11 @@
       params: [...state.reportParams.entries()],
       scope: [...state.scopeNodes],
       viewMode: state.viewMode,
+      // The node picked on the topology, which a link can pick too.
+      select:
+        state.report.name === "topology" && state.topoSelection && state.topoSelection.kind === "node"
+          ? state.topoSelection.id
+          : "",
     };
   }
 
@@ -3501,6 +3703,7 @@
       if (value) state.reportParams.set(name, value);
     }
     state.scopeNodes = [...(snap.scope || [])];
+    state.pendingTopoNode = snap.select || null;
     if (snap.viewMode) state.viewMode = snap.viewMode;
     saveReportPreferences();
     if (snap.viewMode && state.report) {
@@ -3522,13 +3725,59 @@
     dom.navForward.title = next ? `Forward to ${next.title}` : "Forward";
   }
 
-  // The fragment names the page, and for a lens carries what it was asked.
+  // A column filter in the fragment: `f.<column>=<pattern>`.
+  const URL_FILTER = "f.";
+
+  // The fragment names the page, and carries what it was asked and what it
+  // is filtered on, so a page opened from a link - or a bookmark, or a
+  // reload - is the page that was looked at.
   function pageUrl(snap) {
     const params = new URLSearchParams();
     for (const [name, value] of snap.params || []) params.set(name, value);
     if ((snap.scope || []).length) params.set("node", snap.scope.join(","));
+    if (snap.select) params.set("select", snap.select);
+    for (const [column, pattern] of snap.filters || []) {
+      if (pattern) params.set(URL_FILTER + column, pattern);
+    }
     const query = params.toString();
     return "#" + snap.name + (query ? "?" + query : "");
+  }
+
+  /**
+   * The page a fragment names, as a jump to it: null for a report the server
+   * does not have. Its filters are null when the fragment has none, so the
+   * report opens with the ones it was last left with.
+   */
+  function pageFromUrl(hash) {
+    const [name, query] = String(hash || "").replace(/^#/, "").split("?", 2);
+    const report = state.reports.find((r) => r.name === name);
+    if (!report) return null;
+    const given = new URLSearchParams(query || "");
+    let filters = null;
+    for (const [key, value] of given) {
+      if (!key.startsWith(URL_FILTER)) continue;
+      filters = filters || {};
+      if (value) filters[key.slice(URL_FILTER.length)] = value;
+    }
+    const params = {};
+    for (const spec of report.params || []) {
+      const value = (given.get(spec.name) || "").trim();
+      if (value) params[spec.name] = value;
+    }
+    const scope = (given.get("node") || "").split(",").filter(Boolean);
+    const select = given.get("select") || "";
+    return { report: name, filters, params: Object.keys(params).length ? params : null, scope, select };
+  }
+
+  /** The fragment of a page to jump to - what a link to it points at. */
+  function pageHref(page) {
+    return pageUrl({
+      name: page.report,
+      filters: Object.entries(page.filters || {}),
+      params: Object.entries(page.params || {}),
+      scope: page.scope || [],
+      select: page.select || "",
+    });
   }
 
   function syncCurrentVisit() {
@@ -3537,10 +3786,12 @@
     snap.id = state.navStack[state.navIndex].id;
     state.navStack[state.navIndex] = snap;
     history.replaceState({ page: snap }, "", pageUrl(snap));
+    refreshNodeLinks();
   }
 
   function recordVisit() {
     if (!state.report) return;
+    refreshNodeLinks();
     const snap = currentNavSnap();
     const current = state.navStack[state.navIndex];
     if (current && navPageKey(current) === navPageKey(snap)) {
@@ -3568,11 +3819,19 @@
   function restoreNavSnap(snap) {
     const report = state.reports.find((r) => r.name === snap.name);
     if (!report) return;
+    if (state.report && state.report.name === snap.name && snap.name === "topology") {
+      state.pendingTopoNode = null;
+      selectTopo(snap.select ? { kind: "node", id: snap.select } : null);
+      updateNavButtons();
+      return;
+    }
     if (state.report && state.report.name === snap.name) {
-      const asked = JSON.stringify([...state.reportParams.entries()]);
+      // What the server is asked: the report's arguments, and its nodes.
+      const asked = () => JSON.stringify([[...state.reportParams.entries()], state.scopeNodes]);
+      const before = asked();
       applyNavSnap(snap);
       updateFilterUI();
-      if (JSON.stringify([...state.reportParams.entries()]) !== asked) {
+      if (asked() !== before) {
         renderReportParams();
         connect();
       }
@@ -3600,6 +3859,7 @@
     closeSideDrawer();
     // Whatever was being queried is not what is being looked at any more.
     endQuery();
+    loadServiceNames();
     if (state.loadStopped) {
       state.loadStopped = false;
       state.paused = false;
@@ -3615,7 +3875,8 @@
     dom.configDiffView.hidden = true;
     // A report opened from a link, the URL or history is never hidden in a
     // folded group: its group opens.
-    if (report.category && state.collapsedGroups.delete(report.category)) saveCollapsedGroups();
+    // The report opened as the page loads stays folded, like every group.
+    if (report.category && !state.foldingOnLoad) state.collapsedGroups.delete(report.category);
     // A comparison belongs to the report it was made of.
     state.diff = null;
     state.snapshots = [];
@@ -3634,6 +3895,8 @@
     state.windowSize = WINDOW_STEP;
     dom.title.textContent = report.title;
     dom.desc.textContent = report.description;
+    // The overview's cards are polled whatever Pause says: nothing to pause.
+    dom.pause.hidden = report.name === "overview";
     if (dom.baselineWrap) {
       dom.baselineWrap.hidden = report.name !== "changes";
       dom.baselineMenu.hidden = true;
@@ -4299,6 +4562,7 @@
           else state.colFilters.delete(column);
           state.windowSize = WINDOW_STEP;
           saveReportPreferences();
+          syncCurrentVisit();
           updateFilterUI();
           th.classList.toggle("filtered", Boolean(value));
           renderBody();
@@ -4681,9 +4945,12 @@
   function applyPendingFilters() {
     if (!state.pendingFilters) return;
     if (!state.report || state.report.name !== state.pendingFilters.report) return;
-    state.colFilters.clear();
-    for (const [column, pattern] of Object.entries(state.pendingFilters.filters || {})) {
-      if (pattern) state.colFilters.set(column, pattern);
+    // No filters at all - a link without any - keeps the ones the report has.
+    if (state.pendingFilters.filters) {
+      state.colFilters.clear();
+      for (const [column, pattern] of Object.entries(state.pendingFilters.filters)) {
+        if (pattern) state.colFilters.set(column, pattern);
+      }
     }
     // A jump about one node asks only that node, not the whole fabric.
     state.scopeNodes = [...(state.pendingFilters.scope || [])];
@@ -4726,14 +4993,38 @@
     return `(?:^|[^0-9])${e}(?=$|[^0-9])`;
   }
 
-  function jumpToFilteredReport(reportName, niNames, nodeNames, extraFilters, params, scope) {
+  /**
+   * A report opened on some network instances and nodes, with more column
+   * filters, its own arguments and the nodes it asks: the page a jump goes
+   * to, and a link points at.
+   */
+  function reportPage(reportName, niNames, nodeNames, extraFilters, params, scope) {
     const filters = {};
     const ni = tokenMatchPattern(niNames);
     const nodes = exactMatchPattern(nodeNames);
     if (ni) filters.NI = ni;
     if (nodes) filters.Node = nodes;
     Object.assign(filters, extraFilters || {});
-    state.pendingFilters = { report: reportName, filters, params: params || null, scope: scope || [] };
+    return { report: reportName, filters, params: params || null, scope: scope || [] };
+  }
+
+  function jumpToFilteredReport(reportName, niNames, nodeNames, extraFilters, params, scope) {
+    goTo(reportPage(reportName, niNames, nodeNames, extraFilters, params, scope));
+  }
+
+  /** Open *page* - see reportPage - as a visit of its own. */
+  function goTo(page) {
+    const reportName = page.report;
+    const params = page.params;
+    if (reportName === "topology") {
+      // The topology is not filtered: a link to it picks a node on it.
+      if (state.report && state.report.name === "topology") {
+        if (page.select) selectTopo({ kind: "node", id: page.select });
+        return;
+      }
+      state.pendingTopoNode = page.select || null;
+    }
+    state.pendingFilters = { ...page, scope: page.scope || [] };
 
     if (state.report && state.report.name === reportName) {
       syncCurrentVisit();
@@ -4757,18 +5048,34 @@
     }
   }
 
-  function makeReportJumpButton(label, title, reportName, niNames, nodeNames) {
-    const button = document.createElement("button");
-    button.type = "button";
-    button.className = "bd-report-jump-btn";
-    button.textContent = label;
-    button.title = title;
-    button.addEventListener("click", (event) => {
-      event.preventDefault();
+  /**
+   * *link* as a link to *href*: opened in a new tab or window, copied or
+   * bookmarked like any other, and a plain click goes there in place with
+   * *go* - without reloading the page and the streams it has open.
+   */
+  function wireLink(link, href, go) {
+    link.href = href;
+    link.addEventListener("click", (event) => {
+      // Never also a click on the card or the row it sits in.
       event.stopPropagation();
-      jumpToFilteredReport(reportName, niNames, nodeNames);
+      if (event.button !== 0 || event.ctrlKey || event.metaKey || event.shiftKey || event.altKey) return;
+      event.preventDefault();
+      go();
     });
-    return button;
+    return link;
+  }
+
+  /** A link to *page* - see reportPage - reading *text*. */
+  function pageLink(text, title, page, className = "vrf-link") {
+    const link = document.createElement("a");
+    link.className = className;
+    link.textContent = text;
+    if (title) link.title = title;
+    return wireLink(link, pageHref(page), () => goTo(page));
+  }
+
+  function makeReportJumpButton(label, title, reportName, niNames, nodeNames) {
+    return pageLink(label, title, reportPage(reportName, niNames, nodeNames), "bd-report-jump-btn");
   }
 
   function ribReportForAddress(ip) {
@@ -4779,21 +5086,22 @@
     return "";
   }
 
-  function jumpToNextHopRib(ip, niName) {
+  /** The routes using *ip* as their next-hop, or null for what is not an address. */
+  function nextHopRibPage(ip, niName) {
     const report = ribReportForAddress(ip);
     const nh = nextHopMatchPattern(ip);
-    if (!report || !nh) return;
-    jumpToFilteredReport(report, niName ? [niName] : [], [], { "next-hop": nh });
+    if (!report || !nh) return null;
+    return reportPage(report, niName ? [niName] : [], [], { "next-hop": nh });
   }
 
   /**
    * The routes exchanged with a peer in one family, as the node that peers
    * with it holds them: *direction* ``received`` or ``advertised``.
    */
-  function jumpToPeerRoutes(direction, nodeName, niName, peerAddress, family) {
+  function peerRoutesPage(direction, nodeName, niName, peerAddress, family) {
     // One peer of one node: the server is asked about that node alone, rather
     // than reading every node's RIB for a table filtered down in the browser.
-    jumpToFilteredReport(`bgp_${direction}_routes`, [niName], [nodeName], {}, { peer: peerAddress, family }, [nodeName]);
+    return reportPage(`bgp_${direction}_routes`, [niName], [nodeName], {}, { peer: peerAddress, family }, [nodeName]);
   }
 
   /**
@@ -4809,21 +5117,20 @@
   };
 
   /** The routes from a peer in one family that the node uses. */
-  function jumpToPeerActiveRoutes(nodeName, niName, peerAddress, family) {
+  function peerActiveRoutesPage(nodeName, niName, peerAddress, family) {
     // An unnumbered peer is fe80::1%ethernet-1/1.0; match it with or without
     // the interface it is scoped to.
     const address = peerAddress.split("%")[0];
     const peer = `^${escapeRegex(address)}(%\\S*)?$`;
     const target = ACTIVE_ROUTES_REPORTS[family];
     if (!target) {
-      jumpToFilteredReport("bgp_received_routes", [niName], [nodeName],
+      return reportPage("bgp_received_routes", [niName], [nodeName],
         { peer, st: BGP_RIB_USED_FILTER }, { peer: peerAddress, family }, [nodeName]);
-      return;
     }
     const [report, column] = target;
     // The peer as the RIB's neighbor key: the node picks its routes, rather
     // than the whole RIB being read for a table filtered in the browser.
-    jumpToFilteredReport(report, [niName], [nodeName],
+    return reportPage(report, [niName], [nodeName],
       { [column]: peer, st: BGP_RIB_USED_FILTER }, { neighbor: peerAddress }, [nodeName]);
   }
 
@@ -4839,35 +5146,193 @@
     const counts = /^(\d+)\/(\d+)\/(\d+)$/.exec(String(value));
     if (!peer || !row.Node || !family || !counts) return null;
     const [, rx, act, tx] = counts;
-    const part = (count, title, jump) => {
-      if (count === "0") return document.createTextNode(count);
-      const link = document.createElement("a");
-      link.className = "vrf-link";
-      link.href = "#";
-      link.textContent = count;
-      link.title = title;
-      link.addEventListener("click", (event) => {
-        event.preventDefault();
-        jump();
-      });
-      return link;
-    };
+    const part = (count, title, page) =>
+      count === "0" ? document.createTextNode(count) : pageLink(count, title, page);
     const cell = document.createDocumentFragment();
     cell.append(
       part(rx, `Show the ${family} routes ${peer} sent to ${row.Node}`,
-        () => jumpToPeerRoutes("received", row.Node, row.NI, peer, family)),
+        peerRoutesPage("received", row.Node, row.NI, peer, family)),
       document.createTextNode("/"),
       part(act, `Show the active ${family} routes ${row.Node} has from ${peer}`,
-        () => jumpToPeerActiveRoutes(row.Node, row.NI, peer, family)),
+        peerActiveRoutesPage(row.Node, row.NI, peer, family)),
       document.createTextNode("/"),
       part(tx, `Show the ${family} routes ${row.Node} sent to ${peer}`,
-        () => jumpToPeerRoutes("advertised", row.Node, row.NI, peer, family))
+        peerRoutesPage("advertised", row.Node, row.NI, peer, family))
     );
     return cell;
   }
 
-  function jumpToBgpPeer(nodeName, niName, peerAddress) {
-    jumpToFilteredReport("bgp_peers", [niName], [nodeName], {
+  /**
+   * An Endpoints 'IP' or 'MAC' cell linked to the where lens for that address:
+   * every node that knows it, not only the one this row is about. Null for
+   * any other cell, or an empty one - a host that only bridges has no IP.
+   */
+  function endpointCell(column, value) {
+    const address = String(value ?? "").trim();
+    if ((column !== "IP" && column !== "MAC") || !address) return null;
+    return pageLink(address, `Show every node that knows ${address}`,
+      reportPage("where", [], [], {}, { target: address }));
+  }
+
+  /**
+   * Table cells that are links to another report, by report: each makes a
+   * cell's content from its row, column and value, or returns null for a
+   * cell it leaves as text. A function under "*" is asked about the cells
+   * of every report, after the report's own.
+   */
+  const CELL_LINKS = {
+    bgp_peers: [peerRoutesCell, addressCell(["peer"], wherePage)],
+    endpoints: [(_row, column, value) => endpointCell(column, value)],
+    arp: [addressCell(["IPv4", "MAC"], wherePage)],
+    nd: [addressCell(["IPv6", "MAC"], wherePage)],
+    mac: [addressCell(["mac"], wherePage)],
+    bgp_rib_evpn_2: [addressCell(["IP", "MAC", "next-hop"], wherePage)],
+    ...Object.fromEntries(
+      ["bgp_rib_evpn_1", "bgp_rib_evpn_3", "bgp_rib_evpn_4", "bgp_rib_evpn_5", "bgp_rib_ipv4", "bgp_rib_ipv6",
+        "bgp_rib_l3vpn_v4", "bgp_rib_l3vpn_v6"].map((name) => [name, [addressCell(["next-hop"], wherePage)]])
+    ),
+    es: [addressCell(["ni-peers"], wherePage)],
+    es_dest: [addressCell(["vteps"], wherePage)],
+    vxlan: [addressCell(["destinations"], wherePage)],
+    bfd: [addressCell(["remote"], wherePage)],
+    ipv4_rib: [ribPrefixCell, addressCell(["next-hop"], nextHopPage)],
+    ipv6_rib: [ribPrefixCell, addressCell(["next-hop"], nextHopPage)],
+    "*": [nodeCell, instanceCell],
+  };
+
+  // An address as it stands in a cell: an IPv4 or IPv6 address, or a MAC.
+  const MAC_RE = /^[0-9a-f]{2}(?::[0-9a-f]{2}){5}$/i;
+  const IPV4_RE = /^\d{1,3}(?:\.\d{1,3}){3}$/;
+  const IPV6_RE = /^[0-9a-f]{0,4}(?::[0-9a-f]{0,4}){2,7}$/i;
+
+  function addressKind(token) {
+    if (MAC_RE.test(token)) return "mac";
+    if (IPV4_RE.test(token)) return "ipv4";
+    if (IPV6_RE.test(token) && /[0-9a-f]/i.test(token) && !token.includes(":::")) return "ipv6";
+    return "";
+  }
+
+  /**
+   * Where an address is known, across the fabric: null for one that says
+   * nothing beyond the link it is on - link-local, or unspecified.
+   */
+  function wherePage(address) {
+    if (/^fe80:/i.test(address) || address === "0.0.0.0" || address === "::") return null;
+    return reportPage("where", [], [], {}, { target: address });
+  }
+
+  /**
+   * The routes of the row's instance through next-hop *address*, in the RIB
+   * on screen: an IPv4 route can have an IPv6 next-hop. A link-local one is
+   * a neighbour of the row's node only.
+   */
+  function nextHopPage(address, row) {
+    const nodes = /^fe80:/i.test(address) && row.Node ? [row.Node] : [];
+    return reportPage(state.report.name, row.NI ? [row.NI] : [], nodes, { "next-hop": nextHopMatchPattern(address) });
+  }
+
+  const ADDRESS_TITLES = {
+    where: (address) => `Show every node that knows ${address}`,
+    ipv4_rib: (address, row) => `Show the routes${row.NI ? ` in ${row.NI}` : ""} via ${address}`,
+    ipv6_rib: (address, row) => `Show the routes${row.NI ? ` in ${row.NI}` : ""} via ${address}`,
+  };
+
+  /**
+   * A cell maker for *columns* whose cells hold addresses - one, or several
+   * among other text: each address is a link to *pageFor(address, row)*,
+   * the rest of the cell stays text. An address scoped to an interface
+   * (fe80::1%ethernet-1/1.0) is a link-local one, and stays text too.
+   */
+  function addressCell(columns, pageFor) {
+    const wanted = new Set(columns);
+    return (row, column, value) => {
+      if (!wanted.has(column)) return null;
+      const text = String(value ?? "");
+      if (!text || text === "-") return null;
+      const parts = text.split(/([\s,;()[\]]+)/);
+      const cell = document.createDocumentFragment();
+      let linked = false;
+      for (const part of parts) {
+        const page = part && addressKind(part) ? pageFor(part, row) : null;
+        if (!page) {
+          cell.append(document.createTextNode(part));
+          continue;
+        }
+        const title = (ADDRESS_TITLES[page.report] || ADDRESS_TITLES.where)(part, row);
+        cell.append(pageLink(part, title, page));
+        linked = true;
+      }
+      return linked ? cell : null;
+    };
+  }
+
+  /**
+   * A RIB 'Prefix' cell of a host route linked to the path a packet to that
+   * host takes from the row's node. A wider prefix is not one address to
+   * walk to, and stays text.
+   */
+  function ribPrefixCell(row, column, value) {
+    if (column !== "Prefix" || !row.Node) return null;
+    const [address, length] = String(value ?? "").split("/");
+    const kind = addressKind(address || "");
+    if (!(kind === "ipv4" && length === "32") && !(kind === "ipv6" && length === "128")) return null;
+    const params = { source: row.Node, destination: address };
+    if (row.NI) params.ni = row.NI;
+    return pageLink(value, `Walk the path from ${row.Node} to ${address}${row.NI ? ` in ${row.NI}` : ""}`,
+      reportPage("path", [], [], {}, params));
+  }
+
+  /**
+   * A 'Node' cell linked to the node: the report on screen for that node
+   * only, or for a lens the node on the topology. Not where the page is
+   * about that node alone already.
+   */
+  function nodeCell(row, column, value) {
+    const name = String(value ?? "").trim();
+    if (column !== "Node" || !name || name === "-") return null;
+    if (scopedReport() && state.scopeNodes.length === 1 && state.scopeNodes[0] === name) return null;
+    const title = scopedReport() ? `Show ${state.report.title} for ${name} only` : `Show ${name} on the topology`;
+    return pageLink(name, title, nodePage(name, { only: true }));
+  }
+
+  // The columns that name network-instances: one, or a comma list (an IRB
+  // sits in an ip-vrf and a mac-vrf).
+  const INSTANCE_COLUMNS = new Set(["NI", "assoc-ni", "IP-VRF", "MAC-VRF"]);
+
+  /**
+   * A network-instance cell with each service in it - a mac-vrf or an
+   * ip-vrf - linked to the Service lens: that service as every node that
+   * carries it sees it. The default instance is not a service, and stays text.
+   */
+  function instanceCell(_row, column, value) {
+    if (!INSTANCE_COLUMNS.has(column) || !state.serviceNames.size) return null;
+    const text = String(value ?? "");
+    const parts = text.split(/(,\s*)/);
+    if (!parts.some((part) => state.serviceNames.has(part))) return null;
+    const cell = document.createDocumentFragment();
+    for (const part of parts) {
+      cell.append(
+        state.serviceNames.has(part)
+          ? pageLink(part, `Show service ${part} on every node that carries it`,
+              reportPage("service", [], [], {}, { name: `^${escapeRegex(part)}$` }))
+          : document.createTextNode(part)
+      );
+    }
+    return cell;
+  }
+
+  /** A table cell as a link to the report that tells more, or null. */
+  function linkedCell(row, column, value) {
+    if (!state.report) return null;
+    for (const make of [...(CELL_LINKS[state.report.name] || []), ...CELL_LINKS["*"]]) {
+      const linked = make(row, column, value);
+      if (linked) return linked;
+    }
+    return null;
+  }
+
+  function bgpPeerPage(nodeName, niName, peerAddress) {
+    return reportPage("bgp_peers", [niName], [nodeName], {
       peer: exactMatchPattern([peerAddress]),
     });
   }
@@ -4880,9 +5345,9 @@
   }
 
   /** One interface of one node, in the report that lists it. */
-  function jumpToInterface(name, nodeName) {
+  function interfacePage(name, nodeName) {
     const [report, column] = interfaceReport(name);
-    jumpToFilteredReport(report, [], [nodeName], { [column]: exactMatchPattern([name]) });
+    return reportPage(report, [], [nodeName], { [column]: exactMatchPattern([name]) });
   }
 
   /**
@@ -4890,8 +5355,8 @@
    * worth seeing from all the nodes that share it. Its name is optional and
    * may be missing, its ESI never is.
    */
-  function jumpToEthernetSegment(esi) {
-    jumpToFilteredReport("es", [], [], { esi: exactMatchPattern([esi]) });
+  function ethernetSegmentPage(esi) {
+    return reportPage("es", [], [], { esi: exactMatchPattern([esi]) });
   }
 
   /** A full 10-byte ESI from the compressed one a label shows: `..` is a run of zero bytes. */
@@ -4903,25 +5368,11 @@
     return [...parts.slice(0, gap), ...zeros, ...parts.slice(gap + 1)].join(":");
   }
 
-  function reportLink(text, title, jump) {
-    const link = document.createElement("a");
-    link.className = "vrf-link";
-    link.href = "#";
-    link.textContent = text;
-    link.title = title;
-    link.addEventListener("click", (event) => {
-      event.preventDefault();
-      event.stopPropagation();
-      jump();
-    });
-    return link;
-  }
-
   /**
-   * A pill label with *name* in it turned into a jump to the report that
-   * lists it; the rest of the label stays text.
+   * A pill label with *name* in it turned into a link to *page*, the report
+   * that lists it; the rest of the label stays text.
    */
-  function fillLinkedLabel(pill, label, name, title, jump) {
+  function fillLinkedLabel(pill, label, name, title, page) {
     const at = name ? label.indexOf(name) : -1;
     if (at < 0) {
       pill.append(document.createTextNode(label));
@@ -4929,7 +5380,7 @@
     }
     pill.append(
       document.createTextNode(label.slice(0, at)),
-      reportLink(name, title, jump),
+      pageLink(name, title, page),
       document.createTextNode(label.slice(at + name.length))
     );
   }
@@ -4939,9 +5390,7 @@
     const name = (/^\S+/.exec(label) || [""])[0];
     const [report] = interfaceReport(name);
     const what = { irb: "IRB interface", vxlan: "VXLAN interface", subif: "sub-interface" }[report];
-    fillLinkedLabel(pill, label, name, `Show ${what} ${name} on ${nodeName}`, () =>
-      jumpToInterface(name, nodeName)
-    );
+    fillLinkedLabel(pill, label, name, `Show ${what} ${name} on ${nodeName}`, interfacePage(name, nodeName));
   }
 
   /**
@@ -4951,9 +5400,7 @@
   function fillEsLabel(pill, label) {
     const id = (/\bID:\s*([0-9a-f:.]+)/i.exec(label) || [])[1] || "";
     const esi = expandEsi(id);
-    fillLinkedLabel(pill, label, id, `Show ethernet-segment ${esi}`, () =>
-      jumpToEthernetSegment(esi)
-    );
+    fillLinkedLabel(pill, label, id, `Show ethernet-segment ${esi}`, ethernetSegmentPage(esi));
   }
 
   // A virtual-ES label with its next-hop(s) turned into RIB jumps. The rest of
@@ -4969,25 +5416,21 @@
     fillEsLabel(esPill, es.slice(0, match.index) + "nh: ");
     ips.forEach((ip, index) => {
       if (index) esPill.append(document.createTextNode(" "));
-      const report = ribReportForAddress(ip);
-      if (!report) {
+      const page = nextHopRibPage(ip, niName);
+      if (!page) {
         esPill.append(document.createTextNode(ip));
         return;
       }
-      const family = report === "ipv4_rib" ? "IPv4" : "IPv6";
-      const link = document.createElement("a");
-      link.className = "vrf-link";
-      link.href = "#";
-      link.textContent = ip;
-      link.title = niName
-        ? `Show ${family} routes in ${niName} with next-hop ${ip}`
-        : `Show ${family} routes with next-hop ${ip}`;
-      link.addEventListener("click", (event) => {
-        event.preventDefault();
-        event.stopPropagation();
-        jumpToNextHopRib(ip, niName);
-      });
-      esPill.append(link);
+      const family = page.report === "ipv4_rib" ? "IPv4" : "IPv6";
+      esPill.append(
+        pageLink(
+          ip,
+          niName
+            ? `Show ${family} routes in ${niName} with next-hop ${ip}`
+            : `Show ${family} routes with next-hop ${ip}`,
+          page
+        )
+      );
     });
     esPill.append(document.createTextNode(es.slice(match.index + match[0].length)));
   }
@@ -5216,16 +5659,13 @@
   // the association is worth a control of its own rather than a link buried in
   // the text of a pill.
   function makeJumpButton(report, target, node, title) {
-    const button = document.createElement("button");
-    button.type = "button";
-    button.className = "pill pill-jump";
-    button.textContent = target;
-    button.title = title;
-    button.addEventListener("click", (event) => {
-      event.preventDefault();
-      jumpToVrf(report, target, node);
-    });
-    return button;
+    const link = document.createElement("a");
+    link.className = "pill pill-jump";
+    link.textContent = target;
+    link.title = title;
+    // In a tab of its own, the page the service is on; in place, the
+    // service itself, scrolled to and lit up.
+    return wireLink(link, `#${report}`, () => jumpToVrf(report, target, node));
   }
 
   function makeCollapsibleDetailSection(sectionKey, labelText, contentEl) {
@@ -6013,12 +6453,8 @@
                 const link = document.createElement("a");
                 link.className = "vrf-link";
                 link.textContent = macName;
-                link.href = "#";
                 link.title = `Jump to Bridge Domain ${macName}`;
-                link.addEventListener("click", (e) => {
-                  e.preventDefault();
-                  jumpToVrf("bridge_domains", macName, nodeName);
-                });
+                wireLink(link, "#bridge_domains", () => jumpToVrf("bridge_domains", macName, nodeName));
 
                 p.append(link);
                 const irb = /^(\s*\()(irb\S+)/.exec(restText);
@@ -6094,16 +6530,11 @@
               const kind = stateKind(peerState);
               if (kind) peerPill.classList.add(`pill-${kind}`);
 
-              const link = document.createElement("a");
-              link.className = "vrf-link";
-              link.textContent = peerAddr;
-              link.href = "#";
-              link.title = `Show BGP peer ${peerAddr} in ${row["IP-VRF"]} on ${nodeName}`;
-              link.addEventListener("click", (e) => {
-                e.preventDefault();
-                e.stopPropagation();
-                jumpToBgpPeer(nodeName, row["IP-VRF"], peerAddr);
-              });
+              const link = pageLink(
+                peerAddr,
+                `Show BGP peer ${peerAddr} in ${row["IP-VRF"]} on ${nodeName}`,
+                bgpPeerPage(nodeName, row["IP-VRF"], peerAddr)
+              );
 
               peerPill.append(link, document.createTextNode(` ${peerState}`));
               line.append(localPill, arrow, peerPill);
@@ -6377,22 +6808,22 @@
   // A jump to the report holding the rows an item was made of, filtered to
   // them on its node: the irb, the bridge-table entry, the RIB lookup.
   function lensLinkButton(link) {
-    const button = document.createElement("button");
-    button.type = "button";
-    button.className = "bd-report-jump-btn";
-    button.textContent = link.label;
     const report = state.reports.find((r) => r.name === link.report);
-    button.title = `Open ${report ? report.title : link.report}${link.node ? ` on ${link.node}` : ""}`;
-    if (!report) button.disabled = true;
-    button.addEventListener("click", (event) => {
-      event.preventDefault();
-      event.stopPropagation();
-      const filters = {};
-      for (const [column, value] of link.match || []) filters[column] = exactMatchPattern([value]);
-      const params = (link.params || []).length ? Object.fromEntries(link.params) : null;
-      jumpToFilteredReport(link.report, link.nis || [], link.node ? [link.node] : [], filters, params);
-    });
-    return button;
+    const title = `Open ${report ? report.title : link.report}${link.node ? ` on ${link.node}` : ""}`;
+    if (!report) {
+      // A report this server does not serve: named, but nowhere to go.
+      const label = document.createElement("span");
+      label.className = "bd-report-jump-btn is-disabled";
+      label.textContent = link.label;
+      label.title = title;
+      return label;
+    }
+    const filters = {};
+    for (const [column, value] of link.match || []) filters[column] = exactMatchPattern([value]);
+    const params = (link.params || []).length ? Object.fromEntries(link.params) : null;
+    return pageLink(link.label, title,
+      reportPage(link.report, link.nis || [], link.node ? [link.node] : [], filters, params),
+      "bd-report-jump-btn");
   }
 
   function lensItem(item) {
@@ -6496,6 +6927,8 @@
         state.seenIncidentCards.add(seenKey);
         state.collapsedCards.add(cardKey);
       }
+      // The incident a link asked for is open, whatever it was before.
+      if (card.key === state.focusIncident) state.collapsedCards.delete(cardKey);
     }
     const collapsed = state.collapsedCards.has(cardKey);
     const el = document.createElement("div");
@@ -6917,11 +7350,34 @@
     dom.servicesTreeView.append(renderTreeControls());
     cards.forEach((card, index) => dom.servicesTreeView.append(lensCard(card, index)));
     restoreTreeScroll(scroll);
+    scrollToFocusedIncident(cards);
+  }
+
+  /** Scroll to the incident a link asked for, once its card is drawn. */
+  function scrollToFocusedIncident(cards) {
+    const id = state.focusIncident;
+    if (!id || !state.report || state.report.name !== "incidents") return;
+    state.focusIncident = null;
+    // Cleared since: the incidents are shown, without it.
+    if (!cards.some((card) => card.key === id)) return;
+    const target = dom.servicesTreeView.querySelector(
+      `[data-card-key="${CSS.escape(`lens:incidents:key:${id}`)}"]`
+    );
+    if (!target) return;
+    target.scrollIntoView({ behavior: "smooth", block: "start" });
+    target.classList.remove("highlight-pulse");
+    void target.offsetWidth; // restart the animation
+    target.classList.add("highlight-pulse");
+    setTimeout(() => target.classList.remove("highlight-pulse"), 3000);
   }
 
   /* ---------------------------------------------------------- path graph */
 
-  const PATH_BOX = { w: 168, h: 46, colGap: 96, rowGap: 22, top: 30, left: 12 };
+  const PATH_BOX = { w: 168, h: 46, line: 14, colGap: 96, rowGap: 22, top: 30, left: 12 };
+
+  // A box is as tall as its lines: title, subtitle, then one each for what a
+  // subtitle would have trimmed - the mac-vrf a source is in, its segment.
+  const pathBoxHeight = (node) => PATH_BOX.h + (node.lines || []).length * PATH_BOX.line;
 
   function pathSvg(name, attrs, text) {
     const node = document.createElementNS("http://www.w3.org/2000/svg", name);
@@ -6958,21 +7414,23 @@
       return;
     }
 
-    // Layout: columns by hop, rows in the order the server listed them.
+    // Layout: columns by hop, boxes stacked in the order the server listed them.
     const hops = [...new Set(graph.nodes.map((n) => n.hop))].sort((a, b) => a - b);
     const column = new Map(hops.map((hop, index) => [hop, index]));
-    const rowsOf = new Map();
+    const filled = new Map();
     const place = new Map();
     for (const node of graph.nodes) {
-      const row = rowsOf.get(node.hop) || 0;
-      rowsOf.set(node.hop, row + 1);
+      const y = filled.get(node.hop) || PATH_BOX.top;
+      const h = pathBoxHeight(node);
+      filled.set(node.hop, y + h + PATH_BOX.rowGap);
       place.set(node.id, {
         x: PATH_BOX.left + column.get(node.hop) * (PATH_BOX.w + PATH_BOX.colGap),
-        y: PATH_BOX.top + row * (PATH_BOX.h + PATH_BOX.rowGap),
+        y,
+        h,
       });
     }
     const width = PATH_BOX.left * 2 + hops.length * (PATH_BOX.w + PATH_BOX.colGap) - PATH_BOX.colGap;
-    const height = PATH_BOX.top + Math.max(...rowsOf.values()) * (PATH_BOX.h + PATH_BOX.rowGap);
+    const height = Math.max(...filled.values());
 
     const summary = document.createElement("div");
     summary.className = "path-graph-summary";
@@ -7030,9 +7488,9 @@
       const index = labelled.get(edge.from) || 0;
       labelled.set(edge.from, index + 1);
       const x1 = from.x + PATH_BOX.w;
-      const y1 = from.y + PATH_BOX.h / 2;
+      const y1 = from.y + from.h / 2;
       const x2 = to.x;
-      const y2 = to.y + PATH_BOX.h / 2;
+      const y2 = to.y + to.h / 2;
       const bend = Math.max(30, (x2 - x1) / 2);
       const d = `M${x1},${y1} C${x1 + bend},${y1} ${x2 - bend},${y2} ${x2},${y2}`;
       const kind = edge.state === "up" || edge.state === "down" ? edge.state : "";
@@ -7062,25 +7520,93 @@
       }
     }
 
+    const tip = document.createElement("div");
+    tip.className = "path-tooltip";
+    tip.hidden = true;
     for (const node of graph.nodes) {
       const at = place.get(node.id);
-      const group = pathSvg("g", { transform: `translate(${at.x},${at.y})` });
-      const title = pathSvg("title", {}, [node.title, node.subtitle, ...(node.details || [])].filter(Boolean).join("\n"));
+      const lines = node.lines || [];
+      const group = pathSvg("g", {
+        transform: `translate(${at.x},${at.y})`,
+        class: "path-box-group",
+        tabindex: 0,
+        "aria-label": [node.title, node.subtitle, ...lines, ...(node.details || [])].filter(Boolean).join(", "),
+      });
       group.append(
-        title,
         pathSvg("rect", {
           width: PATH_BOX.w,
-          height: PATH_BOX.h,
+          height: at.h,
           class: `path-box ${node.state ? "path-box-" + node.state : ""}`.trim(),
         }),
-        pathSvg("text", { x: 10, y: node.subtitle ? 19 : 28, class: "path-box-title" }, pathTrimHead(node.title, 22)),
+        pathSvg("text", { x: 10, y: node.subtitle || lines.length ? 19 : 28, class: "path-box-title" }, pathTrimHead(node.title, 22)),
       );
       if (node.subtitle) {
         group.append(pathSvg("text", { x: 10, y: 35, class: "path-box-sub" }, pathTrim(node.subtitle, 27)));
       }
+      lines.forEach((line, index) => {
+        group.append(
+          pathSvg("text", { x: 10, y: 35 + (index + 1) * PATH_BOX.line, class: "path-box-sub" }, pathTrim(line, 27))
+        );
+      });
+      const show = (x, y) => {
+        tip.replaceChildren(pathTooltipContent(node));
+        tip.hidden = false;
+        // Beside the pointer, kept inside the window.
+        const box = tip.getBoundingClientRect();
+        tip.style.left = `${Math.max(8, Math.min(x + 14, window.innerWidth - box.width - 8))}px`;
+        tip.style.top = `${Math.max(8, Math.min(y + 14, window.innerHeight - box.height - 8))}px`;
+      };
+      group.addEventListener("mousemove", (event) => show(event.clientX, event.clientY));
+      group.addEventListener("mouseleave", () => (tip.hidden = true));
+      group.addEventListener("focus", () => {
+        const box = group.getBoundingClientRect();
+        show(box.right - 14, box.top);
+      });
+      group.addEventListener("blur", () => (tip.hidden = true));
       svg.append(group);
     }
-    dom.pathGraphView.append(svg);
+    dom.pathGraphView.append(svg, tip);
+  }
+
+  // Everything known about a box: each lookup it stands for, with every
+  // field its card has, and the sentences that say what the walk did.
+  function pathTooltipContent(node) {
+    const root = document.createDocumentFragment();
+    const head = document.createElement("div");
+    head.className = "path-tooltip-head";
+    head.textContent = [node.title, node.subtitle].filter(Boolean).join(" · ");
+    root.append(head);
+    const facts = node.facts || [];
+    for (const fact of facts) {
+      const section = document.createElement("div");
+      section.className = `path-tooltip-fact ${fact.state ? "path-tooltip-" + fact.state : ""}`.trim();
+      if (facts.length > 1 || fact.heading !== head.textContent) {
+        const heading = document.createElement("div");
+        heading.className = "path-tooltip-heading";
+        heading.textContent = fact.heading;
+        section.append(heading);
+      }
+      const list = document.createElement("dl");
+      for (const detail of fact.details) {
+        const dt = document.createElement("dt");
+        dt.textContent = detail.label;
+        const dd = document.createElement("dd");
+        dd.textContent = detail.value;
+        list.append(dt, dd);
+      }
+      section.append(list);
+      root.append(section);
+    }
+    // A stop drawn by the browser alone has no lookups, only what ended it.
+    if (!facts.length) {
+      for (const line of node.details || []) {
+        const p = document.createElement("div");
+        p.className = "path-tooltip-line";
+        p.textContent = line;
+        root.append(p);
+      }
+    }
+    return root;
   }
 
   function renderBody() {
@@ -7181,10 +7707,7 @@
       for (const column of columns) {
         const value = row[column] ?? "";
         const td = document.createElement("td");
-        const linked =
-          !state.diff && state.report && state.report.name === "bgp_peers"
-            ? peerRoutesCell(row, column, value)
-            : null;
+        const linked = state.diff ? null : linkedCell(row, column, value);
         if (linked) td.append(linked);
         else td.textContent = value;
         if (tone && column === toned.column) td.classList.add("tone-cell");
@@ -7352,6 +7875,10 @@
       dom.nodeList.replaceChildren(
         ...hosts.map((host) => {
           const item = document.createElement("li");
+          // The node is a link to the page about it; see nodePage.
+          const link = document.createElement("a");
+          link.className = "node-link";
+          link.dataset.node = host.name;
           const dot = document.createElement("span");
           dot.className =
             "dot " +
@@ -7365,17 +7892,72 @@
           else if (host.active) status = "gNMI Get just completed";
           else if (host.streaming) status = "streaming";
           else status = "connected, not subscribed";
-          item.title = `${host.name} (${host.hostname}) - ${status}`;
-          item.append(dot, name);
-          if (host.active) item.append(transferIcon());
+          link.dataset.status = `${host.name} (${host.hostname}) - ${status}`;
+          link.append(dot, name);
+          if (host.active) link.append(transferIcon());
+          item.append(link);
           return item;
         })
       );
+      refreshNodeLinks();
       const up = hosts.filter((h) => h.connected).length;
       dom.nodeSummary.textContent = `${up}/${hosts.length} up`;
     } catch (_err) {
       inventoryKey = "";
       dom.nodeSummary.textContent = "unavailable";
+    }
+  }
+
+  /* ---------------------------------------------------------- node links */
+
+  /** Whether the page on screen is a table the server can ask some nodes only. */
+  function scopedReport() {
+    return Boolean(state.report) && !isPanelReport(state.report.name) && !isLens(state.report);
+  }
+
+  /**
+   * The page about node *name*, from the page on screen: a table report asks
+   * that node only - again every node when it was the only one, and with
+   * *add* the node added to or taken from the ones asked; a dashboard or a
+   * lens, which is not asked by node, shows the node on the topology.
+   */
+  function nodePage(name, { add = false, only = false } = {}) {
+    if (!scopedReport()) return { report: "topology", filters: null, params: null, scope: [], select: name };
+    const current = state.scopeNodes;
+    let scope;
+    if (only) scope = [name];
+    else if (add) scope = current.includes(name) ? current.filter((n) => n !== name) : [...current, name];
+    else scope = current.length === 1 && current[0] === name ? [] : [name];
+    // A Node filter left from a jump would hide the node asked for.
+    const filters = Object.fromEntries([...state.colFilters].filter(([column]) => column !== "Node"));
+    const params = state.reportParams.size ? Object.fromEntries(state.reportParams) : null;
+    return { report: state.report.name, filters, params, scope };
+  }
+
+  /** What following node *name* in the side pane does, in words. */
+  function nodeLinkTitle(name) {
+    if (!scopedReport()) return `Show ${name} on the topology`;
+    const report = state.report.title;
+    const current = state.scopeNodes;
+    if (current.length === 1 && current[0] === name) return `Show ${report} for every node again`;
+    return `Show ${report} for ${name} only · shift-click to ${current.includes(name) ? "take it from" : "add it to"} the nodes shown`;
+  }
+
+  /** Point the side pane's nodes at what they open from the page on screen. */
+  function refreshNodeLinks() {
+    if (!dom.nodeList) return;
+    const selected = scopedReport()
+      ? state.scopeNodes
+      : state.report && state.report.name === "topology" && state.topoSelection && state.topoSelection.kind === "node"
+        ? [state.topoSelection.id]
+        : [];
+    for (const link of dom.nodeList.querySelectorAll("a.node-link")) {
+      const name = link.dataset.node;
+      link.href = pageHref(nodePage(name));
+      link.title = `${link.dataset.status || name}\n${nodeLinkTitle(name)}`;
+      link.classList.toggle("is-selected", selected.includes(name));
+      if (selected.includes(name)) link.setAttribute("aria-current", "true");
+      else link.removeAttribute("aria-current");
     }
   }
 
@@ -7482,7 +8064,14 @@
   }
   window.addEventListener("popstate", (event) => {
     const snap = event.state && event.state.page;
-    if (!snap || !state.reports.length) return;
+    if (!state.reports.length) return;
+    if (!snap) {
+      // A fragment typed or pasted into the address bar: no visit of ours,
+      // but a page all the same.
+      const page = pageFromUrl(location.hash);
+      if (page) goTo(page);
+      return;
+    }
     const idx = state.navStack.findIndex((entry) => entry.id === snap.id);
     if (idx >= 0) {
       state.navIndex = idx;
@@ -7495,6 +8084,12 @@
   });
 
   dom.reportSearch.addEventListener("input", debounce(renderReportList, 120));
+  dom.reportFoldAll.addEventListener("click", () => {
+    const categories = listedCategories();
+    const allFolded = [...categories].every((c) => state.collapsedGroups.has(c));
+    state.collapsedGroups = allFolded ? new Set() : categories;
+    renderReportList();
+  });
   dom.globalSearch.addEventListener(
     "input",
     debounce(() => {
@@ -7527,13 +8122,15 @@
 
   dom.clearFiltersBtn.addEventListener("click", clearAllFilters);
 
-  const openReport = (name) => {
-    const report = state.reports.find((r) => r.name === name);
-    if (report) selectReport(report);
-  };
-
-  if (dom.kpiCardHealth) dom.kpiCardHealth.addEventListener("click", () => openReport("incidents"));
-  if (dom.kpiCardTelemetry) dom.kpiCardTelemetry.addEventListener("click", () => openReport("activity"));
+  // Each card opens the report it counts.
+  const whole = (report) => ({ report, filters: null, params: null, scope: [] });
+  kpiCardLink(dom.kpiCardHealth, whole("incidents"), "Click to view the incidents");
+  kpiCardLink(dom.kpiCardNodes, whole("sys_info"), "Click to view each node's system information");
+  kpiCardLink(dom.kpiCardBgp, whole("bgp_peers"), "Click to view the BGP peers");
+  kpiCardLink(dom.kpiCardItf, whole("ifstats"), "Click to view the interface statistics");
+  kpiCardLink(dom.kpiCardBd, whole("bridge_domains"), "Click to view the bridge domains");
+  kpiCardLink(dom.kpiCardRouters, whole("routers"), "Click to view the routers");
+  kpiCardLink(dom.kpiCardTelemetry, whole("activity"));
 
   if (dom.baselineBtn) {
     dom.baselineBtn.addEventListener("click", () => {
@@ -7558,19 +8155,6 @@
   if (dom.chatTriage) dom.chatTriage.addEventListener("click", triage);
   if (dom.ackAllBtn) dom.ackAllBtn.addEventListener("click", ackAll);
 
-  if (dom.kpiCardBd) {
-    dom.kpiCardBd.addEventListener("click", () => {
-      const report = state.reports.find((r) => r.name === "bridge_domains");
-      if (report) selectReport(report);
-    });
-  }
-
-  if (dom.kpiCardRouters) {
-    dom.kpiCardRouters.addEventListener("click", () => {
-      const report = state.reports.find((r) => r.name === "routers");
-      if (report) selectReport(report);
-    });
-  }
 
   dom.viewModeBtn.addEventListener("click", () => {
     state.viewMode = nextViewMode();
@@ -7844,9 +8428,15 @@
   document.addEventListener("keydown", (event) => {
     if (event.key === "Escape") closeSideDrawer();
   });
-  // A node picked from the list filters the page behind the drawer.
+  // A node picked from the list: the page on screen for that node, or the
+  // node on the topology. Ctrl- or middle-click opens it in a tab of its own.
   dom.nodeList.addEventListener("click", (event) => {
-    if (narrowScreen && narrowScreen.matches && event.target.closest("li, button")) closeSideDrawer();
+    const link = event.target.closest("a.node-link");
+    if (!link || event.button !== 0 || event.ctrlKey || event.metaKey || event.altKey) return;
+    event.preventDefault();
+    goTo(nodePage(link.dataset.node, { add: event.shiftKey }));
+    // On a phone, the page behind the drawer is what was asked for.
+    if (narrowScreen && narrowScreen.matches) closeSideDrawer();
   });
   if (narrowScreen) narrowScreen.addEventListener("change", closeSideDrawer);
 
@@ -8434,6 +9024,7 @@
     const dot = document.createElement("span");
     dot.className = "dot";
     const label = document.createElement("span");
+    label.className = "chat-chip-label";
     label.textContent = chipLabel(call.name || "tool", call.args);
     const meta = document.createElement("span");
     meta.className = "chat-chip-meta";

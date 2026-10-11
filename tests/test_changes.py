@@ -1,5 +1,6 @@
 """What changed between two readings of a fabric, and what a timeline makes of it."""
 
+from dataclasses import replace
 from typing import Any, Dict
 
 import pytest
@@ -240,6 +241,40 @@ def test_route_counts_and_findings_do_not_flap():
     changes = [_flip(t, "1", "2", kind="bgp-routes") for t in (1, 2, 3)]
     changes += [_flip(t, ABSENT, "error", kind="finding") for t in (1, 2, 3)]
     assert flaps(changes, now=10) == []
+
+
+def test_a_neighbour_cache_learning_and_ageing_out_does_not_flap():
+    # An idle multihomed host: its address ages out and is learned again on
+    # its irb, over and over, always from the same MAC.
+    summaries = [
+        Change(t, "leaf1", kind, "irb0.102", ABSENT, counts, INFO, "")
+        for t in (100, 200, 300, 400)
+        for kind in ("arp", "nd")
+        for counts in ("-1 aged out", "+1 learned")
+    ]
+    # Re-learned on another interface, from the same MAC: not a flap either.
+    moves = [
+        Change(t, "leaf1", "arp", "ipvrf-1/macvrf-1 10.1.2.11", f"aa:c1:ab:b5:75:ad on {a}", f"aa:c1:ab:b5:75:ad on {b}", WARNING)
+        for t, a, b in ((100, "irb0.102", "irb0.112"), (200, "irb0.112", "irb0.102"), (300, "irb0.102", "irb0.112"))
+    ]
+    assert flaps(summaries + moves, now=500) == []
+
+
+def test_an_address_answering_from_another_mac_flaps():
+    a, b = "aa:c1:ab:00:00:0a on irb0.102", "aa:c1:ab:00:00:0b on irb0.102"
+    changes = [
+        Change(t, "leaf1", "arp", "ipvrf-1/macvrf-1 10.1.2.11", before, after, WARNING)
+        for t, before, after in ((100, a, b), (200, b, a), (300, a, b))
+    ]
+    (flap,) = flaps(changes, now=400)
+    assert (flap.kind, flap.subject, flap.count) == ("arp", "ipvrf-1/macvrf-1 10.1.2.11", 3)
+    import time
+
+    now = time.time()
+    state = FabricState(changes=[replace(c, at=now - 10 + c.at / 100) for c in changes])
+    (finding,) = CHECKS_BY_NAME["flapping"].run(state)
+    assert finding.subject == "ipvrf-1/macvrf-1/10.1.2.11"
+    assert "arp changed MAC 3 times between aa:c1:ab:00:00:0a, aa:c1:ab:00:00:0b" in finding.detail
 
 
 def test_the_flapping_check_reads_the_timeline():

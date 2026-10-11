@@ -33,9 +33,11 @@ from __future__ import annotations
 
 import inspect
 import ipaddress
+import re
 from dataclasses import dataclass, replace
 from typing import Any, Callable, Dict, FrozenSet, List, Mapping, Optional, Sequence, Tuple, Union
 
+from .aliases import inventory_index
 from .connections.layer2 import ES_DEST_PATH, VXLAN_DEST_PATH, VXLAN_VNI_PATH
 from .connections.routing import BGP_RIB_KEYS, BGP_RIB_ROUTE_FAM_ALIASES
 from .connections.routing import _BGP_RIB_FAMILY as _BGP_RIB_FAMILY_OF
@@ -191,7 +193,8 @@ class ParamSpec:
     label: str
     placeholder: str = ""
     help: str = ""
-    #: ``text``; ``address`` for one that has to parse as an IP address; ``ni``
+    #: ``text``; ``address`` for one that has to parse as an IP address;
+    #: ``host`` for an IP address or a MAC, written as a bridge table does; ``ni``
     #: for the name of a network-instance, which a surface offers from the
     #: ones the fabric has - its placeholder being the one taken when none is
     #: chosen. ``config-node`` for a node whose configurations the server
@@ -238,6 +241,15 @@ class ParamSpec:
                 raise ValueError(
                     f"{self.label}: '{text}' is not an IP address"
                 ) from None
+        if self.kind == "host":
+            try:
+                return str(ipaddress.ip_address(text))
+            except ValueError:
+                pass
+            octets = text.upper().replace("-", ":").split(":")
+            if len(octets) == 6 and all(re.fullmatch(r"[0-9A-F]{1,2}", o) for o in octets):
+                return ":".join(o.zfill(2) for o in octets)
+            raise ValueError(f"{self.label}: '{text}' is neither an IP nor a MAC address")
         if self.kind == "commit":
             if not text.isdigit():
                 raise ValueError(f"{self.label}: '{text}' is not a commit id")
@@ -313,6 +325,12 @@ class ReportSpec:
     #: False for a report a surface reaches from another one rather than
     #: offers on its own: a peer's received routes, from the BGP peers table.
     listed: bool = True
+    #: True where what a node reports depends on which of its neighbours are
+    #: nodes of the fabric: a surface then hands the getter ``fabric``, the
+    #: :func:`~nornir_srl.aliases.inventory_index` of the whole inventory -
+    #: not of the nodes a filter selected, whose neighbours are no less part
+    #: of the fabric.
+    needs_fabric: bool = False
 
     @property
     def tool_name(self) -> str:
@@ -342,6 +360,14 @@ class ReportSpec:
             # it can be: without keys, a change reads as an add and a remove.
             "key_columns": list(self.key_columns),
         }
+
+
+def fabric_args(report: ReportSpec, hosts: Mapping[str, Any]) -> Dict[str, Any]:
+    """What a surface adds to *report*'s getter call: the fabric, where it needs it.
+
+    *hosts* is the whole inventory, whatever the report runs on.
+    """
+    return {"fabric": inventory_index(hosts)} if report.needs_fabric else {}
 
 
 def coerce_params(report: ReportSpec, raw: Mapping[str, Any]) -> Dict[str, Any]:
@@ -617,6 +643,23 @@ ARP_TABLE = Table(
     ),
 )
 
+ENDPOINTS_TABLE = Table(
+    columns=(
+        Column("IP", "address"),
+        Column("MAC", "mac"),
+        Column("Type", "origin"),
+        Column("State", "state"),
+        Column("L3-interface", "l3_interface"),
+        Column("Subinterface", "subinterface"),
+        Column("IP-VRF", "ip_vrf"),
+        Column("MAC-VRF", "mac_vrf"),
+        Column("Learned", "learned"),
+        Column("LLDP-Nbr", lambda e: _joined(e.lldp)),
+        Column("ES", "es"),
+        Column("ESI", "esi"),
+    ),
+)
+
 ND_TABLE = Table(
     columns=_NEIGHBOR_CACHE_COLUMNS,
     each="entries",
@@ -820,8 +863,9 @@ BGP_PEERS_TABLE = Table(
     each_columns=(
         Column("peer", "peer"),
         Column("state", _session),
+        Column("local-as", lambda n: n.local_as if n.local_as is not None else "-"),
+        Column("peer-as", "peer_as"),
         Column("local-address", "local_address"),
-        Column("local-port", "local_port"),
         Column("evpn\nRx/Act/Tx", _family_cell("evpn")),
         Column("ipv4-unicast\nRx/Act/Tx", _family_cell("ipv4-unicast")),
         Column("ipv6-unicast\nRx/Act/Tx", _family_cell("ipv6-unicast")),
@@ -831,8 +875,6 @@ BGP_PEERS_TABLE = Table(
         Column("flags", _flags),
         Column("group", "group"),
         Column("import-policy", lambda n: _listed(n.import_policies)),
-        Column("local-as", lambda n: n.local_as if n.local_as is not None else "-"),
-        Column("peer-as", "peer_as"),
     ),
 )
 
@@ -1775,6 +1817,26 @@ REPORTS: List[ReportSpec] = [
         surfaces=STREAMING,
         sample_interval=20,
         subscribe=_SERVICE_SUBSCRIPTIONS,
+    ),
+    ReportSpec(
+        name="endpoints",
+        table=ENDPOINTS_TABLE,
+        resource="endpoints",
+        # A binding is its address on its L3 interface; a host that only
+        # bridges has neither, and its MAC in its mac-vrf tells it apart.
+        key_columns=("Node", "L3-interface", "MAC-VRF", "MAC", "IP"),
+        title="Endpoints",
+        description="Hosts ARP and ND have entries for: IP and MAC, the sub-interface "
+        "they were resolved on, its IP-VRF and MAC-VRF, and from the bridge table the "
+        "access sub-interface or VTEP they were learned on and their ethernet-segment. "
+        "Management ports, links to other nodes of the fabric, and hosts learned over "
+        "EVPN that are not behind an ethernet-segment of the node are left out. A host "
+        "that only bridges is listed by its MAC, with no IP.",
+        getter=lambda d, fabric=None: d.get_endpoints(fabric=fabric),
+        category="Services",
+        mcp_name="endpoints",
+        sample_interval=10,
+        needs_fabric=True,
     ),
     ReportSpec(
         name="mac",

@@ -52,6 +52,7 @@ Commands:
   transceivers  Displays optics with their light levels and DOM alarms
   arp           Displays ARP table
   nd            Displays IPv6 Neighbors
+  endpoints     Displays the hosts ARP/ND know, with their VRFs, access port and ES
   routing-pol   Displays Routing Policies (json/yaml only)
   checks        Runs the fabric sanity checks and lists what they found
   incidents     Groups the checks' findings by root cause, worst first

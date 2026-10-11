@@ -343,6 +343,27 @@ body {
   padding: 0 4px;
 }
 
+.report-tools {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.report-tools #report-search {
+  flex: 1;
+  min-width: 0;
+}
+
+/* Scoped under .report-tools so the later .btn and .nav-btn sizes do not win. */
+.report-tools .report-fold-all {
+  flex: none;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  font-size: 22px;
+  line-height: 1;
+}
+
 .report-list {
   overflow-y: auto;
   overflow-x: hidden;
@@ -402,7 +423,10 @@ body {
 
 .report-group-chevron {
   display: inline-block;
-  width: 10px;
+  width: 16px;
+  font-size: 17px;
+  line-height: 1;
+  text-align: center;
   transition: transform 0.15s ease;
 }
 
@@ -479,6 +503,35 @@ body {
 
 .node-list li:hover {
   background: var(--panel-2);
+}
+
+.node-list .node-link {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1;
+  min-width: 0;
+  /* The whole row, padding and all, is the link. */
+  margin: -5px -8px;
+  padding: 5px 8px;
+  color: inherit;
+  text-decoration: none;
+}
+
+.node-list .node-link:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: var(--radius-sm);
+}
+
+/* The nodes the page on screen is asked about, or picked on the topology. */
+.node-list .node-link.is-selected {
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.node-list li:has(.node-link.is-selected) {
+  background: var(--accent-soft);
 }
 
 .node-list .dot {
@@ -1497,14 +1550,37 @@ th.filtered::after {
   overflow: hidden;
 }
 
-.kpi-card[style*="cursor: pointer"] {
+.kpi-card.kpi-clickable {
   cursor: pointer;
 }
 
-.kpi-card[style*="cursor: pointer"]:hover {
+.kpi-card.kpi-clickable:hover {
   transform: translateY(-3px);
   box-shadow: var(--md-elevation-3);
   border-color: rgba(var(--accent-rgb), 0.5);
+}
+
+.kpi-card.kpi-clickable:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* A count on a card that opens the rows behind it. */
+.kpi-link {
+  color: inherit;
+  text-decoration: underline;
+  text-decoration-style: dotted;
+  text-underline-offset: 2px;
+}
+
+.kpi-link:hover {
+  text-decoration-style: solid;
+}
+
+.kpi-link:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+  border-radius: 2px;
 }
 
 .kpi-card.kpi-ok {
@@ -1644,6 +1720,8 @@ th.filtered::after {
 }
 
 .kpi-health-worst {
+  /* One run of text, its link included: not flex items wrapping apart. */
+  display: block;
   font-size: 12px;
   margin-top: 2px;
   font-weight: 500;
@@ -1767,6 +1845,8 @@ th.filtered::after {
 }
 
 .bd-report-jump-btn {
+  display: inline-block;
+  text-decoration: none;
   background: var(--accent-soft);
   color: var(--accent);
   border: 1px solid rgba(var(--accent-rgb), 0.35);
@@ -1782,6 +1862,15 @@ th.filtered::after {
   background: var(--accent);
   color: #000;
   border-color: var(--accent);
+}
+
+.bd-report-jump-btn.is-disabled,
+.bd-report-jump-btn.is-disabled:hover {
+  background: var(--accent-soft);
+  color: var(--accent);
+  border-color: rgba(var(--accent-rgb), 0.35);
+  cursor: default;
+  opacity: 0.5;
 }
 
 .bd-report-jump-btn:focus-visible {
@@ -2147,7 +2236,8 @@ th.filtered::after {
   font-size: 11px;
 }
 
-button.pill-jump {
+.pill-jump {
+  text-decoration: none;
   background: var(--accent-soft);
   color: var(--accent);
   border: 1px solid rgba(var(--accent-rgb), 0.4);
@@ -2158,7 +2248,7 @@ button.pill-jump {
   transition: all var(--transition-fast);
 }
 
-button.pill-jump:hover {
+.pill-jump:hover {
   background: var(--accent);
   color: #000;
 }
@@ -2774,6 +2864,7 @@ button.pill-jump:hover {
 .chat-chip {
   display: inline-flex;
   align-items: center;
+  max-width: 100%;
   gap: 6px;
   font-family: var(--font-mono);
   font-size: 11px;
@@ -2785,8 +2876,15 @@ button.pill-jump:hover {
 }
 
 .chat-chip .dot {
+  flex: none;
   width: 6px;
   height: 6px;
+}
+
+/* The bubble lets text break anywhere; in a long chip that would squeeze the
+   duration to one character a line. The label wraps instead. */
+.chat-chip-label {
+  min-width: 0;
 }
 
 .chat-chip.running .dot {
@@ -2808,6 +2906,8 @@ button.pill-jump:hover {
 }
 
 .chat-chip-meta {
+  flex: none;
+  white-space: nowrap;
   opacity: 0.7;
 }
 
@@ -3053,6 +3153,76 @@ button.pill-jump:hover {
   stroke: var(--err);
   stroke-width: 1.8;
   stroke-dasharray: 5 3;
+}
+
+.path-box-group {
+  cursor: default;
+  outline: none;
+}
+
+.path-box-group:hover .path-box,
+.path-box-group:focus .path-box {
+  fill: var(--bg);
+}
+
+.path-tooltip {
+  position: fixed;
+  z-index: 50;
+  pointer-events: none;
+  max-width: min(440px, calc(100vw - 16px));
+  background: var(--panel);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 8px 10px;
+  font-size: 12px;
+  box-shadow: var(--md-elevation-2, none);
+}
+
+.path-tooltip-head {
+  font-weight: 600;
+  margin-bottom: 4px;
+  overflow-wrap: anywhere;
+}
+
+.path-tooltip-fact + .path-tooltip-fact {
+  margin-top: 6px;
+  padding-top: 6px;
+  border-top: 1px solid var(--border);
+}
+
+.path-tooltip-heading {
+  color: var(--muted);
+  font-weight: 600;
+  margin-bottom: 2px;
+}
+
+.path-tooltip-fact dl {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 2px 10px;
+  margin: 0;
+}
+
+.path-tooltip-fact dt {
+  color: var(--muted);
+}
+
+.path-tooltip-fact dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.path-tooltip-up .path-tooltip-heading {
+  color: var(--ok);
+}
+
+.path-tooltip-down .path-tooltip-heading {
+  color: var(--err);
+}
+
+.path-tooltip-line {
+  color: var(--muted);
 }
 
 .path-box-title {
