@@ -1223,7 +1223,9 @@ def check_flapping(state: FabricState) -> List[Finding]:
 
     Each reading on its own shows it up - or down - and nothing wrong; only
     the timeline shows it going back and forth. A MAC that moves between two
-    ports over and over is a loop or two hosts sharing an address.
+    ports over and over is a loop or two hosts sharing an address; an IP
+    whose ARP or ND entry keeps changing MAC is a duplicate address. Entries
+    merely learned and aged out are not a flap.
 
     Reads :attr:`FabricState.changes`, which only the live server keeps, so
     elsewhere this finds nothing.
@@ -1236,6 +1238,12 @@ def check_flapping(state: FabricState) -> List[Finding]:
         if flap.kind == "mac":
             ni, _, mac = flap.subject.partition(" ")
             subject, what = f"{ni}/{mac}", f"moved {flap.count} times between {', '.join(flap.values)}"
+        elif flap.kind in ("arp", "nd"):
+            # An address answering from one MAC, then another: a duplicate
+            # address or two hosts taking turns with it.
+            ni, _, address = flap.subject.partition(" ")
+            macs = dict.fromkeys(value.split(" on ", 1)[0] for value in flap.values)
+            subject, what = f"{ni}/{address}", f"changed MAC {flap.count} times between {', '.join(macs)}"
         else:
             subject, what = flap.subject, f"changed {flap.count} times ({' / '.join(flap.values)})"
         findings.append(

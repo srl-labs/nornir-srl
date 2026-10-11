@@ -68,7 +68,7 @@ Severity reads as `error` (something stopped working), `warning`, `ok` (somethin
 
 The Changes lens takes **Kind** and **Severity** next to **Since**, each a list of checkboxes: ticking `bgp` and `config`, or `error`, narrows the cards and the table alike, and the choice is kept in the URL (`#changes?since=2h&kind=bgp,config`). Nothing ticked shows everything. The table's column filters only narrow the table.
 
-The **flapping** check reads the timeline. Three or more transitions of one session, port, adjacency or MAC within 10 minutes is a finding, and a MAC moving back and forth between two ports is what a loop looks like.
+The **flapping** check reads the timeline. Three or more transitions of one session, port, adjacency or MAC within 10 minutes is a finding, and a MAC moving back and forth between two ports is what a loop looks like. For ARP and ND only an address answering from another MAC counts - a duplicate address, or two hosts taking turns with it. Entries learned and aged out do not: an idle host's address goes when its timer runs out and comes back with its next packet, on every node of its ethernet-segment at once.
 
 Most changes are seen on the next reading. Ports, services, routes, ethernet segments, and LLDP and BGP neighbours are streamed ON_CHANGE, so the device reports a change or a delete as it happens. What is sampled - the counters, BFD sessions, ARP and ND caches - never reports a delete. An entry that disappears there is only noticed once the stream's stale-entry sweep drops it: up to three sample intervals of its path, and at least 45 s.
 
