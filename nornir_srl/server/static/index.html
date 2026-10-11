@@ -51,13 +51,24 @@
 
         <div id="side-split" class="side-split">
           <div class="side-block reports-block">
-            <input
-              id="report-search"
-              class="input"
-              type="search"
-              placeholder="Filter reports…"
-              autocomplete="off"
-            />
+            <div class="report-tools">
+              <input
+                id="report-search"
+                class="input"
+                type="search"
+                placeholder="Filter reports…"
+                autocomplete="off"
+              />
+              <button
+                id="report-fold-all"
+                class="btn nav-btn report-fold-all"
+                type="button"
+                title="Unfold every category"
+                aria-label="Unfold every category"
+              >
+                ▸
+              </button>
+            </div>
             <nav id="report-list" class="report-list" aria-label="Reports"></nav>
           </div>
           <div

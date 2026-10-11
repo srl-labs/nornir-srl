@@ -343,6 +343,27 @@ body {
   padding: 0 4px;
 }
 
+.report-tools {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.report-tools #report-search {
+  flex: 1;
+  min-width: 0;
+}
+
+/* Scoped under .report-tools so the later .btn and .nav-btn sizes do not win. */
+.report-tools .report-fold-all {
+  flex: none;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  font-size: 22px;
+  line-height: 1;
+}
+
 .report-list {
   overflow-y: auto;
   overflow-x: hidden;
@@ -402,7 +423,10 @@ body {
 
 .report-group-chevron {
   display: inline-block;
-  width: 10px;
+  width: 16px;
+  font-size: 17px;
+  line-height: 1;
+  text-align: center;
   transition: transform 0.15s ease;
 }
 

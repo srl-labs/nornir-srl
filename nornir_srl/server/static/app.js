@@ -41,6 +41,7 @@
   const el = (id) => document.getElementById(id);
   const dom = {
     reportSearch: el("report-search"),
+    reportFoldAll: el("report-fold-all"),
     reportList: el("report-list"),
     sideSplit: el("side-split"),
     sideSplitter: el("side-splitter"),
@@ -197,7 +198,7 @@
     colFilters: new Map(),
     colWidths: new Map(),
     reportParams: new Map(), // the selected report's own arguments, e.g. the RIB LPM address
-    collapsedGroups: loadCollapsedGroups(), // sidebar categories folded away, kept per browser
+    collapsedGroups: new Set(), // sidebar categories folded away; every one on page load
     networkInstances: [], // the fabric's instances, for an argument that is one of them
     serviceNames: new Set(), // the fabric's mac-vrfs and ip-vrfs, for a cell naming one to link to
     tree: null, // a lens's answer as cards, alongside its rows
@@ -1055,6 +1056,8 @@
     const data = await res.json();
     state.reports = data.reports;
     state.fabric = data.topo_name || "";
+    // The page starts with every category folded.
+    state.collapsedGroups = listedCategories();
     dom.version.textContent = "v" + data.version;
     if (dom.fabricName) {
       const clab = data.fabric_source === "clab";
@@ -1088,27 +1091,28 @@
     // arguments in the link: #path?source=leaf1&destination=10.0.0.1&ni=vrf;
     // a filtered table has its filters in it: #bgp_peers?f.state=down.
     const page = pageFromUrl(location.hash);
-    if (page) goTo(page);
-    else if (state.reports[0]) selectReport(state.reports[0]);
-  }
-
-  // Folded sidebar groups are a per-browser convenience: kept when the
-  // browser lets us, and an empty set when it does not.
-  function loadCollapsedGroups() {
+    state.foldingOnLoad = true;
     try {
-      const raw = JSON.parse(localStorage.getItem("fcli-collapsed-groups") || "[]");
-      return new Set(Array.isArray(raw) ? raw : []);
-    } catch (_err) {
-      return new Set();
+      if (page) goTo(page);
+      else if (state.reports[0]) selectReport(state.reports[0]);
+    } finally {
+      state.foldingOnLoad = false;
     }
   }
 
-  function saveCollapsedGroups() {
-    try {
-      localStorage.setItem("fcli-collapsed-groups", JSON.stringify([...state.collapsedGroups]));
-    } catch (_err) {
-      /* storage unavailable: folding lasts as long as the page */
-    }
+  function listedCategories() {
+    return new Set(state.reports.filter((r) => r.listed !== false && r.category).map((r) => r.category));
+  }
+
+  // One button folds every category, or unfolds them all once all are folded.
+  function syncFoldAll() {
+    if (!dom.reportFoldAll) return;
+    const categories = listedCategories();
+    const allFolded = [...categories].every((c) => state.collapsedGroups.has(c));
+    const label = allFolded ? "Unfold every category" : "Fold every category";
+    dom.reportFoldAll.textContent = allFolded ? "▸" : "▾";
+    dom.reportFoldAll.title = label;
+    dom.reportFoldAll.setAttribute("aria-label", label);
   }
 
   function renderReportList() {
@@ -1154,7 +1158,6 @@
       toggle.addEventListener("click", () => {
         if (state.collapsedGroups.has(category)) state.collapsedGroups.delete(category);
         else state.collapsedGroups.add(category);
-        saveCollapsedGroups();
         renderReportList();
       });
       heading.append(toggle);
@@ -1177,6 +1180,7 @@
       }
       dom.reportList.append(section);
     }
+    syncFoldAll();
   }
 
   const loadOverview = panelPoller(fetchOverview);
@@ -3871,7 +3875,8 @@
     dom.configDiffView.hidden = true;
     // A report opened from a link, the URL or history is never hidden in a
     // folded group: its group opens.
-    if (report.category && state.collapsedGroups.delete(report.category)) saveCollapsedGroups();
+    // The report opened as the page loads stays folded, like every group.
+    if (report.category && !state.foldingOnLoad) state.collapsedGroups.delete(report.category);
     // A comparison belongs to the report it was made of.
     state.diff = null;
     state.snapshots = [];
@@ -8079,6 +8084,12 @@
   });
 
   dom.reportSearch.addEventListener("input", debounce(renderReportList, 120));
+  dom.reportFoldAll.addEventListener("click", () => {
+    const categories = listedCategories();
+    const allFolded = [...categories].every((c) => state.collapsedGroups.has(c));
+    state.collapsedGroups = allFolded ? new Set() : categories;
+    renderReportList();
+  });
   dom.globalSearch.addEventListener(
     "input",
     debounce(() => {
