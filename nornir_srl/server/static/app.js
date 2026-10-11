@@ -3890,6 +3890,8 @@
     state.windowSize = WINDOW_STEP;
     dom.title.textContent = report.title;
     dom.desc.textContent = report.description;
+    // The overview's cards are polled whatever Pause says: nothing to pause.
+    dom.pause.hidden = report.name === "overview";
     if (dom.baselineWrap) {
       dom.baselineWrap.hidden = report.name !== "changes";
       dom.baselineMenu.hidden = true;
