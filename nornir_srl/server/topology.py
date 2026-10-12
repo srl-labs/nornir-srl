@@ -197,6 +197,9 @@ class NodeFacts:
     #: a segment's DF candidates are named by.
     virtual_segments: List[VirtualSegment] = field(default_factory=list)
     system_address: str = ""
+    #: The system0.0 addresses, per family, drawn on the node's box.
+    system_ipv4: str = ""
+    system_ipv6: str = ""
 
     @property
     def label(self) -> str:
@@ -262,7 +265,10 @@ def node_facts(
                 facts.stitched += 1
 
     details = _subinterface_details(snapshot)
-    facts.system_address = _first_prefix(details.get("system0.0", {})).split("/", 1)[0]
+    system0 = details.get("system0.0", {})
+    facts.system_address = _first_prefix(system0).split("/", 1)[0]
+    facts.system_ipv4 = _first_prefix(system0, ("ipv4",)).split("/", 1)[0]
+    facts.system_ipv6 = _first_prefix(system0, ("ipv6",)).split("/", 1)[0]
     facts.virtual_segments = _virtual_segments(system, instances if isinstance(instances, list) else [], details)
     itf_states = _interface_states(snapshot)
     facts.adjacencies = _adjacencies(system, itf_states)
@@ -422,6 +428,8 @@ def _node_payload(node: NodeFacts, role: str, peers: List[str], clients: int) ->
         "clients": clients,
         "services": sorted(set(node.services)),
         "system_address": node.system_address,
+        "system_ipv4": node.system_ipv4,
+        "system_ipv6": node.system_ipv6,
         "peers": peers,
         "ports": len(node.adjacencies),
         "connected": node.connected,
@@ -1092,9 +1100,9 @@ def _vlan(detail: Dict[str, Any]) -> str:
     return ""
 
 
-def _first_prefix(detail: Dict[str, Any]) -> str:
+def _first_prefix(detail: Dict[str, Any], families: Tuple[str, ...] = ("ipv4", "ipv6")) -> str:
     """The first address of a routed subinterface, v4 before v6."""
-    for family in ("ipv4", "ipv6"):
+    for family in families:
         for address in _as_list(_branch(detail, family).get("address")):
             prefix = address.get("ip-prefix")
             if prefix:

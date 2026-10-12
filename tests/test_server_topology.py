@@ -1341,3 +1341,29 @@ def test_a_fabric_counts_the_clients_hanging_off_it():
     graph = build_topology([_leaf_with_a_client()])
     fabric = graph["fabrics"][0]
     assert (fabric["devices"], fabric["nodes"]) == (2, 3)
+
+
+def test_a_node_carries_its_system_addresses_per_family():
+    graph = build_topology(
+        [
+            _facts(
+                "leaf1",
+                host_name="leaf1",
+                interfaces=(
+                    {
+                        "name": "system0",
+                        "subinterface": [
+                            {
+                                "index": 0,
+                                "ipv4": {"address": [{"ip-prefix": "10.0.0.1/32"}]},
+                                "ipv6": {"address": [{"ip-prefix": "fd00::1/128"}]},
+                            }
+                        ],
+                    },
+                ),
+            )
+        ]
+    )
+    node = graph["nodes"][0]
+    assert (node["system_ipv4"], node["system_ipv6"]) == ("10.0.0.1", "fd00::1")
+    assert node["system_address"] == "10.0.0.1"

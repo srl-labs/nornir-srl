@@ -2151,6 +2151,10 @@
     padY: 24,
   };
 
+  /** The lines under a box's label and subtitle: platform and system IPs. */
+  const topoNodeExtras = (node) =>
+    [node.platform, node.system_ipv4, node.system_ipv6].filter(Boolean);
+
   // Low enough that a fabric wide enough to need panning at any readable size
   // can still be taken in whole.
   const TOPO_ZOOM_MIN = 0.05;
@@ -2235,7 +2239,7 @@
         const text = Math.max(
           node.label.length * 8,
           topoNodeSub(node).length * 6.2,
-          (node.platform || "").length * 6.2
+          ...topoNodeExtras(node).map((line) => line.length * 6.2)
         );
         const w = Math.max(TOPO.minNodeWidth, text + 28);
         if (width) width += TOPO.gapX;
@@ -2249,10 +2253,15 @@
       rows.push({ layer, nodes: sized, width });
     }
 
+    // Every box is as tall as the one with the most lines, so a tier stays a
+    // straight row; the gap between tiers stays what it was.
+    const extras = Math.max(0, ...graph.nodes.map((node) => topoNodeExtras(node).length));
+    const nodeHeight = TOPO.nodeHeight + 13 * Math.max(0, extras - 1);
+    const rowHeight = TOPO.rowHeight + nodeHeight - TOPO.nodeHeight;
     const canvasWidth = TOPO.padLeft + widest + TOPO.padRight;
     const positions = new Map();
     rows.forEach((row, index) => {
-      const y = TOPO.padY + index * TOPO.rowHeight;
+      const y = TOPO.padY + index * rowHeight;
       const start = TOPO.padLeft + (widest - row.width) / 2;
       row.y = y;
       for (const placed of row.nodes) {
@@ -2261,9 +2270,9 @@
           x,
           y,
           w: placed.w,
-          h: TOPO.nodeHeight,
+          h: nodeHeight,
           cx: x + placed.w / 2,
-          cy: y + TOPO.nodeHeight / 2,
+          cy: y + nodeHeight / 2,
         });
       }
     });
@@ -2272,7 +2281,8 @@
       rows,
       positions,
       width: canvasWidth,
-      height: TOPO.padY * 2 + rows.length * TOPO.rowHeight,
+      height: TOPO.padY * 2 + rows.length * rowHeight,
+      nodeHeight,
     };
   }
 
@@ -2316,14 +2326,14 @@
           x: 8,
           y: row.y - 18,
           width: layout.width - 16,
-          height: TOPO.nodeHeight + 36,
+          height: layout.nodeHeight + 36,
           rx: 10,
         })
       );
       const label = svgEl("text", {
         class: "topo-band-label",
         x: 20,
-        y: row.y + TOPO.nodeHeight / 2 + 4,
+        y: row.y + layout.nodeHeight / 2 + 4,
       });
       label.textContent = row.layer.label;
       bands.append(label);
@@ -3046,16 +3056,16 @@
       });
       sub.textContent = topoNodeSub(node);
       cell.append(label, sub);
-      if (node.platform) {
-        const platform = svgEl("text", {
+      topoNodeExtras(node).forEach((text, index) => {
+        const line = svgEl("text", {
           class: "topo-node-platform",
           x: box.cx,
-          y: box.y + 47,
+          y: box.y + 47 + 13 * index,
           "text-anchor": "middle",
         });
-        platform.textContent = node.platform;
-        cell.append(platform);
-      }
+        line.textContent = text;
+        cell.append(line);
+      });
       // Findings are what the health overlay is about; elsewhere they clutter.
       const badge = state.topoOverlay === "health" ? topoBadge(node, box) : null;
       if (badge) cell.append(badge);
@@ -3088,12 +3098,15 @@
     }
     if (node.mac_vrfs || node.ip_vrfs) {
       const parts = [];
-      if (node.mac_vrfs) parts.push(`${node.mac_vrfs} mac`);
-      if (node.ip_vrfs) parts.push(`${node.ip_vrfs} ip`);
-      if (node.stitched) parts.push(`${node.stitched} gw`);
-      return parts.join(" · ");
+      if (node.mac_vrfs) parts.push(`macvrf:${node.mac_vrfs}`);
+      if (node.ip_vrfs) parts.push(`ipvrf:${node.ip_vrfs}`);
+      if (node.stitched) parts.push(`gw:${node.stitched}`);
+      return parts.join(", ");
     }
-    return node.site || ROLE_LABELS[node.role] || node.role;
+    // The role is the tier label at the left of the row already - except on
+    // the edge tier, which holds two of them.
+    const edge = node.role === "external" || node.role === "unknown";
+    return node.site || (edge ? ROLE_LABELS[node.role] : "");
   }
 
   /** Whether a node is drawn from its attachments: a client or a segment. */
@@ -3227,10 +3240,8 @@
       `<b><font color="#1c2128">${escapeXml(node.label)}</font></b>`,
       `<font color="#667085" style="font-size:10px">${escapeXml(topoNodeSub(node))}</font>`,
     ];
-    if (node.platform) {
-      lines.push(
-        `<font color="#667085" style="font-size:9px">${escapeXml(node.platform)}</font>`
-      );
+    for (const text of topoNodeExtras(node)) {
+      lines.push(`<font color="#667085" style="font-size:9px">${escapeXml(text)}</font>`);
     }
     return lines.join("<br>");
   }
@@ -3306,7 +3317,7 @@
           style: `rounded=1;whiteSpace=wrap;html=1;fillColor=${bandFill};strokeColor=none;opacity=60;`,
         },
         `<mxGeometry x="8" y="${row.y - 18}" width="${layout.width - 16}" height="${
-          TOPO.nodeHeight + 36
+          layout.nodeHeight + 36
         }" as="geometry"/>`
       );
       addCell(
@@ -3316,7 +3327,7 @@
           vertex: "1",
           style: "text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=middle;fontSize=11;fontStyle=1;fontColor=#1c2128;",
         },
-        `<mxGeometry x="20" y="${row.y + TOPO.nodeHeight / 2 - 8}" width="100" height="16" as="geometry"/>`
+        `<mxGeometry x="20" y="${row.y + layout.nodeHeight / 2 - 8}" width="100" height="16" as="geometry"/>`
       );
     }
 
