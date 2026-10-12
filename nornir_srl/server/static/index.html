@@ -134,6 +134,14 @@
             <button id="chat-open" class="btn" type="button" hidden title="Ask about this fabric">
               Ask
             </button>
+            <a
+              class="btn nav-btn help-link"
+              href="https://github.com/srl-labs/fcli#documentation"
+              target="_blank"
+              rel="noopener noreferrer"
+              title="Help: the fcli documentation on GitHub"
+              aria-label="Help: the fcli documentation on GitHub"
+            >?</a>
             <span id="live-dot" class="dot" aria-hidden="true"></span>
             <span id="live-label" class="muted">idle</span>
           </div>
@@ -409,6 +417,13 @@
                 <option value="traffic">traffic</option>
                 <option value="health">health</option>
               </select>
+            </label>
+            <label
+              class="field topo-ports"
+              title="Draw every client and Ethernet segment; off, only those of the node picked"
+            >
+              <input id="topo-attached" type="checkbox" checked />
+              <span class="muted">ES / clients</span>
             </label>
             <label class="field topo-ports">
               <input id="topo-port-labels" type="checkbox" />

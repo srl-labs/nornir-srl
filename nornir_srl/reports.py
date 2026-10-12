@@ -1513,6 +1513,11 @@ REPORTS: List[ReportSpec] = [
             # change without a hardware swap.
             SubscriptionSpec("/platform/chassis", datatype="state", sample_interval=60),
             SubscriptionSpec("/interface[name=*]/oper-state", datatype="all", sample_interval=30),
+            # The lag each port is bundled into: LLDP reports a host against the
+            # member port, the service and its ethernet-segment are on the lag.
+            SubscriptionSpec(
+                "/interface[name=*]/ethernet/aggregate-id", datatype="all", sample_interval=60
+            ),
             # Which of the down ports are only standing by, so the cable to a
             # multi-homed client is not drawn from the leaf that is not
             # forwarding.
