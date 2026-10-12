@@ -930,6 +930,30 @@ def test_the_cable_from_a_segment_to_its_client_carries_no_port():
     assert (bundle["ports"], bundle["count"]) == ([], 0)
 
 
+def test_a_host_seen_on_the_members_of_a_segment_lag_hangs_under_the_segment():
+    """LLDP runs per member port, while the service and the segment are on the lag."""
+
+    def leaf(name: str):
+        return _facts(
+            name,
+            host_name=name,
+            cables=(("ethernet-1/1", "host1", "eth1"),),
+            interfaces=({"name": "ethernet-1/1", "ethernet": {"aggregate-id": "lag1"}},),
+            instances=(_ni("mac-vrf-100", "mac-vrf", members=("lag1.100",)),),
+            segments=(("mh-host1", ESI, "lag1"),),
+        )
+
+    graph = build_topology([leaf("leaf1"), leaf("leaf2")])
+    assert [client["name"] for client in _clients(graph)] == ["host1"]
+    assert not [node for node in graph["nodes"] if node["role"] == "external"]
+    assert graph["unresolved"] == []
+    assert sorted(sorted((link["a"], link["b"])) for link in graph["links"]) == [
+        ["clab-dc-leaf1", f"es:{ESI}"],
+        ["clab-dc-leaf2", f"es:{ESI}"],
+        [f"es:{ESI}", "host1"],
+    ]
+
+
 def test_a_segment_on_one_leaf_only_is_still_that_one_client():
     graph = build_topology([_multi_homed_leaf("leaf1")])
     client = _clients(graph)[0]

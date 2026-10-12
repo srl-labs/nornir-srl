@@ -97,6 +97,7 @@
     topoTabs: el("topo-tabs"),
     topoDetail: el("topo-detail"),
     topoPortLabels: el("topo-port-labels"),
+    topoAttached: el("topo-attached"),
     topoMaxBw: el("topo-max-bw"),
     topoMaxBwUnit: el("topo-max-bw-unit"),
     topoHeatScale: el("topo-heat-scale"),
@@ -223,6 +224,7 @@
     topoFabric: null, // the fabric being drawn, or "all"
     // What the drawing is coloured by: "traffic", "health", or "service:<name>".
     topoOverlay: "traffic",
+    topoAttachedAnchor: null, // the node whose clients and segments are drawn when they are toggled off
     collapsedCards: new Set(),
     collapsedNodes: new Set(),
     // Incident cards already given their starting collapse, by incident and
@@ -2100,13 +2102,29 @@
     bridge: "M208.7,0H47.3C21.3,0,0,21.3,0,47.3v161.5c0,26,21.3,47.3,47.3,47.3h161.5c26,0,47.3-21.3,47.3-47.3V47.3 C256,21.3,234.7,0,208.7,0z M76.8,174.2H64v-49.3c3.7,5.2,8,9.9,12.8,14.1V174.2z M192,174.2h-12.8V139c4.8-4.2,9.1-8.9,12.8-14.1 V174.2z M128,144.3c-34.8,0-63.1-27.9-64-62.5h12.8c0.9,27.5,23.5,49.7,51.2,49.7s50.3-22.1,51.2-49.7H192 C191.1,116.4,162.8,144.3,128,144.3z",
   };
 
+  /** A node: a plain box with a couple of rows of port lights. */
+  function nodeIcon() {
+    const svg = svgEl("svg", { class: "node-icon", viewBox: "0 0 16 16", "aria-hidden": "true" });
+    svg.append(
+      svgEl("rect", { x: 1, y: 3, width: 14, height: 10, rx: 2, fill: "none", stroke: "currentColor", "stroke-width": 1.5 }),
+    );
+    for (const cy of [6.5, 9.5]) {
+      for (const cx of [4.5, 7, 9.5]) svg.append(svgEl("circle", { cx, cy, r: 0.9, fill: "currentColor" }));
+    }
+    return svg;
+  }
+
   // Lens cards name their icon with the emoji the CLI prints; these two map
   // onto the drawn glyphs, anything else stays text.
   const SERVICE_ICON_EMOJI = { "🔀": "router", "🌉": "bridge" };
 
-  /** A router or bridge-domain glyph, sized by the surrounding font. */
-  function serviceIcon(kind) {
-    const svg = svgEl("svg", { class: "service-icon", viewBox: "0 0 256 256", "aria-hidden": "true" });
+  /**
+   * A router or bridge-domain glyph, sized by the surrounding font; an
+   * *instance* one - a single node's ip-vrf or mac-vrf - in its own colour.
+   */
+  function serviceIcon(kind, instance = false) {
+    const cls = instance ? "service-icon is-instance" : "service-icon";
+    const svg = svgEl("svg", { class: cls, viewBox: "0 0 256 256", "aria-hidden": "true" });
     svg.append(svgEl("path", { d: SERVICE_ICON_PATHS[kind], fill: "currentColor" }));
     return svg;
   }
@@ -2264,7 +2282,7 @@
     renderTopoTabs(whole);
     renderTopoSummary(whole);
     renderTopoOverlayOptions(whole);
-    const graph = topoOverlayView(topoFabricView(whole));
+    const graph = topoOverlayView(topoAttachedView(topoFabricView(whole)));
     dom.topoCanvas.replaceChildren();
     renderTopoLegend(graph);
     renderTopoHeatLegend();
@@ -2284,7 +2302,7 @@
     const layout = layoutTopology(graph);
     state.topoSize = { width: layout.width, height: layout.height };
     const svg = svgEl("svg", {
-      class: "topo-svg",
+      class: `topo-svg${dom.topoPortLabels.checked ? " show-ports" : ""}`,
       viewBox: `0 0 ${layout.width} ${layout.height}`,
       role: "img",
       "aria-label": "Fabric topology",
@@ -2503,7 +2521,48 @@
   function topoFabricView(graph) {
     const id = currentTopoFabric(graph);
     if (id === "all") return graph;
-    const nodes = graph.nodes.filter((node) => (node.fabrics || []).includes(id));
+    return topoSubgraph(
+      graph,
+      graph.nodes.filter((node) => (node.fabrics || []).includes(id))
+    );
+  }
+
+  /**
+   * The drawing with its clients and segments, or - with them toggled off -
+   * only those of the node picked, so a leaf shows what hangs off it.
+   */
+  function topoAttachedView(graph) {
+    if (dom.topoAttached.checked) return graph;
+    const anchor = state.topoAttachedAnchor;
+    const byName = new Map(graph.nodes.map((node) => [node.name, node]));
+    const cabledTo = new Map();
+    for (const link of graph.links) {
+      for (const [near, far] of [[link.a, link.b], [link.b, link.a]]) {
+        if (!cabledTo.has(near)) cabledTo.set(near, new Set());
+        cabledTo.get(near).add(far);
+      }
+    }
+    // A host outside the inventory seen over LLDP on a leaf is a client too;
+    // one cabled to a spine or a gateway is a peer of the fabric and stays.
+    const isEdge = (node) =>
+      isTopoAttached(node) ||
+      (node.role === "external" &&
+        [...(cabledTo.get(node.name) || [])].every((peer) => (byName.get(peer) || {}).role === "leaf"));
+    return topoSubgraph(
+      graph,
+      graph.nodes.filter(
+        (node) =>
+          !isEdge(node) ||
+          node.name === anchor ||
+          (cabledTo.get(node.name) || new Set()).has(anchor) ||
+          (node.attachments || []).some((attachment) => attachment.node === anchor)
+      )
+    );
+  }
+
+  /** *graph* cut down to *nodes*: the cables, tiers and counts among them. */
+  function topoSubgraph(graph, nodes) {
+    if (nodes.length === graph.nodes.length) return graph;
     const names = new Set(nodes.map((node) => node.name));
     return {
       ...graph,
@@ -2775,7 +2834,9 @@
       }
       // Only a single cable can be labelled without the two ends colliding;
       // a bundle shows its size instead, and its ports in the detail panel.
-      if (dom.topoPortLabels.checked && !link.intra_layer && link.count === 1) {
+      // Drawn always: with the toggle off, the stylesheet shows them only on
+      // the cables of the node hovered or picked.
+      if (!link.intra_layer && link.count === 1) {
         const ports = link.ports[0];
         pair.append(
           portLabel(top, bottom, 0.18, shortPort(aIsTop ? ports.a_port : ports.b_port)),
@@ -2995,7 +3056,8 @@
         platform.textContent = node.platform;
         cell.append(platform);
       }
-      const badge = topoBadge(node, box);
+      // Findings are what the health overlay is about; elsewhere they clutter.
+      const badge = state.topoOverlay === "health" ? topoBadge(node, box) : null;
       if (badge) cell.append(badge);
       const title = svgEl("title");
       title.textContent = topoNodeTitle(node);
@@ -3006,10 +3068,14 @@
   }
 
   function topoNodeSub(node) {
+    // A segment is named per leaf, and the leaves may disagree: say each.
+    const esName = node.role === "segment" ? (node.names || []).join(" / ") : "";
     if (node.virtual) {
       const hops = ((node.ves && node.ves.next_hops) || []).map((hop) => hop.address);
-      return hops.length ? `nh ${hops.join(", ")}` : "virtual ES";
+      const what = hops.length ? `nh ${hops.join(", ")}` : "virtual ES";
+      return esName ? `${esName} · ${what}` : what;
     }
+    if (esName) return esName;
     if (isTopoAttached(node)) {
       // Being multi-homed is said before what is carried: the leaves under the
       // box are the point of it being a single box.
@@ -3078,9 +3144,9 @@
     }
     if (link.lost) parts.push("LLDP lost: drawn from what was seen before");
     if (link.note) parts.push(link.note);
-    for (const finding of link.findings || []) {
-      const ack = finding.acknowledged ? " (acknowledged)" : "";
-      parts.push(`${finding.severity}: ${finding.node} ${finding.check} ${finding.subject}${ack}`);
+    // Acknowledged findings have been looked at: the side panel still lists them.
+    for (const finding of (link.findings || []).filter((f) => !f.acknowledged)) {
+      parts.push(`${finding.severity}: ${finding.node} ${finding.check} ${finding.subject}`);
     }
     return parts.join(" · ");
   }
@@ -3390,6 +3456,11 @@
     state.topoSelection = selection;
     // The picked node is in the link to the page.
     syncCurrentVisit();
+    // With clients and segments off, the node picked brings its own in; a
+    // cable picked keeps what is drawn, as it may be one to a client.
+    const anchor = !selection ? null : selection.kind === "node" ? selection.id : state.topoAttachedAnchor;
+    const redraw = anchor !== state.topoAttachedAnchor && !dom.topoAttached.checked;
+    state.topoAttachedAnchor = anchor;
     // Walking the peer list of a client can lead to a node of another fabric,
     // which is drawn on its own tab; go there rather than nowhere.
     if (selection && selection.kind === "node") {
@@ -3399,7 +3470,8 @@
         return;
       }
     }
-    applyTopoSelection();
+    if (redraw && state.topology) renderTopology(state.topology);
+    else applyTopoSelection();
   }
 
   function applyTopoSelection() {
@@ -3969,6 +4041,7 @@
       } else {
         state.topoKey = "";
         state.topoSelection = null;
+        state.topoAttachedAnchor = null;
         loadTopology();
         topologyTimer = setInterval(loadTopology.tick, PANEL_LOADING_POLL_MS);
       }
@@ -5636,7 +5709,7 @@
     wrap.className = "bd-node-name";
 
     const name = document.createElement("span");
-    name.textContent = `🖥️ Node: ${nodeName}`;
+    name.append(nodeIcon(), `Node: ${nodeName}`);
     wrap.append(name);
 
     const isGateway = (nodeRows || []).some(isGatewayRow);
@@ -6001,7 +6074,7 @@
 
           const vrfName = document.createElement("span");
           const subnetsStr = row["Subnets"] ? ` (${row["Subnets"]})` : "";
-          vrfName.textContent = `📦 MAC-VRF: ${row["MAC-VRF"] || "-"}${subnetsStr}`;
+          vrfName.append(serviceIcon("bridge", true), `MAC-VRF: ${row["MAC-VRF"] || "-"}${subnetsStr}`);
 
           const vrfTitle = document.createElement("span");
           vrfTitle.className = "bd-vrf-title";
@@ -6398,7 +6471,7 @@
           vrfHeader.className = "bd-vrf-header";
 
           const vrfName = document.createElement("span");
-          vrfName.textContent = `📦 IP-VRF: ${row["IP-VRF"] || "-"}`;
+          vrfName.append(serviceIcon("router", true), `IP-VRF: ${row["IP-VRF"] || "-"}`);
 
           const vrfTitle = document.createElement("span");
           vrfTitle.className = "bd-vrf-title";
@@ -8185,6 +8258,15 @@
     }
   });
 
+  dom.topoAttached.addEventListener("change", () => {
+    try {
+      localStorage.setItem("fcli-topo-attached", dom.topoAttached.checked ? "" : "0");
+    } catch (_err) {
+      /* storage may be unavailable */
+    }
+    if (state.topology) renderTopology(state.topology);
+  });
+
   dom.topoPortLabels.addEventListener("change", () => {
     try {
       localStorage.setItem("fcli-topo-ports", dom.topoPortLabels.checked ? "1" : "");
@@ -8442,6 +8524,7 @@
 
   try {
     dom.topoPortLabels.checked = Boolean(localStorage.getItem("fcli-topo-ports"));
+    dom.topoAttached.checked = localStorage.getItem("fcli-topo-attached") !== "0";
   } catch (_err) {
     /* storage may be unavailable */
   }

@@ -74,6 +74,7 @@
   --role-spine: #2563eb;
   --role-dcgw: #b45309;
   --role-core: #7c3aed;
+  --service-instance: #2563eb;
   --role-unknown: #64748b;
   --role-external: #94a3b8;
 }
@@ -127,6 +128,7 @@
   --role-spine: #60a5fa;
   --role-dcgw: #fbbf24;
   --role-core: #c084fc;
+  --service-instance: #60a5fa;
   --role-unknown: #8b95a3;
   --role-external: #64748b;
 }
@@ -1909,6 +1911,22 @@ th.filtered::after {
   color: var(--accent);
 }
 
+/* A node in a service card: a neutral box, not a service colour. */
+.node-icon {
+  width: 1em;
+  height: 1em;
+  margin-right: 6px;
+  vertical-align: -0.15em;
+  color: var(--muted);
+}
+
+/* A single node's ip-vrf / mac-vrf: the service's glyph, set apart from it. */
+.service-icon.is-instance {
+  color: var(--service-instance);
+  margin-right: 6px;
+  vertical-align: -0.15em;
+}
+
 .bd-title {
   color: var(--text);
   font-family: var(--font-mono);
@@ -2594,6 +2612,18 @@ th.filtered::after {
   font-size: 10px;
   font-family: var(--font-mono);
   pointer-events: none;
+}
+
+/* Port labels off: only the cables of the node hovered or picked carry them. */
+.topo-svg:not(.show-ports) .topo-link-pair:not(.is-hot) .topo-port {
+  display: none;
+}
+
+.topo-svg:not(.show-ports) .topo-link-pair.is-hot .topo-port {
+  fill: var(--text);
+  paint-order: stroke;
+  stroke: var(--bg);
+  stroke-width: 3px;
 }
 
 .topo-node {

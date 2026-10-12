@@ -186,6 +186,8 @@ class NodeFacts:
     attachments: List[Attachment] = field(default_factory=list)
     #: The ethernet-segment on each port that is in one.
     segments: Dict[str, Segment] = field(default_factory=dict)
+    #: The lag each member port is bundled into.
+    lag_of: Dict[str, str] = field(default_factory=dict)
     #: Egress of each interface, in bits per second, from streamed counters.
     egress: Dict[str, int] = field(default_factory=dict)
     #: The mac-vrfs and ip-vrfs it carries, by name: what a service overlay
@@ -281,6 +283,7 @@ def node_facts(
                 )
             )
     facts.segments = _segments(system)
+    facts.lag_of = _lag_members(snapshot)
     return facts
 
 
@@ -299,6 +302,7 @@ def build_topology(facts: Iterable[NodeFacts]) -> Dict[str, Any]:
     outside_ports: Dict[Tuple[str, str], str] = {}
 
     for node in nodes:
+        serving = {attachment.port for attachment in node.attachments}
         for adj in node.adjacencies:
             target = _resolve(adj.peer, aliases)
             if target == node.name:  # a neighbour on our own name is a loop
@@ -306,7 +310,14 @@ def build_topology(facts: Iterable[NodeFacts]) -> Dict[str, Any]:
             if target is None:
                 target = adj.peer
                 outside.setdefault(target, set()).add(node.name)
+                # LLDP runs per member port; the service is on the lag.
+                bundle = node.lag_of.get(adj.local_port, adj.local_port)
                 outside_ports[(node.name, adj.local_port)] = target
+                outside_ports[(node.name, bundle)] = target
+                # A client on an ethernet-segment is cabled to the segment and
+                # the segment down to it, not to the leaf straight.
+                if bundle in node.segments and bundle in serving:
+                    continue
             else:
                 fabric_ports[node.name].add(adj.local_port)
                 peers[node.name].add(target)
@@ -1089,6 +1100,17 @@ def _first_prefix(detail: Dict[str, Any]) -> str:
             if prefix:
                 return str(prefix)
     return ""
+
+
+def _lag_members(snapshot: Dict[str, Any]) -> Dict[str, str]:
+    """Map member port -> the lag it is bundled into."""
+    result = {}
+    for itf in _as_list(snapshot.get("interface")):
+        ethernet = itf.get("ethernet")
+        lag = ethernet.get("aggregate-id") if isinstance(ethernet, dict) else None
+        if itf.get("name") and lag:
+            result[str(itf["name"])] = str(lag)
+    return result
 
 
 def _interface_states(snapshot: Dict[str, Any]) -> Dict[str, str]:
