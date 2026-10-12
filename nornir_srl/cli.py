@@ -814,6 +814,11 @@ def run_lens(
 # ------------------------- commands -------------------------
 
 
+#: Where a detached server logs, unless SERVER_LOG_ENV names another file.
+SERVER_LOG_DEFAULT = "fcli-server.log"
+SERVER_LOG_ENV = "FCLI_SERVER_LOG"
+
+
 @app.command()
 def server(
     ctx: typer.Context,
@@ -898,6 +903,13 @@ def server(
         help="Days of changes the history keeps; 0 keeps them all. Baselines and "
         "configurations are kept until deleted",
     ),
+    daemon: bool = typer.Option(
+        False,
+        "--daemon",
+        "-d",
+        help=f"Detach and run in the background. Logs go to ./{SERVER_LOG_DEFAULT}, "
+        f"or to the file in {SERVER_LOG_ENV}",
+    ),
 ) -> None:
     """Serves live report tables over HTTP, fed by gNMI subscriptions"""
     from .server.app import serve
@@ -917,6 +929,10 @@ def server(
         f"fcli server on http://{listen}:{port} "
         f"({len(target.inventory.hosts)} node(s))"
     )
+    if daemon:
+        # Before serve(): forking a process that already runs the gNMI threads
+        # would leave them behind in the parent.
+        _daemonize(Path(os.environ.get(SERVER_LOG_ENV) or SERVER_LOG_DEFAULT).resolve())
     serve(
         target,
         host=listen,
@@ -937,6 +953,40 @@ def server(
         history_dir=history_dir,
         retention_days=history_days,
     )
+
+
+def _daemonize(log_path: Path) -> None:
+    """Detach from the terminal: double fork, new session, output to *log_path*.
+
+    Returns in the daemon only; the process that was started exits once it has
+    said where the server went.
+    """
+    if not hasattr(os, "fork"):
+        typer.echo("--daemon needs a POSIX system", err=True)
+        raise typer.Exit(1)
+    try:
+        log = open(log_path, "a", buffering=1)
+    except OSError as exc:
+        typer.echo(f"--daemon: cannot open log file {log_path}: {exc}", err=True)
+        raise typer.Exit(1) from None
+    sys.stdout.flush()
+    sys.stderr.flush()
+    if os.fork():
+        os._exit(0)
+    os.setsid()
+    pid = os.fork()
+    if pid:
+        # The session leader goes; the grandchild can never take a terminal back.
+        typer.echo(f"fcli server detached, pid {pid}, logging to {log_path}")
+        os._exit(0)
+    os.umask(0o022)
+    with open(os.devnull, "rb") as devnull:
+        os.dup2(devnull.fileno(), sys.stdin.fileno())
+    # Logging and anything printed - uvicorn's own lines, a traceback - end up
+    # in the log: the root handler writes to stderr, which is now the file.
+    os.dup2(log.fileno(), sys.stdout.fileno())
+    os.dup2(log.fileno(), sys.stderr.fileno())
+    log.close()
 
 
 FIELD_FILTER = typer.Option(

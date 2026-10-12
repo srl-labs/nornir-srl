@@ -61,6 +61,14 @@ The global options are the same as for the CLI, so the server can be pointed at 
 ╰──────────────────────────────────────────────────────────────────────────────╯
 ```
 
+`-d` / `--daemon` detaches the server from the terminal and runs it in the background. What it would have printed goes to `fcli-server.log` in the current directory, or to the file `FCLI_SERVER_LOG` names. Raise `--log-level` to see more than errors in it; stop it with `kill <pid>`:
+
+```
+❯ FCLI_SERVER_LOG=/var/log/fcli.log fcli -t topo.clab.yml --log-level INFO server -d
+fcli server on http://127.0.0.1:8080 (6 node(s))
+fcli server detached, pid 41234, logging to /var/log/fcli.log
+```
+
 The server binds to localhost by default. It has no authentication of its own, so put it behind a reverse proxy (or keep it on localhost) before exposing it with `--listen 0.0.0.0`.
 
 ## In the browser
